@@ -29,9 +29,22 @@ enum SyncCore {
     }
 
     struct ProtectedOriginal: Decodable, Identifiable, Sendable {
+        struct WaitingPeer: Decodable, Identifiable, Sendable {
+            enum State: String, Decodable, Sendable {
+                case confirmation
+                case events
+            }
+
+            let peer: String
+            let state: State
+            var id: String { peer }
+        }
+
         let hash: [UInt8]
         let names: [String]
         let bytes: UInt64?
+        let conflict: Bool
+        let waiting: [WaitingPeer]
 
         var id: [UInt8] { hash }
     }

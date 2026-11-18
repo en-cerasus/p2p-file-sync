@@ -154,9 +154,7 @@ internal sealed class SyncWindow : Window
                 : SyncCore.ErrorMessage(pull.Status);
             if (pull.Status == 0)
             {
-                originalList.ItemsSource = pull.Originals.Select(original =>
-                    $"{(original.Names.Length == 0 ? "名称不明" : string.Join("、", original.Names))} · " +
-                    (original.Bytes is ulong bytes ? $"{bytes:N0} バイト" : "本体未取得")).ToArray();
+                originalList.ItemsSource = pull.Originals.Select(original => original.DisplayText()).ToArray();
                 originals.Visibility = pull.Originals.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
             }
         }
@@ -192,9 +190,30 @@ internal static class SyncCore
         public ulong ProtectedMissing;
     }
 
+    internal sealed record WaitingPeer(
+        [property: JsonPropertyName("peer")] string Peer,
+        [property: JsonPropertyName("state")] string State);
+
     internal sealed record ProtectedOriginal(
         [property: JsonPropertyName("names")] string[] Names,
-        [property: JsonPropertyName("bytes")] ulong? Bytes);
+        [property: JsonPropertyName("bytes")] ulong? Bytes,
+        [property: JsonPropertyName("conflict")] bool Conflict,
+        [property: JsonPropertyName("waiting")] WaitingPeer[] Waiting)
+    {
+        public string DisplayText()
+        {
+            var names = Names.Length == 0 ? "名称不明" : string.Join("、", Names);
+            var size = Bytes is ulong bytes ? $"{bytes:N0} バイト" : "本体未取得";
+            var heading = $"{names} · {size}";
+            if (Conflict)
+            {
+                heading += " · 競合未解決";
+            }
+            return string.Join("\n", Waiting.Select(peer =>
+                $"{(peer.State == "events" ? "変更の受信待ち" : "ピアの確認待ち")}  {peer.Peer[..12]}")
+                .Prepend(heading));
+        }
+    }
 
     internal static (int Status, PullSummary Summary, ProtectedOriginal[] Originals) Pull(string config, string state, string destination)
     {

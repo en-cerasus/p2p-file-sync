@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     blob::{Blob, BlobStore},
     materialize::AppliedFile,
-    replica::{EventId, ObjectId},
-    retention::Protection,
+    replica::{ContentHash, EventId, ObjectId, PeerId},
+    retention::{PeerState, Protection},
     store::{decode, decode_column, encode, Store, StoreError},
 };
 
@@ -48,17 +48,33 @@ impl Store {
     /// List unique contents required by unconfirmed peers or a live conflict.
     pub fn protected_originals(&self, blobs: &BlobStore) -> io::Result<Vec<ProtectedOriginal>> {
         let replica = self.replica();
-        let mut originals = BTreeMap::<_, BTreeSet<String>>::new();
+        let mut originals = BTreeMap::<ContentHash, OriginalReferences>::new();
         for protection in self.active_protections() {
-            let event = replica.get(protection.original());
-            let names = originals.entry(protection.content()).or_default();
-            if let Some(entry) = event.and_then(|event| event.change.entry()) {
-                names.insert(entry.name.clone());
+            let references = originals.entry(protection.content()).or_default();
+            if let Some(event) = replica.get(protection.original()) {
+                references.conflict |= replica.has_conflict(event.object);
+                if let Some(entry) = event.change.entry() {
+                    references.names.insert(entry.name.clone());
+                }
+            }
+            for (peer, state) in protection.peer_states(replica.clock()) {
+                let waiting = match state {
+                    PeerState::AwaitingConfirmation => WaitingFor::Confirmation,
+                    PeerState::AwaitingEvents { .. } => WaitingFor::Events,
+                    PeerState::Applied => continue,
+                };
+                references
+                    .waiting
+                    .entry(peer)
+                    .and_modify(|state| {
+                        *state = (*state).max(waiting);
+                    })
+                    .or_insert(waiting);
             }
         }
         originals
             .into_iter()
-            .map(|(hash, names)| {
+            .map(|(hash, references)| {
                 let bytes = match blobs.open_candidate(hash) {
                     Ok(file) => {
                         let metadata = file.metadata()?;
@@ -67,7 +83,20 @@ impl Store {
                     Err(error) if error.kind() == io::ErrorKind::NotFound => None,
                     Err(error) => return Err(error),
                 };
-                Ok(ProtectedOriginal { hash, names, bytes })
+                Ok(ProtectedOriginal {
+                    hash,
+                    names: references.names,
+                    bytes,
+                    conflict: references.conflict,
+                    waiting: references
+                        .waiting
+                        .into_iter()
+                        .map(|(peer, state)| WaitingPeer {
+                            peer: peer.iter().map(|byte| format!("{byte:02x}")).collect(),
+                            state,
+                        })
+                        .collect(),
+                })
             })
             .collect()
     }
@@ -133,6 +162,29 @@ pub struct ProtectedOriginal {
     pub names: BTreeSet<String>,
     /// None when the local store lacks the original contents.
     pub bytes: Option<u64>,
+    pub conflict: bool,
+    pub waiting: Vec<WaitingPeer>,
+}
+
+#[derive(Default)]
+struct OriginalReferences {
+    names: BTreeSet<String>,
+    conflict: bool,
+    waiting: BTreeMap<PeerId, WaitingFor>,
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize)]
+pub struct WaitingPeer {
+    pub peer: String,
+    pub state: WaitingFor,
+}
+
+// When one peer waits on multiple successors, show the least advanced state.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitingFor {
+    Events,
+    Confirmation,
 }
 
 pub(crate) fn record_archive(

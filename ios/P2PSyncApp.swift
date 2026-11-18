@@ -50,10 +50,21 @@ struct DirectSyncView: View {
             if !originals.isEmpty {
                 DisclosureGroup("保護原本の一覧") {
                     ForEach(originals) { original in
-                        LabeledContent(
-                            original.names.isEmpty ? "名称不明" : original.names.joined(separator: "、"),
-                            value: original.bytes.map { "\($0.formatted()) バイト" } ?? "本体未取得"
-                        )
+                        VStack(alignment: .leading) {
+                            LabeledContent(
+                                original.names.isEmpty ? "名称不明" : original.names.joined(separator: "、"),
+                                value: original.bytes.map { "\($0.formatted()) バイト" } ?? "本体未取得"
+                            )
+                            if original.conflict {
+                                Text("競合未解決").font(.caption)
+                            }
+                            ForEach(original.waiting) { peer in
+                                let status = peer.state == .events ? "変更の受信待ち" : "ピアの確認待ち"
+                                Text("\(status)  \(String(peer.peer.prefix(12)))")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
                     }
                 }
             }

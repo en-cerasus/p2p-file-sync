@@ -709,6 +709,7 @@ fn protected_storage_counts_unique_content_and_reports_missing_blobs() {
         },
         ..event(4, content_entry(old.hash))
     };
+    let deletion = next.id;
     store.apply_verified(next).unwrap();
 
     let report = store.protected_storage(&f.blobs).unwrap();
@@ -718,8 +719,40 @@ fn protected_storage_counts_unique_content_and_reports_missing_blobs() {
     assert_eq!(originals[0].hash, old.hash);
     assert_eq!(originals[0].bytes, Some(3));
     assert!(originals[0].names.contains(&content_entry(old.hash).name));
+    assert!(!originals[0].conflict);
+    assert_eq!(originals[0].waiting.len(), 1);
+    assert_eq!(originals[0].waiting[0].peer, "02".repeat(32));
+    assert_eq!(
+        originals[0].waiting[0].state,
+        p2p_sync_core::archive::WaitingFor::Confirmation
+    );
     let empty = BlobStore::open(f.folder.path().join("empty-blobs")).unwrap();
     let report = store.protected_storage(&empty).unwrap();
     assert_eq!((report.files, report.bytes, report.missing), (0, 0, 1));
     assert_eq!(store.protected_originals(&empty).unwrap()[0].bytes, None);
+
+    for (object, successor) in [(OBJECT, f.intent.event), (other, deletion)] {
+        store
+            .confirm_verified(p2p_sync_core::retention::Confirmation {
+                generation: 1,
+                peer: PEER,
+                object,
+                successor,
+                sent_through: 5,
+            })
+            .unwrap();
+    }
+    let originals = store.protected_originals(&f.blobs).unwrap();
+    assert_eq!(
+        originals[0].waiting[0].state,
+        p2p_sync_core::archive::WaitingFor::Events
+    );
+    store
+        .apply_verified(Event {
+            object: [79; 16],
+            change: Change::Create(content_entry(old.hash)),
+            ..event(5, content_entry(old.hash))
+        })
+        .unwrap();
+    assert!(store.protected_originals(&f.blobs).unwrap().is_empty());
 }
