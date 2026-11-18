@@ -60,7 +60,7 @@ fn selected_files_are_verified_and_signed_and_names_are_collision_checked() {
 
 #[test]
 fn updates_and_tombstones_share_the_same_object_and_retain_previous_versions() {
-    use p2p_sync_core::generation::{GenerationTransition, TransitionError};
+    use p2p_sync_core::generation::{CheckpointDataError, GenerationTransition, TransitionError};
     use std::time::SystemTime;
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("song.tja");
@@ -128,12 +128,35 @@ fn updates_and_tombstones_share_the_same_object_and_retain_previous_versions() {
     let verified =
         GenerationTransition::verify(&wire, &administrator.verifying_key(), checkpoint.share, 1)
             .unwrap();
-    assert_eq!(verified.verify_checkpoint(&bytes), Ok(checkpoint));
+    let authenticated = verified.verify_checkpoint(&bytes).unwrap();
+    assert_eq!(authenticated, checkpoint);
     *bytes.last_mut().unwrap() ^= 1;
     assert_eq!(
         verified.verify_checkpoint(&bytes),
         Err(TransitionError::WrongCheckpoint)
     );
+    let staged = BlobStore::open(directory.path().join("staged")).unwrap();
+    let empty = BlobStore::open(directory.path().join("empty")).unwrap();
+    assert!(matches!(
+        authenticated.stage_contents(&empty, &staged),
+        Err(CheckpointDataError::Content { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound
+    ));
+    assert_eq!(authenticated.stage_contents(&blobs, &staged).unwrap(), 2);
+    assert_eq!(authenticated.stage_contents(&empty, &staged).unwrap(), 2);
+    let archived = history[0].content;
+    assert!(staged.open_verified(archived).is_ok());
+    let name: String = archived
+        .hash
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    std::fs::write(directory.path().join("staged").join(name), b"changed").unwrap();
+    assert!(matches!(
+        authenticated.stage_contents(&blobs, &staged),
+        Err(CheckpointDataError::Content { hash, source })
+            if hash == archived.hash && source.kind() == std::io::ErrorKind::InvalidData
+    ));
     assert_eq!(std::fs::read(source).unwrap(), b"second");
     for contents in [b"first".as_slice(), b"second".as_slice()] {
         assert!(blobs

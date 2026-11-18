@@ -1,6 +1,7 @@
 //! An administrative authorization for an explicit share-generation transition.
 
 use std::collections::BTreeMap;
+use std::io;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -8,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     archive::ArchivedFile,
     auth::Role,
-    replica::{ContentHash, Event, EventId, PeerId, VersionVector},
+    blob::{Blob, BlobStore},
+    replica::{ContentHash, EntryKind, Event, EventId, PeerId, VersionVector},
 };
 
 const DOMAIN: &[u8] = b"p2p-file-sync/generation-transition/v1\0";
@@ -43,6 +45,107 @@ impl GenerationCheckpoint {
     pub fn encode(&self) -> Result<Vec<u8>, postcard::Error> {
         postcard::to_allocvec(self)
     }
+
+    /// Copy the unique live, protected and archived contents of a verified
+    /// checkpoint. Partial results can be reused, but do not activate it.
+    pub fn stage_contents(
+        &self,
+        source: &BlobStore,
+        destination: &BlobStore,
+    ) -> Result<usize, CheckpointDataError> {
+        let contents = self.required_contents()?;
+        for (&hash, &length) in &contents {
+            let error = |source| CheckpointDataError::Content { hash, source };
+            match destination.open_candidate(hash) {
+                Ok(file) => {
+                    let blob = content_metadata(&file, hash, length).map_err(error)?;
+                    drop(file);
+                    destination.open_verified(blob).map_err(error)?;
+                    continue;
+                }
+                Err(missing) if missing.kind() == io::ErrorKind::NotFound => {}
+                Err(other) => return Err(error(other)),
+            }
+            let file = source.open_candidate(hash).map_err(error)?;
+            let blob = content_metadata(&file, hash, length).map_err(error)?;
+            destination.put(blob, file).map_err(error)?;
+        }
+        Ok(contents.len())
+    }
+
+    fn required_contents(&self) -> Result<BTreeMap<ContentHash, Option<u64>>, CheckpointDataError> {
+        let events: BTreeMap<_, _> = self.events.iter().map(|event| (event.id, event)).collect();
+        if events.len() != self.events.len() {
+            return Err(CheckpointDataError::InvalidReference);
+        }
+        let event = |id| {
+            events
+                .get(&id)
+                .copied()
+                .ok_or(CheckpointDataError::InvalidReference)
+        };
+        let file_hash = |event: &Event| match event.change.entry()?.kind {
+            EntryKind::File(hash) => Some(hash),
+            EntryKind::Directory => None,
+        };
+        let mut contents = BTreeMap::new();
+        for &head in &self.heads {
+            if let Some(hash) = file_hash(event(head)?) {
+                contents.insert(hash, None);
+            }
+        }
+        for reference in &self.protected {
+            let original = event(reference.original)?;
+            if original.object != event(reference.successor)?.object
+                || file_hash(original) != Some(reference.hash)
+            {
+                return Err(CheckpointDataError::InvalidReference);
+            }
+            contents.insert(reference.hash, None);
+        }
+        for archive in &self.archives {
+            let original = event(archive.event)?;
+            let blob = archive.content;
+            if original.object != archive.object
+                || event(archive.replaced_by)?.object != archive.object
+                || file_hash(original) != Some(blob.hash)
+                || contents
+                    .insert(blob.hash, Some(blob.length))
+                    .flatten()
+                    .is_some_and(|previous| previous != blob.length)
+            {
+                return Err(CheckpointDataError::InvalidReference);
+            }
+        }
+        Ok(contents)
+    }
+}
+
+#[derive(Debug)]
+pub enum CheckpointDataError {
+    InvalidReference,
+    Content {
+        hash: ContentHash,
+        source: io::Error,
+    },
+}
+
+fn content_metadata(
+    file: &std::fs::File,
+    hash: ContentHash,
+    length: Option<u64>,
+) -> io::Result<Blob> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || length.is_some_and(|length| metadata.len() != length) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid checkpoint blob",
+        ));
+    }
+    Ok(Blob {
+        hash,
+        length: metadata.len(),
+    })
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -371,6 +371,18 @@ fn a_fresh_peer_caches_all_conflicting_versions_without_publishing_a_winner() {
         .generation_checkpoint(std::time::SystemTime::now())
         .unwrap();
     assert_eq!(checkpoint.frontier, *receiver.replica().clock());
+    let staged = BlobStore::open(folder.path().join("staged")).unwrap();
+    let missing = Blob {
+        hash: sha256(b"missing"),
+        length: 7,
+    };
+    assert!(matches!(
+        checkpoint.stage_contents(&completed, &staged),
+        Err(p2p_sync_core::generation::CheckpointDataError::Content { hash, source })
+            if hash == missing.hash && source.kind() == io::ErrorKind::NotFound
+    ));
+    completed.put(missing, &b"missing"[..]).unwrap();
+    assert_eq!(checkpoint.stage_contents(&completed, &staged).unwrap(), 6);
     let heads: Vec<_> = checkpoint
         .events
         .iter()
