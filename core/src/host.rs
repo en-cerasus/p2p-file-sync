@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     io::Read,
     net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
@@ -68,6 +68,7 @@ pub struct Sender {
     signer: PeerSigningKey,
     store: Store,
     completed: BlobStore,
+    write_lock: PathBuf,
     private_paths: Vec<PathBuf>,
 }
 
@@ -122,14 +123,14 @@ impl Sender {
         let config_directory = configuration.parent().ok_or(HostError::Configuration)?;
         let private_paths = [
             configuration.to_owned(),
-            root,
+            root.clone(),
             config_directory.join(config.private_key_der),
             config_directory.join(&config.event_key),
         ]
         .into_iter()
         .map(|path| fs::canonicalize(path).map_err(HostError::Io))
         .collect::<Result<_, _>>()?;
-        Ok(Self {
+        let mut sender = Self {
             address: config.bind,
             client_pins,
             server,
@@ -137,11 +138,34 @@ impl Sender {
             signer,
             store,
             completed,
+            write_lock: root.join("write.lock"),
             private_paths,
-        })
+        };
+        let _lock = sender.lock_state()?;
+        sender.sweep_archives()?;
+        Ok(sender)
+    }
+
+    fn lock_state(&self) -> Result<File, HostError> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&self.write_lock)
+            .map_err(HostError::Io)?;
+        file.lock().map_err(HostError::Io)?;
+        Ok(file)
+    }
+
+    fn sweep_archives(&mut self) -> Result<(), HostError> {
+        self.store
+            .sweep_sender_archives(&self.completed, std::time::SystemTime::now())
+            .map_err(HostError::Store)
     }
 
     pub fn publish(&mut self, source: &Path) -> Result<EventId, HostError> {
+        let _lock = self.lock_state()?;
         let name = source
             .file_name()
             .and_then(|name| name.to_str())
@@ -159,6 +183,7 @@ impl Sender {
     }
 
     pub fn publish_tree(&mut self, root: &Path) -> Result<TreeSummary, HostError> {
+        let _lock = self.lock_state()?;
         publish_tree(
             root,
             &mut self.store,
@@ -184,6 +209,8 @@ impl Sender {
     }
 
     pub fn refresh_tree(&mut self, root: &Path) -> Result<TreeSummary, HostError> {
+        let _lock = self.lock_state()?;
+        self.sweep_archives()?;
         refresh_tree(
             root,
             &mut self.store,
@@ -201,6 +228,7 @@ impl Sender {
         shared_path: &str,
         source: Option<&Path>,
     ) -> Result<EventId, HostError> {
+        let _lock = self.lock_state()?;
         let target: Vec<_> = shared_path
             .split('/')
             .map(collision_key)
@@ -255,6 +283,10 @@ impl Sender {
     }
 
     pub fn serve(&mut self, socket: TcpStream) -> Result<(), HostError> {
+        {
+            let _lock = self.lock_state()?;
+            self.sweep_archives()?;
+        }
         direct::serve(
             &self.server,
             socket,

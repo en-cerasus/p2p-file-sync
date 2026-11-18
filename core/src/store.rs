@@ -26,6 +26,7 @@ pub struct Membership {
 #[derive(Debug)]
 pub enum StoreError {
     Sql(rusqlite::Error),
+    Io(std::io::Error),
     Decode(postcard::Error),
     UnsupportedSchema(u32),
     WrongMembership,

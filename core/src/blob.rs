@@ -68,6 +68,14 @@ impl BlobStore {
         File::open(self.path(hash))
     }
 
+    pub(crate) fn remove_archived(&self, hash: ContentHash) -> io::Result<()> {
+        match fs::remove_file(self.path(hash)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     fn path(&self, hash: ContentHash) -> PathBuf {
         const HEX: &[u8; 16] = b"0123456789abcdef";
         let mut name = String::with_capacity(hash.len() * 2);

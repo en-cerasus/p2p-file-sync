@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     blob::{Blob, BlobStore},
     materialize::AppliedFile,
-    replica::{ContentHash, EventId, ObjectId, PeerId},
+    replica::{ContentHash, EntryKind, EventId, ObjectId, PeerId},
     retention::{PeerState, Protection},
     store::{decode, decode_column, encode, Store, StoreError},
 };
@@ -154,6 +154,61 @@ impl Store {
             [threshold],
         )?)
     }
+
+    /// The sender holds its state-directory lock for the duration of the
+    /// sweep, excluding any operation that writes blobs or publishes events.
+    pub(crate) fn sweep_sender_archives(
+        &mut self,
+        blobs: &BlobStore,
+        now: SystemTime,
+    ) -> Result<(), StoreError> {
+        self.refresh()?;
+        let threshold = unix_seconds(now)?.saturating_sub(RETENTION_SECONDS);
+        let mut retained: BTreeSet<_> =
+            self.active_protections().map(Protection::content).collect();
+        retained.extend(self.replica().objects().flat_map(|object| {
+            self.replica()
+                .heads(object)
+                .filter_map(|event| match event.change.entry()?.kind {
+                    EntryKind::File(hash) => Some(hash),
+                    EntryKind::Directory => None,
+                })
+        }));
+        let mut expired = BTreeMap::<ContentHash, Vec<i64>>::new();
+        {
+            let mut statement = self
+                .connection
+                .prepare("SELECT id, recorded_at, object, payload FROM file_archive")?;
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                let record: ArchivedFile = decode(&decode_column(row, 3)?)?;
+                if row.get::<_, i64>(1)? != record.archived_at
+                    || row.get::<_, Vec<u8>>(2)? != record.object
+                {
+                    return Err(StoreError::InvalidRecord);
+                }
+                if record.archived_at > threshold {
+                    retained.insert(record.content.hash);
+                } else {
+                    expired
+                        .entry(record.content.hash)
+                        .or_default()
+                        .push(row.get(0)?);
+                }
+            }
+        }
+        let tx = self.connection.transaction()?;
+        for (hash, rows) in expired {
+            if retained.contains(&hash) {
+                continue;
+            }
+            blobs.remove_archived(hash).map_err(StoreError::Io)?;
+            for id in rows {
+                tx.execute("DELETE FROM file_archive WHERE id = ?1", [id])?;
+            }
+        }
+        Ok(tx.commit()?)
+    }
 }
 
 #[derive(Debug, Eq, PartialEq, Serialize)]
@@ -220,4 +275,100 @@ fn unix_seconds(time: SystemTime) -> Result<i64, StoreError> {
         .duration_since(UNIX_EPOCH)
         .map_err(|_| StoreError::InvalidRecord)?;
     i64::try_from(since_epoch.as_secs()).map_err(|_| StoreError::InvalidRecord)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        auth::{PeerSigningKey, Role, Roster},
+        publish::{publish_file, revise_file},
+        retention::Confirmation,
+        sha256,
+    };
+    use std::{fs, time::Duration};
+
+    #[test]
+    fn expired_sender_blob_is_kept_until_confirmed_and_no_longer_live() {
+        let folder = tempfile::tempdir().unwrap();
+        let source = folder.path().join("source.tja");
+        let blobs = BlobStore::open(folder.path().join("files")).unwrap();
+        let key = PeerSigningKey::from_bytes(&[9; 32]);
+        let writer = key.verifying_key().to_bytes();
+        let reader = PeerSigningKey::from_bytes(&[14; 32])
+            .verifying_key()
+            .to_bytes();
+        let roster = Roster::new(
+            [2; 16],
+            1,
+            [(writer, Role::Writer), (reader, Role::Reader)].into(),
+        );
+        let mut store = Store::open(":memory:", roster.membership().clone()).unwrap();
+        let blob = Blob {
+            hash: sha256(b"original"),
+            length: 8,
+        };
+        fs::write(&source, b"original").unwrap();
+        let first = publish_file(
+            &source,
+            &mut store,
+            &roster,
+            &key,
+            &blobs,
+            None,
+            "first.tja",
+        )
+        .unwrap();
+        let second = publish_file(
+            &source,
+            &mut store,
+            &roster,
+            &key,
+            &blobs,
+            None,
+            "second.tja",
+        )
+        .unwrap();
+        let deleted = revise_file(None, &mut store, &roster, &key, &blobs, first).unwrap();
+        let after_expiry = || SystemTime::now() + Duration::from_secs(RETENTION_SECONDS as u64 + 1);
+        store
+            .sweep_sender_archives(&blobs, SystemTime::now())
+            .unwrap();
+        assert_eq!(store.archives(SystemTime::now()).unwrap().len(), 1);
+        store.sweep_sender_archives(&blobs, after_expiry()).unwrap();
+        assert!(blobs.open_verified(blob).is_ok());
+        let object = store.replica().get(deleted).unwrap().object;
+        store
+            .confirm_verified(Confirmation {
+                generation: 1,
+                peer: reader,
+                object,
+                successor: deleted,
+                sent_through: 0,
+            })
+            .unwrap();
+        store.sweep_sender_archives(&blobs, after_expiry()).unwrap();
+        assert!(blobs.open_verified(blob).is_ok());
+        let deleted = revise_file(None, &mut store, &roster, &key, &blobs, second).unwrap();
+        let object = store.replica().get(deleted).unwrap().object;
+        store.sweep_sender_archives(&blobs, after_expiry()).unwrap();
+        assert!(blobs.open_verified(blob).is_ok());
+        store
+            .confirm_verified(Confirmation {
+                generation: 1,
+                peer: reader,
+                object,
+                successor: deleted,
+                sent_through: 0,
+            })
+            .unwrap();
+        store.sweep_sender_archives(&blobs, after_expiry()).unwrap();
+        store.sweep_sender_archives(&blobs, after_expiry()).unwrap();
+        assert_eq!(
+            blobs.open_verified(blob).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert!(store.replica().get(deleted).is_some());
+        assert!(store.archives(SystemTime::now()).unwrap().is_empty());
+    }
 }
