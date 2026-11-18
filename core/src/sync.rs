@@ -321,6 +321,14 @@ fn publish_heads(
         };
         let is_update = previous.is_some() && previous != desired;
         check_cancelled(cancelled)?;
+        #[cfg(not(windows))]
+        if is_update {
+            // This platform has no conditional existing-file adapter yet.
+            // Keep the verified content cached, but do not create an intent
+            // that cannot be recovered and would block a later revision.
+            report.files.push((object, FileResult::PendingRecovery));
+            continue;
+        }
         store
             .stage_file(
                 destination.completed,
@@ -350,8 +358,7 @@ fn publish_heads(
                 report.files.push((object, update_result(outcome)));
                 continue;
             }
-            report.files.push((object, FileResult::PendingRecovery));
-            continue;
+            unreachable!("non-Windows transitions returned before staging");
         }
         let outcome = store
             .recover_new_file(destination.completed, destination.root, object)

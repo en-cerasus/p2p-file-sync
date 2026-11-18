@@ -466,7 +466,7 @@ fn a_fresh_peer_caches_all_conflicting_versions_without_publishing_a_winner() {
 }
 
 #[test]
-fn an_applied_file_gets_a_durable_update_intent_with_verified_old_and_new_content() {
+fn an_applied_file_updates_or_keeps_unapplied_version_without_stale_intent() {
     use p2p_sync_core::{
         blob::{Blob, BlobStore},
         materialize::FileIntent,
@@ -571,15 +571,7 @@ fn an_applied_file_gets_a_durable_update_intent_with_verified_old_and_new_conten
     #[cfg(not(windows))]
     {
         assert_eq!(report.files, [(object, FileResult::PendingRecovery)]);
-        assert_eq!(
-            store.pending_files().unwrap(),
-            [FileIntent {
-                object,
-                event: revision.id,
-                previous: Some(old),
-                desired: Some(new),
-            }]
-        );
+        assert!(store.pending_files().unwrap().is_empty());
         assert_eq!(store.applied_file(object).unwrap().unwrap().event, first.id);
         assert_eq!(std::fs::read(destination.join("song.tja")).unwrap(), b"old");
     }
