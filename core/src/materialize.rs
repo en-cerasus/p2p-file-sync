@@ -275,6 +275,23 @@ impl Store {
             Err(error) => return Err(error.into()),
         };
         let current = target.inspect(object)?;
+        #[cfg(windows)]
+        let current = match (current, intent.previous, intent.desired) {
+            (None, Some(previous), Some(_))
+                if head.change.entry().is_some()
+                    && read_applied(&tx, object)?.is_some_and(|applied| {
+                        applied.contents == Some(previous) && applied.path.as_ref() == Some(&path)
+                    }) =>
+            {
+                blobs.open_verified(previous)?;
+                if target.restore_update_backup(&intent, previous)? {
+                    Some(previous)
+                } else {
+                    None
+                }
+            }
+            _ => current,
+        };
         if current != intent.previous && current != intent.desired {
             return Ok(false);
         }

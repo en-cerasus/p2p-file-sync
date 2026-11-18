@@ -551,3 +551,77 @@ fn obsolete_pending_update_is_retired_only_for_a_known_disk_version() {
         }
     }
 }
+
+#[cfg(windows)]
+#[test]
+fn superseded_update_restores_known_backup_and_then_applies_newest_version() {
+    use sha2::{Digest, Sha256};
+    let f = Fixture::new();
+    let root = f.folder.path().join("destination");
+    std::fs::create_dir(&root).unwrap();
+    let mut store = f.open();
+    let first = FileIntent {
+        previous: None,
+        ..f.intent.clone()
+    };
+    store.stage_file(&f.blobs, &first).unwrap();
+    store.recover_new_file(&f.blobs, &root, OBJECT).unwrap();
+
+    let skipped_blob = metadata(b"skipped");
+    f.blobs.put(skipped_blob, &b"skipped"[..]).unwrap();
+    let skipped = event(3, content_entry(skipped_blob.hash));
+    store.apply_verified(skipped.clone()).unwrap();
+    store
+        .stage_file(
+            &f.blobs,
+            &FileIntent {
+                object: OBJECT,
+                event: skipped.id,
+                previous: first.desired,
+                desired: Some(skipped_blob),
+            },
+        )
+        .unwrap();
+
+    let mut digest = Sha256::new();
+    digest.update(OBJECT);
+    digest.update(skipped.id.peer);
+    digest.update(skipped.id.sequence.to_be_bytes());
+    let backup = root.join(format!(".p2p-update-{:x}", digest.finalize()));
+    let path = root.join("song.tja");
+    std::fs::rename(&path, &backup).unwrap();
+
+    let desired = metadata(b"latest");
+    f.blobs.put(desired, &b"latest"[..]).unwrap();
+    let latest = event(4, content_entry(desired.hash));
+    store.apply_verified(latest.clone()).unwrap();
+    drop(store);
+
+    let mut store = f.open();
+    assert!(store
+        .retire_superseded_file(&f.blobs, &root, OBJECT)
+        .unwrap());
+    assert_eq!(std::fs::read(&path).unwrap(), b"new");
+    assert!(!backup.exists());
+    assert_eq!(
+        store.applied_file(OBJECT).unwrap().unwrap().event,
+        first.event
+    );
+
+    store
+        .stage_file(
+            &f.blobs,
+            &FileIntent {
+                object: OBJECT,
+                event: latest.id,
+                previous: first.desired,
+                desired: Some(desired),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        store.recover_updated_file(&f.blobs, &root, OBJECT).unwrap(),
+        Recovery::Applied
+    );
+    assert_eq!(std::fs::read(path).unwrap(), b"latest");
+}

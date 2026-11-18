@@ -111,6 +111,24 @@ impl NewFileTarget {
     }
 
     #[cfg(windows)]
+    pub(crate) fn restore_update_backup(
+        &self,
+        intent: &FileIntent,
+        previous: Blob,
+    ) -> io::Result<bool> {
+        let Some(file) = self.lock_verified(&update_backup(intent), previous)? else {
+            return Ok(false);
+        };
+        // A handle-based, no-replacement rename ensures a concurrent
+        // creator keeps their file and the backup stays available.
+        match rename_by_handle(&file, &self.name) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    #[cfg(windows)]
     pub(crate) fn finish_update(&self, intent: &FileIntent) -> io::Result<()> {
         let backup = update_backup(intent);
         if let Some(previous) = intent.previous {
@@ -289,14 +307,16 @@ fn rename_by_handle(file: &cap_std::fs::File, name: &str) -> io::Result<()> {
     #[repr(C)]
     struct RenameBuffer {
         prefix: FILE_RENAME_INFO,
-        tail: [u16; 128],
+        tail: [u16; 256],
     }
     let mut buffer = RenameBuffer {
         prefix: FILE_RENAME_INFO::default(),
-        tail: [0; 128],
+        tail: [0; 256],
     };
     let name: Vec<u16> = name.encode_utf16().collect();
-    assert!(name.len() < 128);
+    if name.len() >= 256 {
+        return Err(invalid_name());
+    }
     let offset = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
     // A null root and a plain filename rename within the existing parent.
     buffer.prefix.FileNameLength = (name.len() * 2) as u32;
