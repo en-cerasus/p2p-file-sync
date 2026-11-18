@@ -1,16 +1,16 @@
 # 設計レビュー
 
-対象は SPEC.md Draft v0.10。iOS版TJA-Discordへの内蔵を反映した詳細設計案。
+対象は SPEC.md Draft v0.11。Windows・iOSの独立P2P同期アプリの設計案。
 
 ## 要求の読み分け
 
-- 確定。Windows独立クライアント、iOS版TJA-Discordへの内蔵、独立したRust共通コア、親端末なし、キーのみで参加、OSと独立したRW/RO、階層と操作の同期、並行版の保全、48時間履歴、全ピア確認までの削除記録、GUI、GitHub ActionsでのIPA生成。サーバーにファイルを恒久保存しない。
+- 確定。WindowsとiOSの独立クライアント、独立したRust共通コア、親端末なし、キーのみで参加、OSと独立したRW/RO、階層と操作の同期、並行版の保全、48時間履歴、全ピア確認までの削除記録、GUI、GitHub ActionsでのIPA生成。サーバーにファイルを恒久保存しない。
 - 暫定。WebRTCとCloudflare、Windows GUI、資格情報の形式、チェックポイントとログ整理。
 - 要検証。鍵の再発行・復帰、監視とファイルプロバイダーの限界、物理ファイルとDBの復旧、実コスト、未署名IPAの後署名、iOS実機での中断復帰。判断が必要な箇所はリスク一覧に記載。
 
 ## クライアント構成
 
-Rustコアに同期状態機械、認証、転送キュー、永続化を置く。通信・ファイルアクセスはアダプターを介し、同じフィクスチャと状態機械を両OSで使う。GUI候補はWindowsのWPF＋通知領域常駐（ユーザーセッション内）。iOSの同期画面は既存のTJA-Discordに組み込む。両者からバージョン付きC ABIを利用し、ハンドルの所有権、バッファ解放、エラー表現、キャンセル、コールバックのスレッドを契約化する。WindowsのRust DLLと.NETランタイムを同梱する署名付きインストーラーを候補とし、署名・更新配布は別途検証。ログは構造化・ローテーションし、キー・資格情報・SDP・実パスを通常ログに含めない。DBはSQLite、内容はSHA-256で参照するアプリ専用領域の不変blob。DB移行は版番号と事前バックアップを持ち、中断時に旧版または新しい整合状態へ復帰する。
+Rustコアに同期状態機械、認証、転送キュー、永続化を置く。通信・ファイルアクセスはアダプターを介し、同じフィクスチャと状態機械を両OSで使う。GUI候補はWindowsのWPF＋通知領域常駐（ユーザーセッション内）。iOSの独立アプリはSwiftUIを採用する。両者からバージョン付きC ABIを利用し、ハンドルの所有権、バッファ解放、エラー表現、キャンセル、コールバックのスレッドを契約化する。WindowsのRust DLLと.NETランタイムを同梱する署名付きインストーラーを候補とし、署名・更新配布は別途検証。ログは構造化・ローテーションし、キー・資格情報・SDP・実パスを通常ログに含めない。DBはSQLite、内容はSHA-256で参照するアプリ専用領域の不変blob。DB移行は版番号と事前バックアップを持ち、中断時に旧版または新しい整合状態へ復帰する。
 
 ## 認証と失効
 
@@ -58,30 +58,15 @@ WorkersとDOは別の利用量を計測する。接続・メッセージ頻度�
 
 TURN API秘密鍵はWorker側に置く。短命資格情報、発行レート制限、共有・端末単位の予算、クライアント側の送受信計測と閾値での中継停止を組み合わせる。発行停止だけでは既存割り当てや他用途を止められない。アカウント全体のハード上限を公開仕様から確認できていないため、厳密な上限が採用条件なら、契約・技術面で確認できるまでは中継無効とする。
 
-## iOS版TJA-Discordへの統合
+## 独立したiOS版とSwiftからの利用
 
-### ソース調査と対象ビルド
+P2Pの同期状態機械、認証、暗号化、永続化は独立したRustライブラリが担う。Swift側ではCヘッダーとmodule mapを取り込む薄いラッパーを用意し、SwiftUIの状態管理や画面から分離する。ラッパーを通して別のSwiftコンポーネントも同期操作、進捗、確定済みのファイル参照を取得できる。C ABIはバージョン、opaque handle、固定幅の値、UTF-8のバッファ、エラーとメモリ解放を規定する。重いI/OはUIスレッドから外す。
 
-- Swift側の ios-swift-endurance-24h では RuntimeApp.swift が SwiftUI と UIApplicationDelegateAdaptor を使用する。Gateway.swift は URLSessionWebSocketTask、Heartbeat/ACK、Resume/Identify を扱い、EnduranceProtocol.swift は試験用Ping/Pongを扱う。BackgroundGateway.swift はiOS 26以降の BGContinuedProcessingTask の試験コード。譜面ライブラリや本番コマンドとの接続は確認できなかった。 [Swiftホスト](https://github.com/en-cerasus/ios-discord-bot-poc/blob/ios-swift-endurance-24h/ios-poc/RuntimeApp.swift) [Swiftビルド](https://github.com/en-cerasus/ios-discord-bot-poc/blob/ios-swift-endurance-24h/.github/workflows/ios-swift-endurance.yml)
-- ローカルのTJA-Discord本体は net8.0 と Discord.Net を使い、Program.cs で TJA_ROOT を SongLibrary に渡す。同じ作業フォルダーの旧 ios-poc は net10.0-ios、.NET MAUI、Discord.Net の独立試験で、READMEではTJA解析や本番Bot設定が対象外。iPhone 11上の稼働ビルドとこれらのソースの対応は未確認。統合前に端末側のBundle ID、ビルド番号、配布IPAとソースコミットを照合する。
+macOSランナーでRustとXcodeを固定し、aarch64-apple-ios の静的ライブラリを独立したSwiftUIアプリにリンクする。デバイス用とシミュレータ用のターゲットを区別する。未署名IPAを生成し、arm64、最低OS、依存ライブラリとInfo.plistを確認する。AltStore Classicでの後署名、iPhone 11での起動・再署名後のデータ保持は実機で確認する。 [RustのiOSターゲット](https://doc.rust-lang.org/rustc/platform-support/apple-ios.html) [AltStore Classic](https://faq.altstore.io/altstore-classic/your-altstore)
 
-### FFIとビルド
+iOSアプリがライフサイクルとフォルダー権限を管理する。Rustは検証済みチャンクと適用意図を随時永続化し、再実行時に処理を再開する。ロック、サスペンド、強制終了、回線切替を実機で測る。実行枠はOSに依存し、iOS 26の BGContinuedProcessingTask はユーザーが前景で始めた有限の同期向けの候補。外部Filesの対応範囲は、プロバイダー別に権限、再アクセス、列挙、置換を検証して決める。 [Appleの継続タスク](https://developer.apple.com/documentation/BackgroundTasks/BGContinuedProcessingTask) [Appleのフォルダーアクセス](https://developer.apple.com/documentation/uikit/providing-access-to-directories)
 
-バージョン付きC ABIをWindowsとiOSで共用する。opaque handle、固定幅の値、UTF-8のポインタと長さ、Rust所有バッファの解放を定義する。開始・一時停止・進捗取得・確定通知・終了を公開し、重い処理はGUIとGatewayの実行キューから外す。初期案はポーリングで状態を取得する。panicはFFI境界内で処理し、キャンセル完了後にハンドルを解放する。Botの型、トークン、譜面解析、SwiftUIやMAUIはホスト側に置く。
-
-- Swiftホストの場合は、既存CIの macos-26、Xcode、xcrun swiftc の arm64-apple-ios17.0、Info.plist と package_ipa.py の手順にRustのリンクを加える。Cargo.lockとツールチェーンを固定し、iPhoneOS SDKで aarch64-apple-ios のstaticlibを作る。module mapでCヘッダーをSwiftへ公開し、ネイティブ依存を検証する。Simulator向けを用意する場合は別ターゲットで作る。 [RustのiOSターゲット](https://doc.rust-lang.org/rustc/platform-support/apple-ios.html)
-- .NET iOSホストの場合は、同じstaticlibを NativeReference でリンクし、C#から P/Invoke の __Internal を通して呼ぶ。対象の.NET iOS SDK・Xcodeで ios-arm64 のRelease AOT、トリミングとシンボル解決を検証する。 [MicrosoftのNativeReference仕様](https://learn.microsoft.com/en-us/dotnet/ios/building-apps/build-items#nativereference)
-- P2P側のCIは独立したライブラリを生成し、ホスト側CIはバージョンを固定して取り込み、統合済みTJA-Discordの未署名IPAを生成する案。arm64、最低OS、依存ライブラリ、Info.plistを検査する。AltStore Classicでの後署名、iPhone 11での起動、再署名時のデータ保持は別判定。Bundle ID、BGタスクID、Keychainアクセスの変化も測る。 [GitHubランナー](https://docs.github.com/en/actions/reference/runners/github-hosted-runners) [AltStore Classic](https://faq.altstore.io/altstore-classic/your-altstore)
-
-### Botによる同期済み譜面と音源の参照
-
-同一アプリコンテナのApplication Support配下に同期済みの譜面・音源ルートを置く案。DB・履歴・競合・途中ファイルは別ディレクトリに置く。同期の確定通知を受けたホスト側アダプターが譜面と音源を照合し、そろった組だけをBotの索引に公開する。Botは同期済みローカルファイルを直接開く。相対参照は同期ルート内に制限し、コマンド実行中は参照版を固定する。新版の音源が未着なら利用可能な旧版を維持し、初回は同期待ちとする。削除確定後は新規参照から外し、使用中の版は解放まで保持する。譜面解析・索引・作者ルールはBot側の責務とする。
-
-### バックグラウンド再評価
-
-ホストがライフサイクルを管理する。P2Pは検証済みチャンクと適用意図を随時保存し、失効時は中断を要求し、次の実行機会に復旧・再接続する。Gatewayはホスト側で独立してResume/Identifyを進める。iOS 26以降の BGContinuedProcessingTask はユーザーが前景で開始した有限の同期に限り候補とする。OSによる失効・取消・suspendを扱い、旧iOSでは可用性を判定する。BGProcessingTaskの実行時刻はOSが決める。 [Appleの継続タスク](https://developer.apple.com/documentation/BackgroundTasks/BGContinuedProcessingTask) [Appleのバックグラウンド処理](https://developer.apple.com/documentation/backgroundtasks/bgprocessingtask/)
-
-iPhone 11で前景、ロック、サスペンド、強制終了、回線変更を分け、P2Pの確定と再開、GatewayのACKと再接続、Botによる譜面・音源の参照を個別に測る。Bot単独を対照にし、大容量同期中の応答遅延と欠落を測定して転送速度やI/O並列数を調整する。同一アプリのローカルフォルダーで先に試し、外部Filesはプロバイダー別に権限の再取得・列挙・置換を検証。アクセスできない状態を削除と扱わない。 [Appleのフォルダーアクセス](https://developer.apple.com/documentation/uikit/providing-access-to-directories)
+iOS版TJA-Discordは未実装。将来はiOS版P2Pアプリ内の別SwiftコンポーネントでBot機能を追加する。Bot側が確定済みファイルを参照し、譜面と音源の照合や索引を扱う。同期コアのAPIは汎用ファイル操作と確定版の参照を提供する。Botや譜面解析は当面の実装範囲外。
 
 ## 過去の調査から採用する試験
 
