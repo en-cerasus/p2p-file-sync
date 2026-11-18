@@ -367,6 +367,24 @@ fn a_fresh_peer_caches_all_conflicting_versions_without_publishing_a_winner() {
         );
     });
     assert!(!destination.join("song.tja").exists());
+    let checkpoint = receiver
+        .generation_checkpoint(std::time::SystemTime::now())
+        .unwrap();
+    assert_eq!(checkpoint.frontier, *receiver.replica().clock());
+    let heads: Vec<_> = checkpoint
+        .events
+        .iter()
+        .filter(|event| event.object == object && checkpoint.heads.contains(&event.id))
+        .collect();
+    assert_eq!(heads.len(), 2);
+    assert_eq!(
+        checkpoint
+            .protected
+            .iter()
+            .filter(|reference| reference.original == base)
+            .count(),
+        2
+    );
     assert!(!destination.join("missing.tja").exists());
     assert_eq!(
         std::fs::read(destination.join("remote.tja")).unwrap(),

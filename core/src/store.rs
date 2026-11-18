@@ -1,13 +1,15 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
+    time::SystemTime,
 };
 
 use rusqlite::{params, Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    archive::record_archive,
+    archive::{archives_on, record_archive},
+    generation::{CheckpointProtection, GenerationCheckpoint},
     materialize::AppliedFile,
     replica::{Apply, Change, EntryKind, Event, EventId, ObjectId, PeerId, Reject, Replica},
     retention::{Confirmation, Protection},
@@ -164,6 +166,51 @@ impl Store {
     /// Read commits made by another handle before querying this handle's index.
     pub fn refresh(&mut self) -> Result<(), StoreError> {
         self.index.refresh(&self.connection, &self.membership)
+    }
+
+    pub fn generation_checkpoint(
+        &mut self,
+        now: SystemTime,
+    ) -> Result<GenerationCheckpoint, StoreError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        self.index.refresh(&tx, &self.membership)?;
+        let replica = &self.index.replica;
+        let mut events: Vec<_> = self
+            .index
+            .event_order
+            .iter()
+            .map(|&id| replica.get(id).cloned().ok_or(StoreError::InvalidRecord))
+            .collect::<Result<_, _>>()?;
+        events.sort_unstable_by_key(|event| event.id);
+        let mut heads: Vec<_> = replica
+            .objects()
+            .flat_map(|object| replica.heads(object).map(|event| event.id))
+            .collect();
+        heads.sort_unstable();
+        let mut protected: Vec<_> = self
+            .index
+            .protections
+            .values()
+            .filter(|protection| protection.is_active(replica))
+            .map(|protection| CheckpointProtection {
+                original: protection.original(),
+                successor: protection.successor(),
+                hash: protection.content(),
+            })
+            .collect();
+        protected.sort_unstable();
+        Ok(GenerationCheckpoint {
+            version: GenerationCheckpoint::VERSION,
+            share: self.membership.share,
+            generation: self.membership.generation,
+            frontier: replica.clock().clone(),
+            events,
+            heads,
+            protected,
+            archives: archives_on(&tx, now)?,
+        })
     }
 
     pub(crate) fn begin_indexed_write(

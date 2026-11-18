@@ -66,6 +66,10 @@ impl Protection {
         self.object
     }
 
+    pub(crate) fn is_active(&self, replica: &crate::replica::Replica) -> bool {
+        !self.can_release(replica.clock()) || replica.has_conflict(self.object)
+    }
+
     pub(crate) fn confirmed_through(&self, peer: PeerId) -> Option<u64> {
         self.members.get(&peer).copied().flatten()
     }

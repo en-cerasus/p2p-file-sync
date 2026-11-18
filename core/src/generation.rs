@@ -6,13 +6,44 @@ use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    archive::ArchivedFile,
     auth::Role,
-    replica::{ContentHash, PeerId},
+    replica::{ContentHash, Event, EventId, PeerId, VersionVector},
 };
 
 const DOMAIN: &[u8] = b"p2p-file-sync/generation-transition/v1\0";
 const MAX_MEMBERS: usize = 1024;
 const MAX_MESSAGE: usize = 48 * 1024;
+const CHECKPOINT_VERSION: u8 = 1;
+
+/// Metadata captured from one consistent view of the old generation.
+/// Earlier events provide the names and bases of deleted or moved objects.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GenerationCheckpoint {
+    pub(crate) version: u8,
+    pub share: [u8; 16],
+    pub generation: u64,
+    pub frontier: VersionVector,
+    pub events: Vec<Event>,
+    pub heads: Vec<EventId>,
+    pub protected: Vec<CheckpointProtection>,
+    pub archives: Vec<ArchivedFile>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct CheckpointProtection {
+    pub original: EventId,
+    pub successor: EventId,
+    pub hash: ContentHash,
+}
+
+impl GenerationCheckpoint {
+    pub(crate) const VERSION: u8 = CHECKPOINT_VERSION;
+
+    pub fn encode(&self) -> Result<Vec<u8>, postcard::Error> {
+        postcard::to_allocvec(self)
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct GenerationTransition {
@@ -29,9 +60,26 @@ pub enum TransitionError {
     Invalid,
     WrongScope,
     BadSignature,
+    WrongCheckpoint,
 }
 
 impl GenerationTransition {
+    /// Match the exact bytes to the digest before decoding, then verify scope.
+    pub fn verify_checkpoint(&self, bytes: &[u8]) -> Result<GenerationCheckpoint, TransitionError> {
+        if crate::sha256(bytes) != self.checkpoint {
+            return Err(TransitionError::WrongCheckpoint);
+        }
+        let (checkpoint, trailing) = postcard::take_from_bytes::<GenerationCheckpoint>(bytes)
+            .map_err(|_| TransitionError::Invalid)?;
+        if !trailing.is_empty() || checkpoint.version != CHECKPOINT_VERSION {
+            return Err(TransitionError::Invalid);
+        }
+        if checkpoint.share != self.share || checkpoint.generation != self.previous {
+            return Err(TransitionError::WrongScope);
+        }
+        Ok(checkpoint)
+    }
+
     /// Use a separately trusted administrative key, rather than a sync writer key.
     pub fn sign(&self, administrator: &SigningKey) -> Result<Vec<u8>, TransitionError> {
         self.validate()?;

@@ -4,7 +4,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{params, Transaction};
+use rusqlite::{params, Connection, Transaction};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -36,13 +36,8 @@ pub struct ProtectedStorage {
 
 impl Store {
     pub(crate) fn active_protections(&self) -> impl Iterator<Item = &Protection> {
-        let replica = self.replica();
-        self.protections().filter(move |protection| {
-            !protection.can_release(replica.clock())
-                || replica
-                    .get(protection.original())
-                    .is_some_and(|event| replica.has_conflict(event.object))
-        })
+        self.protections()
+            .filter(|protection| protection.is_active(self.replica()))
     }
 
     /// List unique contents required by unconfirmed peers or a live conflict.
@@ -127,24 +122,33 @@ impl Store {
     /// Return only entries within the normal history window. Blob ownership
     /// is separate: a file may still be needed for conflict recovery.
     pub fn archives(&self, now: SystemTime) -> Result<Vec<ArchivedFile>, StoreError> {
-        let threshold = unix_seconds(now)?.saturating_sub(RETENTION_SECONDS);
-        let mut statement = self.connection.prepare(
-            "SELECT object, recorded_at, payload FROM file_archive
-             WHERE recorded_at > ?1 ORDER BY recorded_at DESC, id DESC",
-        )?;
-        let mut rows = statement.query([threshold])?;
-        let mut entries = Vec::new();
-        while let Some(row) = rows.next()? {
-            let record: ArchivedFile = decode(&decode_column(row, 2)?)?;
-            let object: Vec<u8> = row.get(0)?;
-            if object != record.object || record.archived_at != row.get::<_, i64>(1)? {
-                return Err(StoreError::InvalidRecord);
-            }
-            entries.push(record);
-        }
-        Ok(entries)
+        archives_on(&self.connection, now)
     }
+}
 
+pub(crate) fn archives_on(
+    connection: &Connection,
+    now: SystemTime,
+) -> Result<Vec<ArchivedFile>, StoreError> {
+    let threshold = unix_seconds(now)?.saturating_sub(RETENTION_SECONDS);
+    let mut statement = connection.prepare(
+        "SELECT object, recorded_at, payload FROM file_archive
+             WHERE recorded_at > ?1 ORDER BY recorded_at DESC, id DESC",
+    )?;
+    let mut rows = statement.query([threshold])?;
+    let mut entries = Vec::new();
+    while let Some(row) = rows.next()? {
+        let record: ArchivedFile = decode(&decode_column(row, 2)?)?;
+        let object: Vec<u8> = row.get(0)?;
+        if object != record.object || record.archived_at != row.get::<_, i64>(1)? {
+            return Err(StoreError::InvalidRecord);
+        }
+        entries.push(record);
+    }
+    Ok(entries)
+}
+
+impl Store {
     /// Expire history metadata, without releasing protected conflict bases
     /// or deleting any physical blob.
     pub fn prune_archives(&self, now: SystemTime) -> Result<usize, StoreError> {

@@ -60,6 +60,7 @@ fn selected_files_are_verified_and_signed_and_names_are_collision_checked() {
 
 #[test]
 fn updates_and_tombstones_share_the_same_object_and_retain_previous_versions() {
+    use p2p_sync_core::generation::{GenerationTransition, TransitionError};
     use std::time::SystemTime;
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("song.tja");
@@ -94,7 +95,7 @@ fn updates_and_tombstones_share_the_same_object_and_retain_previous_versions() {
     assert!(removal.change.entry().is_none());
     assert_eq!(store.replica().clock()[&peer], 3);
     drop(store);
-    let store = Store::open(&database, roster.membership().clone()).unwrap();
+    let mut store = Store::open(&database, roster.membership().clone()).unwrap();
     let history = store.archives(SystemTime::now()).unwrap();
     assert_eq!(history.len(), 2);
     assert_eq!(history[0].event, second);
@@ -106,6 +107,33 @@ fn updates_and_tombstones_share_the_same_object_and_retain_previous_versions() {
     assert!(store
         .protections()
         .all(|protection| protection.can_release(store.replica().clock())));
+    let checkpoint = store.generation_checkpoint(SystemTime::now()).unwrap();
+    assert_eq!(checkpoint.heads, [last]);
+    assert!(checkpoint
+        .events
+        .iter()
+        .any(|event| event.id == last && event.change.entry().is_none()));
+    assert!(checkpoint.events.iter().any(|event| event.id == first));
+    assert_eq!(checkpoint.archives, history);
+    let mut bytes = checkpoint.encode().unwrap();
+    let administrator = PeerSigningKey::from_bytes(&[27; 32]);
+    let transition = GenerationTransition {
+        share: checkpoint.share,
+        previous: checkpoint.generation,
+        next: checkpoint.generation + 1,
+        checkpoint: sha256(&bytes),
+        members: [(peer, Role::Writer)].into(),
+    };
+    let wire = transition.sign(&administrator).unwrap();
+    let verified =
+        GenerationTransition::verify(&wire, &administrator.verifying_key(), checkpoint.share, 1)
+            .unwrap();
+    assert_eq!(verified.verify_checkpoint(&bytes), Ok(checkpoint));
+    *bytes.last_mut().unwrap() ^= 1;
+    assert_eq!(
+        verified.verify_checkpoint(&bytes),
+        Err(TransitionError::WrongCheckpoint)
+    );
     assert_eq!(std::fs::read(source).unwrap(), b"second");
     for contents in [b"first".as_slice(), b"second".as_slice()] {
         assert!(blobs
