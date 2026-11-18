@@ -19,3 +19,7 @@ cap-std = "4.0.3"
 cap-fs-ext = "4.0.3"
 getrandom = "0.4"
 ed25519-dalek = "2.2"
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+
+[dev-dependencies]
+rcgen = "0.14"
