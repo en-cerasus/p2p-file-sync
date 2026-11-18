@@ -8,7 +8,7 @@ use p2p_sync_core::{
     blob::{Blob, BlobStore},
     direct,
     host::{PullSummary, PullSummaryV3},
-    p2p_sync_pull, p2p_sync_pull_v4,
+    p2p_sync_pull_v4,
     replica::{Change, Entry, EntryKind, Event, EventId, VersionVector},
     sha256,
     store::Store,
@@ -170,17 +170,47 @@ fn exchanges_signed_events_only_after_mutual_tls_and_pin_validation() {
         let [config, state, destination_path] =
             [&config, &state, &destination].map(|path| path.to_str().unwrap().as_bytes());
         let mut report = PullSummary::default();
+        extern "C" fn cancelled(context: *mut std::ffi::c_void) -> u8 {
+            unsafe { *context.cast::<u8>() }
+        }
+        let mut stop = 1_u8;
+        let mut extended = PullSummaryV3::default();
+        extended.sync.events_added = 999;
         let status = unsafe {
-            p2p_sync_pull(
+            p2p_sync_core::p2p_sync_pull_v5(
                 config.as_ptr(),
                 config.len(),
                 state.as_ptr(),
                 state.len(),
                 destination_path.as_ptr(),
                 destination_path.len(),
-                &mut report,
+                &mut extended,
+                None,
+                (&mut stop as *mut u8).cast(),
+                Some(cancelled),
             )
         };
+        assert_eq!(status, 7);
+        assert_eq!(extended.sync.events_added, 999);
+        assert_eq!(std::fs::read_dir(&destination).unwrap().count(), 0);
+        stop = 0;
+        let status = unsafe {
+            p2p_sync_core::p2p_sync_pull_v5(
+                config.as_ptr(),
+                config.len(),
+                state.as_ptr(),
+                state.len(),
+                destination_path.as_ptr(),
+                destination_path.len(),
+                &mut extended,
+                None,
+                (&mut stop as *mut u8).cast(),
+                Some(cancelled),
+            )
+        };
+        report.events_added = extended.sync.events_added;
+        report.files_published = extended.sync.files_published;
+        report.files_blocked = extended.sync.files_blocked;
         assert_eq!(status, 0);
         assert_eq!(report.events_added, 2);
         assert_eq!(report.files_published, 1);
