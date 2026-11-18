@@ -184,6 +184,16 @@ impl Store {
             .map(|&id| replica.get(id).cloned().ok_or(StoreError::InvalidRecord))
             .collect::<Result<_, _>>()?;
         events.sort_unstable_by_key(|event| event.id);
+        let signed_events = events
+            .iter()
+            .map(|event| {
+                self.index
+                    .signed_events
+                    .get(&event.id)
+                    .cloned()
+                    .ok_or(StoreError::InvalidRecord)
+            })
+            .collect::<Result<_, _>>()?;
         let mut heads: Vec<_> = replica
             .objects()
             .flat_map(|object| replica.heads(object).map(|event| event.id))
@@ -207,6 +217,7 @@ impl Store {
             generation: self.membership.generation,
             frontier: replica.clock().clone(),
             events,
+            signed_events,
             heads,
             protected,
             archives: archives_on(&tx, now)?,

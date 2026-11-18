@@ -128,12 +128,31 @@ fn updates_and_tombstones_share_the_same_object_and_retain_previous_versions() {
     let verified =
         GenerationTransition::verify(&wire, &administrator.verifying_key(), checkpoint.share, 1)
             .unwrap();
-    let authenticated = verified.verify_checkpoint(&bytes).unwrap();
+    let authenticated = verified.verify_checkpoint(&bytes, &roster).unwrap();
     assert_eq!(authenticated, checkpoint);
     *bytes.last_mut().unwrap() ^= 1;
     assert_eq!(
-        verified.verify_checkpoint(&bytes),
+        verified.verify_checkpoint(&bytes, &roster),
         Err(TransitionError::WrongCheckpoint)
+    );
+    let mut inconsistent = authenticated.clone();
+    inconsistent.heads.clear();
+    let bytes = inconsistent.encode().unwrap();
+    let transition = GenerationTransition {
+        checkpoint: sha256(&bytes),
+        ..transition
+    };
+    let signed = transition.sign(&administrator).unwrap();
+    let verified = GenerationTransition::verify(
+        &signed,
+        &administrator.verifying_key(),
+        authenticated.share,
+        1,
+    )
+    .unwrap();
+    assert_eq!(
+        verified.verify_checkpoint(&bytes, &roster),
+        Err(TransitionError::InvalidHistory),
     );
     let staged = BlobStore::open(directory.path().join("staged")).unwrap();
     let empty = BlobStore::open(directory.path().join("empty")).unwrap();

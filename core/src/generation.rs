@@ -8,15 +8,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     archive::ArchivedFile,
-    auth::Role,
+    auth::{Role, Roster},
     blob::{Blob, BlobStore},
-    replica::{ContentHash, EntryKind, Event, EventId, PeerId, VersionVector},
+    replica::{Apply, ContentHash, EntryKind, Event, EventId, PeerId, Replica, VersionVector},
 };
 
 const DOMAIN: &[u8] = b"p2p-file-sync/generation-transition/v1\0";
 const MAX_MEMBERS: usize = 1024;
 const MAX_MESSAGE: usize = 48 * 1024;
-const CHECKPOINT_VERSION: u8 = 1;
+const CHECKPOINT_VERSION: u8 = 2;
 
 /// Metadata captured from one consistent view of the old generation.
 /// Earlier events provide the names and bases of deleted or moved objects.
@@ -27,6 +27,7 @@ pub struct GenerationCheckpoint {
     pub generation: u64,
     pub frontier: VersionVector,
     pub events: Vec<Event>,
+    pub(crate) signed_events: Vec<Vec<u8>>,
     pub heads: Vec<EventId>,
     pub protected: Vec<CheckpointProtection>,
     pub archives: Vec<ArchivedFile>,
@@ -44,6 +45,50 @@ impl GenerationCheckpoint {
 
     pub fn encode(&self) -> Result<Vec<u8>, postcard::Error> {
         postcard::to_allocvec(self)
+    }
+
+    fn verify_history(&self, roster: &Roster) -> Result<(), TransitionError> {
+        if self.events.len() != self.signed_events.len() {
+            return Err(TransitionError::InvalidHistory);
+        }
+        let mut ordered = Vec::with_capacity(self.events.len());
+        for (event, wire) in self.events.iter().zip(&self.signed_events) {
+            if roster.verify_event(wire).ok().as_ref() != Some(event)
+                || !event
+                    .context
+                    .keys()
+                    .all(|peer| roster.membership().members.contains(peer))
+            {
+                return Err(TransitionError::InvalidHistory);
+            }
+            // Each valid event's context covers the event IDs it depends on.
+            // Its sum is therefore strictly greater than their context sums.
+            let rank: u128 = event
+                .context
+                .values()
+                .map(|&counter| u128::from(counter))
+                .sum();
+            ordered.push((rank, event));
+        }
+        ordered.sort_unstable_by_key(|(rank, event)| (*rank, event.id));
+        let mut replica = Replica::default();
+        for (_, event) in ordered {
+            if replica.apply(event.clone()) != Ok(Apply::Added) {
+                return Err(TransitionError::InvalidHistory);
+            }
+        }
+        let mut heads: Vec<_> = replica
+            .objects()
+            .flat_map(|object| replica.heads(object).map(|event| event.id))
+            .collect();
+        heads.sort_unstable();
+        if self.frontier != *replica.clock()
+            || self.heads != heads
+            || self.required_contents().is_err()
+        {
+            return Err(TransitionError::InvalidHistory);
+        }
+        Ok(())
     }
 
     /// Copy the unique live, protected and archived contents of a verified
@@ -164,11 +209,16 @@ pub enum TransitionError {
     WrongScope,
     BadSignature,
     WrongCheckpoint,
+    InvalidHistory,
 }
 
 impl GenerationTransition {
     /// Match the exact bytes to the digest before decoding, then verify scope.
-    pub fn verify_checkpoint(&self, bytes: &[u8]) -> Result<GenerationCheckpoint, TransitionError> {
+    pub fn verify_checkpoint(
+        &self,
+        bytes: &[u8],
+        old_roster: &Roster,
+    ) -> Result<GenerationCheckpoint, TransitionError> {
         if crate::sha256(bytes) != self.checkpoint {
             return Err(TransitionError::WrongCheckpoint);
         }
@@ -177,9 +227,14 @@ impl GenerationTransition {
         if !trailing.is_empty() || checkpoint.version != CHECKPOINT_VERSION {
             return Err(TransitionError::Invalid);
         }
-        if checkpoint.share != self.share || checkpoint.generation != self.previous {
+        if checkpoint.share != self.share
+            || checkpoint.generation != self.previous
+            || old_roster.membership().share != self.share
+            || old_roster.membership().generation != self.previous
+        {
             return Err(TransitionError::WrongScope);
         }
+        checkpoint.verify_history(old_roster)?;
         Ok(checkpoint)
     }
 
