@@ -4,7 +4,12 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use p2p_sync_core::{replica::*, retention::*, store::*};
+use p2p_sync_core::{
+    auth::{PeerSigningKey, Role, Roster},
+    replica::*,
+    retention::*,
+    store::*,
+};
 use rusqlite::Connection;
 
 const WRITER: PeerId = [1; 32];
@@ -48,6 +53,76 @@ fn membership() -> Membership {
         generation: 1,
         members: [WRITER, OFFLINE].into(),
     }
+}
+
+#[test]
+fn signed_confirmations_survive_reopening_for_later_peer_exchange() {
+    let db = Database::new();
+    let writer = PeerSigningKey::from_bytes(&[51; 32]);
+    let reader = PeerSigningKey::from_bytes(&[52; 32]);
+    let writer_id = writer.verifying_key().to_bytes();
+    let reader_id = reader.verifying_key().to_bytes();
+    let roster = Roster::new(
+        [4; 16],
+        1,
+        [(writer_id, Role::Writer), (reader_id, Role::Reader)].into(),
+    );
+    let first = Event {
+        id: EventId {
+            peer: writer_id,
+            sequence: 1,
+        },
+        context: VersionVector::new(),
+        object: OBJECT,
+        change: Change::Create(entry(5)),
+    };
+    let next = Event {
+        id: EventId {
+            peer: writer_id,
+            sequence: 2,
+        },
+        context: [(writer_id, 1)].into(),
+        object: OBJECT,
+        change: Change::Revise {
+            base: first.id,
+            entry: Some(entry(6)),
+        },
+    };
+    let confirmation = Confirmation {
+        generation: 1,
+        peer: reader_id,
+        object: OBJECT,
+        successor: next.id,
+        sent_through: 0,
+    };
+    let wire = roster.sign_confirmation(&reader, &confirmation).unwrap();
+    {
+        let mut store = Store::open(db.path(), roster.membership().clone()).unwrap();
+        for event in [&first, &next] {
+            let signed = roster.sign_event(&writer, event).unwrap();
+            roster.receive(&mut store, &signed).unwrap();
+        }
+        roster.receive_confirmation(&mut store, &wire).unwrap();
+        roster.receive_confirmation(&mut store, &wire).unwrap();
+    }
+    let reopened = Store::open(db.path(), roster.membership().clone()).unwrap();
+    let page = reopened.signed_confirmations_page(0, 128).unwrap();
+    assert_eq!(page.len(), 1);
+    assert_eq!(
+        roster.verify_confirmation(&page[0].1).unwrap(),
+        confirmation
+    );
+    assert_eq!(
+        reopened
+            .protections()
+            .next()
+            .unwrap()
+            .peer_states(reopened.replica().clock())
+            .find(|(peer, _)| *peer == reader_id)
+            .unwrap()
+            .1,
+        PeerState::Applied,
+    );
 }
 
 fn entry(hash: u8) -> Entry {

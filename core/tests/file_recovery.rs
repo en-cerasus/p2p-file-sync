@@ -211,7 +211,7 @@ fn stages_only_verified_versions_and_migrates_the_initial_schema() {
     let db = f.folder.path().join("sync.db");
     let connection = Connection::open(db).unwrap();
     connection
-        .execute_batch("DROP TABLE file_archive; DROP TABLE applied_file; DROP TABLE file_intent; PRAGMA user_version = 1;")
+        .execute_batch("DROP TABLE signed_confirmation; DROP TABLE file_archive; DROP TABLE applied_file; DROP TABLE file_intent; PRAGMA user_version = 1;")
         .unwrap();
     drop(connection);
     let mut store = f.open();

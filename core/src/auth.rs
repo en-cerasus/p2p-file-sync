@@ -126,7 +126,7 @@ impl Roster {
             return Err(AuthError::WrongScope);
         }
         let confirmation = self.verify_confirmation(wire)?;
-        Ok(store.confirm_verified(confirmation)?)
+        Ok(store.confirm_verified_signed(confirmation, wire)?)
     }
 
     pub fn receive(&self, store: &mut Store, wire: &[u8]) -> Result<Apply, AuthError> {

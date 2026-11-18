@@ -19,7 +19,7 @@ use crate::{
     retention::{Confirmation, Protection},
 };
 
-const SCHEMA_VERSION: u32 = 5;
+const SCHEMA_VERSION: u32 = 6;
 const MAX_RECORD_BYTES: usize = 2 * 1024 * 1024 + 256;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -165,6 +165,19 @@ impl Store {
             tx.execute_batch(
                 "CREATE TABLE IF NOT EXISTS generation_baseline (
                     id INTEGER PRIMARY KEY CHECK (id = 1), digest BLOB NOT NULL
+                );",
+            )?;
+        }
+        if version < 6 {
+            tx.execute_batch(
+                "CREATE TABLE signed_confirmation (
+                    peer BLOB NOT NULL,
+                    object BLOB NOT NULL,
+                    successor_peer BLOB NOT NULL,
+                    successor_sequence BLOB NOT NULL,
+                    sent_through BLOB NOT NULL,
+                    wire BLOB NOT NULL,
+                    PRIMARY KEY (peer, object, successor_peer, successor_sequence)
                 );",
             )?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -414,13 +427,43 @@ impl Store {
     /// A single verified acknowledgement may advance several original
     /// versions superseded by the same resolution.
     pub fn confirm_verified(&mut self, confirmation: Confirmation) -> Result<(), StoreError> {
+        self.confirm_verified_inner(confirmation, None)
+    }
+
+    pub fn confirm_verified_signed(
+        &mut self,
+        confirmation: Confirmation,
+        wire: &[u8],
+    ) -> Result<(), StoreError> {
+        self.confirm_verified_inner(confirmation, Some(wire))
+    }
+
+    pub fn signed_confirmations_page(
+        &self,
+        after: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, Vec<u8>)>, StoreError> {
+        let mut query = self.connection.prepare(
+            "SELECT rowid, wire FROM signed_confirmation WHERE rowid > ?1 ORDER BY rowid LIMIT ?2",
+        )?;
+        let rows = query.query_map(params![after, limit.min(128) as i64], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    fn confirm_verified_inner(
+        &mut self,
+        confirmation: Confirmation,
+        wire: Option<&[u8]>,
+    ) -> Result<(), StoreError> {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         self.index.refresh(&tx, &self.membership)?;
         self.index
             .validate_confirmation(confirmation, &self.membership)?;
-        if self
+        let already_confirmed = self
             .index
             .protections
             .range(
@@ -431,8 +474,27 @@ impl Store {
                 protection
                     .confirmed_through(confirmation.peer)
                     .is_some_and(|through| through >= confirmation.sent_through)
-            })
-        {
+            });
+        if let Some(wire) = wire {
+            tx.execute(
+                "INSERT INTO signed_confirmation
+                 (peer, object, successor_peer, successor_sequence, sent_through, wire)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(peer, object, successor_peer, successor_sequence)
+                 DO UPDATE SET sent_through = excluded.sent_through, wire = excluded.wire
+                 WHERE excluded.sent_through > signed_confirmation.sent_through",
+                params![
+                    confirmation.peer.as_slice(),
+                    confirmation.object.as_slice(),
+                    confirmation.successor.peer.as_slice(),
+                    confirmation.successor.sequence.to_be_bytes().to_vec(),
+                    confirmation.sent_through.to_be_bytes().to_vec(),
+                    wire,
+                ],
+            )?;
+        }
+        if already_confirmed {
+            tx.commit()?;
             return Ok(());
         }
 
