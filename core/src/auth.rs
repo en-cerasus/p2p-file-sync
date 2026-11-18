@@ -4,10 +4,12 @@ use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 
 use crate::{
     replica::{Apply, Event, PeerId},
+    retention::Confirmation,
     store::{decode, encode, Membership, Store, StoreError},
 };
 
 const DOMAIN: &[u8] = b"p2p-file-sync/event/v1\0";
+const CONFIRMATION_DOMAIN: &[u8] = b"p2p-file-sync/confirmation/v1\0";
 const HEADER_BYTES: usize = 16 + 8 + 32;
 const SIGNATURE_BYTES: usize = 64;
 const MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
@@ -32,6 +34,8 @@ pub enum AuthError {
     NotWriter,
     BadSignature,
     InvalidEvent,
+    InvalidConfirmation,
+    UnknownPeer,
     Store(StoreError),
 }
 
@@ -68,43 +72,53 @@ impl Roster {
         if payload.len() > MAX_PAYLOAD_BYTES {
             return Err(AuthError::InvalidFrame);
         }
-        let mut wire = self.prefix(&author);
-        wire.extend_from_slice(&payload);
-        let signature = key.sign(&wire);
-        wire.extend_from_slice(&signature.to_bytes());
-        Ok(wire)
+        Ok(self.sign_payload(DOMAIN, key, &author, &payload))
     }
 
     pub fn verify_event(&self, wire: &[u8]) -> Result<Event, AuthError> {
-        let prefix_bytes = DOMAIN.len() + HEADER_BYTES;
-        if wire.len() <= prefix_bytes + SIGNATURE_BYTES
-            || wire.len() > prefix_bytes + SIGNATURE_BYTES + MAX_PAYLOAD_BYTES
-            || !wire.starts_with(DOMAIN)
-        {
-            return Err(AuthError::InvalidFrame);
-        }
-
-        let signed_bytes = wire.len() - SIGNATURE_BYTES;
-        let (message, signature) = wire.split_at(signed_bytes);
-        let (scope, author) = message[DOMAIN.len()..prefix_bytes].split_at(24);
-        if scope[..16] != self.membership.share
-            || scope[16..] != self.membership.generation.to_be_bytes()
-        {
-            return Err(AuthError::WrongScope);
-        }
-        let author: &PeerId = author.try_into().map_err(|_| AuthError::InvalidFrame)?;
+        let (author, payload) = self.verify_payload(DOMAIN, wire, MAX_PAYLOAD_BYTES)?;
         self.check_writer(author)?;
-        let key = VerifyingKey::from_bytes(author).map_err(|_| AuthError::BadSignature)?;
-        let signature = Signature::from_slice(signature).map_err(|_| AuthError::BadSignature)?;
-        key.verify_strict(message, &signature)
-            .map_err(|_| AuthError::BadSignature)?;
-
-        let payload = &message[prefix_bytes..];
         let event: Event = decode(payload).map_err(|_| AuthError::InvalidEvent)?;
         if event.id.peer != *author || encode(&event)? != payload {
             return Err(AuthError::InvalidEvent);
         }
         Ok(event)
+    }
+
+    /// The caller must first durably reconcile local edits and apply the
+    /// successor. Signing alone does not prove filesystem completion.
+    pub fn sign_confirmation(
+        &self,
+        key: &SigningKey,
+        confirmation: &Confirmation,
+    ) -> Result<Vec<u8>, AuthError> {
+        let author = key.verifying_key().to_bytes();
+        self.check_member(&author)?;
+        if confirmation.peer != author || confirmation.generation != self.membership.generation {
+            return Err(AuthError::InvalidConfirmation);
+        }
+        Ok(self.sign_payload(CONFIRMATION_DOMAIN, key, &author, &encode(confirmation)?))
+    }
+
+    pub fn verify_confirmation(&self, wire: &[u8]) -> Result<Confirmation, AuthError> {
+        let (author, payload) = self.verify_payload(CONFIRMATION_DOMAIN, wire, 128)?;
+        let confirmation: Confirmation =
+            decode(payload).map_err(|_| AuthError::InvalidConfirmation)?;
+        if confirmation.peer != *author
+            || confirmation.generation != self.membership.generation
+            || encode(&confirmation)? != payload
+        {
+            return Err(AuthError::InvalidConfirmation);
+        }
+        Ok(confirmation)
+    }
+
+    pub fn receive_confirmation(&self, store: &mut Store, wire: &[u8]) -> Result<(), AuthError> {
+        if store.membership() != &self.membership {
+            return Err(AuthError::WrongScope);
+        }
+        let confirmation = self.verify_confirmation(wire)?;
+        Ok(store.confirm_verified(confirmation)?)
     }
 
     pub fn receive(&self, store: &mut Store, wire: &[u8]) -> Result<Apply, AuthError> {
@@ -122,12 +136,59 @@ impl Roster {
         }
     }
 
-    fn prefix(&self, author: &PeerId) -> Vec<u8> {
-        let mut message = DOMAIN.to_vec();
+    fn check_member(&self, author: &PeerId) -> Result<(), AuthError> {
+        if self.roles.contains_key(author) {
+            Ok(())
+        } else {
+            Err(AuthError::UnknownPeer)
+        }
+    }
+
+    fn sign_payload(
+        &self,
+        domain: &[u8],
+        key: &SigningKey,
+        author: &PeerId,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut message = domain.to_vec();
         message.extend_from_slice(&self.membership.share);
         message.extend_from_slice(&self.membership.generation.to_be_bytes());
         message.extend_from_slice(author);
+        message.extend_from_slice(payload);
+        let signature = key.sign(&message);
+        message.extend_from_slice(&signature.to_bytes());
         message
+    }
+
+    fn verify_payload<'a>(
+        &self,
+        domain: &[u8],
+        wire: &'a [u8],
+        max_payload: usize,
+    ) -> Result<(&'a PeerId, &'a [u8]), AuthError> {
+        let prefix = domain.len() + HEADER_BYTES;
+        if wire.len() <= prefix + SIGNATURE_BYTES
+            || wire.len() > prefix + SIGNATURE_BYTES + max_payload
+            || !wire.starts_with(domain)
+        {
+            return Err(AuthError::InvalidFrame);
+        }
+        let signed_bytes = wire.len() - SIGNATURE_BYTES;
+        let (message, signature) = wire.split_at(signed_bytes);
+        let (scope, author) = message[domain.len()..prefix].split_at(24);
+        if scope[..16] != self.membership.share
+            || scope[16..] != self.membership.generation.to_be_bytes()
+        {
+            return Err(AuthError::WrongScope);
+        }
+        let author: &PeerId = author.try_into().map_err(|_| AuthError::InvalidFrame)?;
+        self.check_member(author)?;
+        let key = VerifyingKey::from_bytes(author).map_err(|_| AuthError::BadSignature)?;
+        let signature = Signature::from_slice(signature).map_err(|_| AuthError::BadSignature)?;
+        key.verify_strict(message, &signature)
+            .map_err(|_| AuthError::BadSignature)?;
+        Ok((author, &message[prefix..]))
     }
 }
 

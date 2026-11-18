@@ -195,7 +195,7 @@ fn share_session_refuses_content_without_a_signed_event_even_when_blob_exists() 
     let request = [b"P2P1".as_slice(), &[3], &32_u32.to_be_bytes(), &hash].concat();
     let mut stream = Scripted(Cursor::new(request));
     assert!(matches!(
-        ShareSession::default().serve_next(&mut stream, &mut store, &blobs),
+        ShareSession::default().serve_next(&mut stream, &mut store, &blobs, &roster),
         Err(WireError::UnavailableContent)
     ));
 }

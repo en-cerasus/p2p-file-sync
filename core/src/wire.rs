@@ -18,6 +18,9 @@ const GET_MANIFEST: u8 = 3;
 const MANIFEST: u8 = 4;
 const GET_CHUNK: u8 = 5;
 const CHUNK: u8 = 6;
+const CONFIRM: u8 = 7;
+const CONFIRMED: u8 = 8;
+const MAX_CONFIRMATION_FRAME: usize = 320;
 const MAX_MANIFEST_BYTES: usize = 8 + MAX_CHUNKS * 32;
 const MAX_FRONTIER_PEERS: usize = 1024;
 const FRONTIER_ENTRY_BYTES: usize = 40;
@@ -213,7 +216,11 @@ impl ShareSession {
         stream: &mut (impl Read + Write),
         store: &mut Store,
         completed: &BlobStore,
+        roster: &Roster,
     ) -> Result<(), WireError> {
+        if store.membership() != roster.membership() {
+            return Err(CatchupError::Authentication(crate::auth::AuthError::WrongScope).into());
+        }
         let (kind, length) = read_header(stream)?;
         match kind {
             PULL => {
@@ -249,9 +256,26 @@ impl ShareSession {
                     .ok_or(WireError::UnavailableContent)?;
                 write_chunk(stream, manifest, file, &body)
             }
+            CONFIRM => {
+                let body = read_body(stream, length, MAX_CONFIRMATION_FRAME)?;
+                roster
+                    .receive_confirmation(store, &body)
+                    .map_err(CatchupError::Authentication)?;
+                write_frame(stream, CONFIRMED, &[])
+            }
             _ => Err(WireError::InvalidFrame),
         }
     }
+}
+
+/// Submit a signed application confirmation and wait until it is recorded.
+pub fn send_confirmation(stream: &mut (impl Read + Write), wire: &[u8]) -> Result<(), WireError> {
+    if wire.len() > MAX_CONFIRMATION_FRAME {
+        return Err(WireError::InvalidFrame);
+    }
+    write_frame(stream, CONFIRM, wire)?;
+    read_frame(stream, CONFIRMED, 0)?;
+    Ok(())
 }
 
 fn has_signed_content(store: &Store, hash: ContentHash) -> bool {

@@ -109,7 +109,9 @@ fn exchanges_signed_events_only_after_mutual_tls_and_pin_validation() {
             blobs.put(blob, &data[..]).unwrap();
             let mut session = ShareSession::default();
             for _ in 0..3 {
-                session.serve_next(&mut secure, &mut store, &blobs).unwrap();
+                session
+                    .serve_next(&mut secure, &mut store, &blobs, &roster)
+                    .unwrap();
             }
 
             let (socket, _) = listener.accept().unwrap();
