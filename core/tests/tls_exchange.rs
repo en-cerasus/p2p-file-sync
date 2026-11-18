@@ -537,7 +537,12 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
     let receiver = setup.join("receiver-1/direct.json");
     let mut config: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&receiver).unwrap()).unwrap();
-    config["address"] = listener.local_addr().unwrap().to_string().into();
+    config["fallback_peers"] = serde_json::json!([{
+        "address": listener.local_addr().unwrap().to_string(),
+        "server_name": config["server_name"],
+        "server_pin": config["server_pin"],
+    }]);
+    config["address"] = "127.0.0.1:0".into();
     std::fs::write(&receiver, config.to_string()).unwrap();
     let destination = path.join("fresh-destination");
     let local = destination.join("譜面/試験譜面.TJA");

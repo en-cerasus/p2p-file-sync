@@ -953,7 +953,7 @@ pub(crate) fn pull_with_originals(
     let mut files = BTreeMap::new();
     let mut first_error = None;
     let mut succeeded = false;
-    for (index, peer) in peers.iter().enumerate() {
+    for peer in &peers {
         let report = direct::pull_with_reader(
             &client,
             peer,
@@ -965,8 +965,7 @@ pub(crate) fn pull_with_originals(
                 chunks: &chunks,
                 completed: &completed,
             },
-            // Confirmations are currently exchanged with the primary only.
-            reader.as_ref().filter(|_| index == 0),
+            reader.as_ref(),
             cancelled,
         );
         match report {
