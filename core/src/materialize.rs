@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     blob::{Blob, BlobStore},
+    projection::Projection,
     replica::{EntryKind, EventId, ObjectId, Replica},
     store::{decode, decode_column, encode, Store, StoreError},
 };
@@ -193,7 +194,9 @@ fn matches_head(replica: &Replica, intent: &FileIntent) -> bool {
         event.change.entry().map(|entry| &entry.kind),
         intent.desired,
     ) {
-        (Some(EntryKind::File(hash)), Some(blob)) => blob.hash == *hash,
+        (Some(EntryKind::File(hash)), Some(blob)) => {
+            blob.hash == *hash && Projection::new(replica).path(intent.object).is_ok()
+        }
         (None, None) => true,
         _ => false,
     }

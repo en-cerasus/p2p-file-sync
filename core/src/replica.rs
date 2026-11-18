@@ -93,6 +93,10 @@ impl Replica {
         self.events.get(&id)
     }
 
+    pub fn objects(&self) -> impl Iterator<Item = ObjectId> + '_ {
+        self.heads.keys().copied()
+    }
+
     pub fn heads(&self, object: ObjectId) -> impl Iterator<Item = &Event> {
         self.heads
             .get(&object)
