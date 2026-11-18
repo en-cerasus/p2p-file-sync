@@ -499,6 +499,105 @@ fn update_recovers_after_old_path_was_moved_and_does_not_clobber_a_new_occupant(
 }
 
 #[test]
+#[cfg(windows)]
+fn move_with_update_recovers_at_each_filesystem_boundary() {
+    use sha2::{Digest, Sha256};
+
+    enum InterruptedAfter {
+        Move,
+        Backup,
+        Publish,
+    }
+    for phase in [
+        InterruptedAfter::Move,
+        InterruptedAfter::Backup,
+        InterruptedAfter::Publish,
+    ] {
+        let f = Fixture::new();
+        let root = f.folder.path().join("destination");
+        std::fs::create_dir_all(root.join("folder")).unwrap();
+        let mut store = f.open();
+        let first = FileIntent {
+            previous: None,
+            ..f.intent.clone()
+        };
+        store.stage_file(&f.blobs, &first).unwrap();
+        store.recover_new_file(&f.blobs, &root, OBJECT).unwrap();
+
+        let parent = [7; 16];
+        store
+            .apply_verified(Event {
+                object: parent,
+                change: Change::Create(Entry {
+                    parent: None,
+                    name: "folder".into(),
+                    kind: EntryKind::Directory,
+                }),
+                ..event(3, content_entry([0; 32]))
+            })
+            .unwrap();
+        let desired = metadata(b"new contents");
+        f.blobs.put(desired, &b"new contents"[..]).unwrap();
+        let next = Event {
+            change: Change::Revise {
+                base: first.event,
+                entry: Some(Entry {
+                    parent: Some(parent),
+                    name: "moved.tja".into(),
+                    kind: EntryKind::File(desired.hash),
+                }),
+            },
+            ..event(4, content_entry(desired.hash))
+        };
+        let intent = FileIntent {
+            object: OBJECT,
+            event: next.id,
+            previous: first.desired,
+            desired: Some(desired),
+        };
+        store.apply_verified(next).unwrap();
+        store.stage_file(&f.blobs, &intent).unwrap();
+
+        let source = root.join("song.tja");
+        let destination = root.join("folder/moved.tja");
+        let mut digest = Sha256::new();
+        digest.update(OBJECT);
+        digest.update(intent.event.peer);
+        digest.update(intent.event.sequence.to_be_bytes());
+        let backup = root
+            .join("folder")
+            .join(format!(".p2p-update-{:x}", digest.finalize()));
+        std::fs::rename(&source, &destination).unwrap();
+        if matches!(phase, InterruptedAfter::Backup | InterruptedAfter::Publish) {
+            std::fs::rename(&destination, &backup).unwrap();
+        }
+        if matches!(phase, InterruptedAfter::Publish) {
+            std::fs::write(&destination, b"new contents").unwrap();
+        }
+        drop(store);
+
+        let mut store = f.open();
+        let outcome = store.recover_moved_file(&f.blobs, &root, OBJECT).unwrap();
+        let expected = if matches!(phase, InterruptedAfter::Publish) {
+            Recovery::AlreadyApplied
+        } else {
+            Recovery::Applied
+        };
+        assert_eq!(outcome, expected);
+        assert_eq!(std::fs::read(&destination).unwrap(), b"new contents");
+        assert!(!source.exists());
+        assert!(!backup.exists());
+        assert!(store.pending_files().unwrap().is_empty());
+        let applied = store.applied_file(OBJECT).unwrap().unwrap();
+        assert_eq!(applied.event, intent.event);
+        assert_eq!(
+            applied.path,
+            Some(vec!["folder".into(), "moved.tja".into()])
+        );
+    }
+}
+
+#[test]
 fn obsolete_pending_update_is_retired_only_for_a_known_disk_version() {
     for (bytes, expected_version) in [
         (b"new".as_slice(), 2),
