@@ -82,7 +82,7 @@ cargo run --locked --release -p p2p-sync-core --bin p2p-send -- serve .\trial-se
 
 現在は受信端末の証明書を事前登録する手動接続です。配信開始のGUIは未実装です。
 
-`p2p-send catch-up <server.json> <state-dir> <direct.json>` は、同じ共有・世代で登録された別の配信先から、署名付きイベントと取得可能なファイル本体を配信用キャッシュへ取り込みます。取り込んだデータは `serve` で再配信でき、作業フォルダーには書き込みません。接続には `direct.json` の主接続先を使います。
+`p2p-send catch-up <server.json> <state-dir> <direct.json>` は、同じ共有・世代で登録された別の配信先から、署名付きイベントと取得可能なファイル本体を配信用キャッシュへ取り込みます。取り込んだデータは `serve` で再配信でき、作業フォルダーには書き込みません。接続には `direct.json` の主接続先と追加の接続先を設定順に使います。
 
 `p2p-send serve-peer <server.json> <state-dir> <direct.json> <間隔秒>` は、配信しながら取り込みを繰り返します。間隔は1〜86400秒で、接続に失敗した場合も次の周期で再試行します。
 

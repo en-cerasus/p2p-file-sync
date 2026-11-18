@@ -58,14 +58,33 @@ struct EndpointConfig {
     server_pin: String,
 }
 
-impl EndpointConfig {
-    fn validate(self) -> Result<PeerEndpoint, HostError> {
-        Ok(PeerEndpoint {
-            address: self.address,
-            server_name: ServerName::try_from(self.server_name)
-                .map_err(|_| HostError::Configuration)?,
-            certificate: hex(&self.server_pin)?,
-        })
+impl Config {
+    fn endpoints(&self) -> Result<Vec<PeerEndpoint>, HostError> {
+        if self.fallback_peers.len() > 8 {
+            return Err(HostError::Configuration);
+        }
+        let primary = (
+            self.address,
+            self.server_name.as_str(),
+            self.server_pin.as_str(),
+        );
+        std::iter::once(primary)
+            .chain(self.fallback_peers.iter().map(|peer| {
+                (
+                    peer.address,
+                    peer.server_name.as_str(),
+                    peer.server_pin.as_str(),
+                )
+            }))
+            .map(|(address, server_name, certificate)| {
+                Ok(PeerEndpoint {
+                    address,
+                    server_name: ServerName::try_from(server_name.to_owned())
+                        .map_err(|_| HostError::Configuration)?,
+                    certificate: hex(certificate)?,
+                })
+            })
+            .collect()
     }
 }
 
@@ -371,16 +390,11 @@ impl Sender {
         let config: Config =
             serde_json::from_slice(&read_bounded(configuration, MAX_CONFIG_BYTES)?)
                 .map_err(|_| HostError::Configuration)?;
+        let peers = config.endpoints()?;
         let scope = build_roster(&config.share, config.generation, config.members)?;
         if scope.membership() != self.roster.membership() {
             return Err(HostError::Configuration);
         }
-        let peer = EndpointConfig {
-            address: config.address,
-            server_name: config.server_name,
-            server_pin: config.server_pin,
-        }
-        .validate()?;
         let (roots, credentials) = read_credentials(
             configuration,
             &config.ca_der,
@@ -391,16 +405,30 @@ impl Sender {
         let _lock = self.lock_state()?;
         let chunks =
             BlobStore::open(self.write_lock.with_file_name("chunks")).map_err(HostError::Io)?;
-        direct::pull_serving_cache(
-            &client,
-            &peer,
-            Duration::from_secs(15),
-            &mut self.store,
-            &self.roster,
-            &chunks,
-            &self.completed,
-        )
-        .map_err(HostError::Direct)
+        self.store.refresh().map_err(HostError::Store)?;
+        let before = self.store.event_order().len();
+        let mut first_error = None;
+        let mut succeeded = false;
+        for peer in &peers {
+            match direct::pull_serving_cache(
+                &client,
+                peer,
+                Duration::from_secs(15),
+                &mut self.store,
+                &self.roster,
+                &chunks,
+                &self.completed,
+            ) {
+                Ok(_) => succeeded = true,
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        if !succeeded {
+            return Err(first_error.map_or(HostError::Configuration, HostError::Direct));
+        }
+        Ok(self.store.event_order().len().saturating_sub(before))
     }
 
     pub fn serve(&mut self, socket: TcpStream) -> Result<(), HostError> {
@@ -520,6 +548,7 @@ pub(crate) fn pull_with_originals(
 ) -> Result<(PullSummaryV3, Vec<crate::archive::ProtectedOriginal>), HostError> {
     let config: Config = serde_json::from_slice(&read_bounded(configuration, MAX_CONFIG_BYTES)?)
         .map_err(|_| HostError::Configuration)?;
+    let peers = config.endpoints()?;
     let roster = build_roster(&config.share, config.generation, config.members)?;
     let reader = config
         .event_key
@@ -537,18 +566,6 @@ pub(crate) fn pull_with_originals(
             Ok(key)
         })
         .transpose()?;
-    if config.fallback_peers.len() > 8 {
-        return Err(HostError::Configuration);
-    }
-    let primary = EndpointConfig {
-        address: config.address,
-        server_name: config.server_name,
-        server_pin: config.server_pin,
-    };
-    let peers = std::iter::once(primary)
-        .chain(config.fallback_peers)
-        .map(EndpointConfig::validate)
-        .collect::<Result<Vec<_>, _>>()?;
     let (roots, credentials) = read_credentials(
         configuration,
         &config.ca_der,

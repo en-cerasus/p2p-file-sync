@@ -507,6 +507,15 @@ fn generated_writers_use_distinct_credentials_and_share_their_changes() {
     };
     let peer_config = setup.join("writer-2/direct.json");
     update_address(&peer_config, &first_listener);
+    let mut peer_settings: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&peer_config).unwrap()).unwrap();
+    peer_settings["fallback_peers"] = serde_json::json!([{
+        "address": peer_settings["address"],
+        "server_name": peer_settings["server_name"],
+        "server_pin": peer_settings["server_pin"],
+    }]);
+    peer_settings["address"] = "127.0.0.1:0".into();
+    std::fs::write(&peer_config, peer_settings.to_string()).unwrap();
     std::thread::scope(|threads| {
         let serving = threads.spawn(move || {
             first.serve(first_listener.accept().unwrap().0).unwrap();
