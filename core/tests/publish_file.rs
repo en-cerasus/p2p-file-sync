@@ -118,6 +118,72 @@ fn updates_and_tombstones_share_the_same_object_and_retain_previous_versions() {
 }
 
 #[test]
+fn shared_move_keeps_the_file_identity_and_hash_and_refuses_collisions() {
+    use p2p_sync_core::{
+        projection::Projection,
+        publish::{publish_tree, relocate_file},
+    };
+    let folder = tempfile::tempdir().unwrap();
+    let root = folder.path().join("share");
+    std::fs::create_dir_all(root.join("folder")).unwrap();
+    std::fs::write(root.join("song.tja"), b"song").unwrap();
+    std::fs::write(root.join("folder/taken.tja"), b"taken").unwrap();
+    let key = PeerSigningKey::from_bytes(&[15; 32]);
+    let peer = key.verifying_key().to_bytes();
+    let roster = Roster::new([8; 16], 1, [(peer, Role::Writer)].into());
+    let blobs = BlobStore::open(folder.path().join("files")).unwrap();
+    let mut store = Store::open(":memory:", roster.membership().clone()).unwrap();
+    publish_tree(&root, &mut store, &roster, &key, &blobs).unwrap();
+    let (object, base) = store
+        .replica()
+        .objects()
+        .find_map(|id| {
+            let head = store.replica().heads(id).next()?;
+            (head.change.entry()?.name == "song.tja").then_some((id, head.id))
+        })
+        .unwrap();
+    let parent = store
+        .replica()
+        .objects()
+        .find(|&id| {
+            Projection::new(store.replica())
+                .path(id)
+                .is_ok_and(|path| path == ["folder"])
+        })
+        .unwrap();
+    assert!(matches!(
+        relocate_file(&mut store, &roster, &key, base, Some(parent), "TAKEN.tja"),
+        Err(PublishError::NameConflict)
+    ));
+    let id = relocate_file(&mut store, &roster, &key, base, Some(parent), "renamed.tja").unwrap();
+    assert_eq!(store.replica().get(id).unwrap().object, object);
+    assert_eq!(
+        store
+            .replica()
+            .get(base)
+            .unwrap()
+            .change
+            .entry()
+            .unwrap()
+            .kind,
+        store
+            .replica()
+            .get(id)
+            .unwrap()
+            .change
+            .entry()
+            .unwrap()
+            .kind,
+    );
+    assert_eq!(
+        Projection::new(store.replica()).path(object).unwrap(),
+        ["folder", "renamed.tja"]
+    );
+    assert_eq!(store.protections().count(), 0);
+    assert_eq!(std::fs::read(root.join("song.tja")).unwrap(), b"song");
+}
+
+#[test]
 fn tree_publication_is_repeatable_and_skips_directory_links() {
     use p2p_sync_core::{projection::Projection, publish::publish_tree};
     let root = tempfile::tempdir().unwrap();

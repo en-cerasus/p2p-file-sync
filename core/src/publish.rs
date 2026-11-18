@@ -317,6 +317,67 @@ pub fn revise_file(
     )
 }
 
+/// Change the shared path of a regular file without changing its identity or bytes.
+pub fn relocate_file(
+    store: &mut Store,
+    roster: &Roster,
+    key: &PeerSigningKey,
+    base: EventId,
+    parent: Option<ObjectId>,
+    name: &str,
+) -> Result<EventId, PublishError> {
+    let peer = authorize(store, roster, key)?;
+    let target_key = collision_key(name).map_err(PublishError::InvalidName)?;
+    store.refresh().map_err(PublishError::Store)?;
+    let replica = store.replica();
+    let event = replica.get(base).ok_or(PublishError::StaleBase)?;
+    let object = event.object;
+    let mut heads = replica.heads(object);
+    if heads.next().map(|head| head.id) != Some(base)
+        || heads.next().is_some()
+        || store.signed_event(base).is_none()
+    {
+        return Err(PublishError::StaleBase);
+    }
+    let original = event.change.entry().ok_or(PublishError::StaleBase)?;
+    drop(heads);
+    let EntryKind::File(hash) = original.kind else {
+        return Err(PublishError::StaleBase);
+    };
+    let projection = Projection::new(replica);
+    projection
+        .path(object)
+        .map_err(|_| PublishError::StaleBase)?;
+    if let Some(parent) = parent {
+        if projection.path(parent).is_err()
+            || !replica.heads(parent).any(|head| {
+                head.change
+                    .entry()
+                    .is_some_and(|entry| entry.kind == EntryKind::Directory)
+            })
+        {
+            return Err(PublishError::InvalidParent);
+        }
+    }
+    if original.parent == parent && original.name == name {
+        return Ok(base);
+    }
+    let same_slot = original.parent == parent
+        && collision_key(&original.name).is_ok_and(|original_key| original_key == target_key);
+    if !same_slot && !projection.vacant(parent, name) {
+        return Err(PublishError::NameConflict);
+    }
+    let change = Change::Revise {
+        base,
+        entry: Some(Entry {
+            parent,
+            name: name.into(),
+            kind: EntryKind::File(hash),
+        }),
+    };
+    append_change(store, roster, key, peer, object, change, None)
+}
+
 fn revise_content(
     replacement: Option<crate::replica::ContentHash>,
     store: &mut Store,

@@ -45,30 +45,34 @@ fn run() -> Result<(), String> {
                 | "refresh-tree"
                 | "update"
                 | "delete"
+                | "move"
                 | "serve"
                 | "serve-tree"
         )
     ) || (mode == Some("publish") && args.len() < 4)
         || (matches!(mode, Some("publish-tree" | "refresh-tree")) && args.len() != 4)
-        || (mode == Some("update") && args.len() != 5)
+        || (matches!(mode, Some("update" | "move")) && args.len() != 5)
         || (mode == Some("delete") && args.len() != 4)
         || (mode == Some("serve-tree") && args.len() != 5)
         || (mode == Some("serve") && args.len() != 3)
     {
         return Err(
-            "Usage: p2p-send setup <new-dir> <bind-ip:port> <peer-ip:port> [receivers]\n       p2p-send publish <server.json> <state-dir> <file> [file ...]\n       p2p-send publish-tree <server.json> <state-dir> <folder>\n       p2p-send refresh-tree <server.json> <state-dir> <folder>\n       p2p-send update <server.json> <state-dir> <shared/path> <source>\n       p2p-send delete <server.json> <state-dir> <shared/path>\n       p2p-send serve <server.json> <state-dir>\n       p2p-send serve-tree <server.json> <state-dir> <folder> <interval-seconds>"
+            "Usage: p2p-send setup <new-dir> <bind-ip:port> <peer-ip:port> [receivers]\n       p2p-send publish <server.json> <state-dir> <file> [file ...]\n       p2p-send publish-tree <server.json> <state-dir> <folder>\n       p2p-send refresh-tree <server.json> <state-dir> <folder>\n       p2p-send update <server.json> <state-dir> <shared/path> <source>\n       p2p-send delete <server.json> <state-dir> <shared/path>\n       p2p-send move <server.json> <state-dir> <old/path> <new/path>\n       p2p-send serve <server.json> <state-dir>\n       p2p-send serve-tree <server.json> <state-dir> <folder> <interval-seconds>"
                 .to_string(),
         );
     }
 
     let mut sender = Sender::open(Path::new(&args[1]), Path::new(&args[2]))
         .map_err(|error| format!("Could not open sender configuration: {error:?}"))?;
-    if matches!(mode, Some("update" | "delete")) {
+    if matches!(mode, Some("update" | "delete" | "move")) {
         let shared = args[3].to_str().ok_or("Shared path must be UTF-8.")?;
-        let source = args.get(4).map(Path::new);
-        let event = sender
-            .revise(shared, source)
-            .map_err(|error| format!("Could not record shared-file change: {error:?}"))?;
+        let event = if mode == Some("move") {
+            let destination = args[4].to_str().ok_or("Destination must be UTF-8.")?;
+            sender.relocate(shared, destination)
+        } else {
+            sender.revise(shared, args.get(4).map(Path::new))
+        }
+        .map_err(|error| format!("Could not record shared-file change: {error:?}"))?;
         println!("Recorded change for {shared} (event {})", event.sequence);
         return Ok(());
     }

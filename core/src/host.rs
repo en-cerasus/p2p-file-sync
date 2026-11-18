@@ -19,7 +19,10 @@ use crate::{
     direct::{self, DirectError, PeerEndpoint},
     names::collision_key,
     projection::Projection,
-    publish::{publish_file, publish_tree, refresh_tree, revise_file, PublishError, TreeSummary},
+    publish::{
+        publish_file, publish_tree, refresh_tree, relocate_file, revise_file, PublishError,
+        TreeSummary,
+    },
     replica::{EntryKind, EventId, PeerId},
     store::{Store, StoreError},
     sync::{Destination, FileResult},
@@ -250,6 +253,46 @@ impl Sender {
         source: Option<&Path>,
     ) -> Result<EventId, HostError> {
         let _lock = self.lock_state()?;
+        let base = self.shared_head(shared_path, false)?;
+        revise_file(
+            source,
+            &mut self.store,
+            &self.roster,
+            &self.signer,
+            &self.completed,
+            base,
+        )
+        .map_err(HostError::Publish)
+    }
+
+    pub fn relocate(&mut self, shared_path: &str, destination: &str) -> Result<EventId, HostError> {
+        let _lock = self.lock_state()?;
+        let base = self.shared_head(shared_path, false)?;
+        let (parent, name) = match destination.rsplit_once('/') {
+            Some((parent, name)) => {
+                let event = self.shared_head(parent, true)?;
+                let parent = self
+                    .store
+                    .replica()
+                    .get(event)
+                    .ok_or(HostError::Publish(PublishError::InvalidParent))?
+                    .object;
+                (Some(parent), name)
+            }
+            None => (None, destination),
+        };
+        relocate_file(
+            &mut self.store,
+            &self.roster,
+            &self.signer,
+            base,
+            parent,
+            name,
+        )
+        .map_err(HostError::Publish)
+    }
+
+    fn shared_head(&mut self, shared_path: &str, directory: bool) -> Result<EventId, HostError> {
         let target: Vec<_> = shared_path
             .split('/')
             .map(collision_key)
@@ -257,7 +300,7 @@ impl Sender {
             .map_err(|error| HostError::Publish(PublishError::InvalidName(error)))?;
         self.store.refresh().map_err(HostError::Store)?;
 
-        let base = {
+        {
             let replica = self.store.replica();
             let projection = Projection::new(replica);
             replica
@@ -266,10 +309,9 @@ impl Sender {
                     let mut heads = replica.heads(object);
                     let first = heads.next()?;
                     if heads.next().is_some()
-                        || !first
-                            .change
-                            .entry()
-                            .is_some_and(|entry| matches!(entry.kind, EntryKind::File(_)))
+                        || !first.change.entry().is_some_and(|entry| {
+                            matches!(entry.kind, EntryKind::Directory) == directory
+                        })
                     {
                         return None;
                     }
@@ -285,18 +327,8 @@ impl Sender {
                         None
                     }
                 })
-                .ok_or(HostError::Publish(PublishError::StaleBase))?
-        };
-
-        revise_file(
-            source,
-            &mut self.store,
-            &self.roster,
-            &self.signer,
-            &self.completed,
-            base,
-        )
-        .map_err(HostError::Publish)
+                .ok_or(HostError::Publish(PublishError::StaleBase))
+        }
     }
 
     pub fn bind(&self) -> Result<TcpListener, HostError> {

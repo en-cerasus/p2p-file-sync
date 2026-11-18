@@ -90,14 +90,15 @@ cargo run --locked --release -p p2p-sync-core --bin p2p-send -- publish-tree .\t
 
 指定フォルダー内の階層と空フォルダーも登録します。同じ内容の再登録は既存イベントを再利用します。
 
-登録済みファイルを更新・削除するには、共有内の相対パスをスラッシュ区切りで指定します。
+登録済みファイルを更新・削除・移動するには、共有内の相対パスをスラッシュ区切りで指定します。
 
 ```powershell
 cargo run --locked --release -p p2p-sync-core --bin p2p-send -- update .\trial-setup\sender\server.json .\server-state '譜面/song.tja' .\最新版.tja
 cargo run --locked --release -p p2p-sync-core --bin p2p-send -- delete .\trial-setup\sender\server.json .\server-state '譜面/song.tja'
+cargo run --locked --release -p p2p-sync-core --bin p2p-send -- move .\trial-setup\sender\server.json .\server-state '譜面/song.tja' '譜面/renamed.tja'
 ```
 
-両コマンドは共有上のイベントを記録します。配信時に指定した元ファイルは引き続きローカルに残ります。Windowsの受信側は、最後に反映した版と一致し、他のアプリが開いていない場合に更新・削除します。更新中は旧版を一時退避してから新版を配置し、途中停止時は次回同期で再開します。ローカルで変更済みのファイル、iOSでの更新・削除は保留と表示されます。
+各コマンドは共有上のイベントを記録します。配信時に指定した元ファイルは引き続きローカルに残ります。`move` は共有上のファイルIDと内容を維持し、既に共有に登録されたフォルダーへ移動できます。初回同期では移動後のパスに配置され、移動前の版を反映済みの受信先では保留になります。Windowsの受信側は、最後に反映した版と一致し、他のアプリが開いていない場合に更新・削除します。更新中は旧版を一時退避してから新版を配置し、途中停止時は次回同期で再開します。ローカルで変更済みのファイル、iOSでの更新・削除は保留と表示されます。
 
 配信元フォルダーを再スキャンして同じパスの変更をまとめて送る場合は、`refresh-tree` を使います。新しいファイルは追加し、見つからないファイルは共有に残します。削除済みパスにファイルが残っている場合は、競合として報告します。
 
