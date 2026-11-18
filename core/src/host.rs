@@ -49,7 +49,8 @@ struct SenderConfig {
     generation: u64,
     members: BTreeMap<String, ConfigRole>,
     bind: SocketAddr,
-    client_pin: String,
+    client_pin: Option<String>,
+    client_pins: Option<Vec<String>>,
     ca_der: PathBuf,
     certificate_der: PathBuf,
     private_key_der: PathBuf,
@@ -58,7 +59,7 @@ struct SenderConfig {
 
 pub struct Sender {
     address: SocketAddr,
-    client_pin: CertificatePin,
+    client_pins: Vec<CertificatePin>,
     server: Server,
     roster: Roster,
     signer: PeerSigningKey,
@@ -72,7 +73,19 @@ impl Sender {
             serde_json::from_slice(&read_bounded(configuration, MAX_CONFIG_BYTES)?)
                 .map_err(|_| HostError::Configuration)?;
         let roster = build_roster(&config.share, config.generation, config.members)?;
-        let client_pin = hex(&config.client_pin)?;
+        let pins = match (config.client_pin, config.client_pins) {
+            (Some(pin), None) => vec![pin],
+            (None, Some(pins)) if !pins.is_empty() && pins.len() <= MAX_MEMBERS => pins,
+            _ => return Err(HostError::Configuration),
+        };
+        let mut client_pins = pins
+            .iter()
+            .map(|pin| hex(pin))
+            .collect::<Result<Vec<_>, _>>()?;
+        client_pins.sort_unstable();
+        if client_pins.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(HostError::Configuration);
+        }
         let (roots, credentials) = read_credentials(
             configuration,
             &config.ca_der,
@@ -104,7 +117,7 @@ impl Sender {
             .map_err(HostError::Store)?;
         Ok(Self {
             address: config.bind,
-            client_pin,
+            client_pins,
             server,
             roster,
             signer,
@@ -149,7 +162,7 @@ impl Sender {
         direct::serve(
             &self.server,
             socket,
-            self.client_pin,
+            &self.client_pins,
             Duration::from_secs(15),
             &mut self.store,
             &self.roster,

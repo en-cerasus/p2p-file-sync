@@ -18,7 +18,7 @@ fn main() -> ExitCode {
 fn run() -> Result<(), String> {
     let args: Vec<_> = env::args_os().skip(1).collect();
     let mode = args.first().and_then(|arg| arg.to_str());
-    if mode == Some("setup") && args.len() == 4 {
+    if mode == Some("setup") && (4..=5).contains(&args.len()) {
         let address = |index: usize| {
             args[index]
                 .to_str()
@@ -26,7 +26,14 @@ fn run() -> Result<(), String> {
                 .ok_or_else(|| "Specify an IP address and port.".to_owned())
         };
         let output = Path::new(&args[1]);
-        setup::create(output, address(2)?, address(3)?)?;
+        let receivers = match args.get(4) {
+            Some(value) => value
+                .to_str()
+                .and_then(|count| count.parse().ok())
+                .ok_or_else(|| "Specify the number of receiver configurations.".to_owned())?,
+            None => 1,
+        };
+        setup::create(output, address(2)?, address(3)?, receivers)?;
         println!("Test connection files created in {}", output.display());
         return Ok(());
     }
@@ -36,7 +43,7 @@ fn run() -> Result<(), String> {
         || (mode == Some("serve") && args.len() != 3)
     {
         return Err(
-            "Usage: p2p-send setup <new-dir> <bind-ip:port> <peer-ip:port>\n       p2p-send publish <server.json> <state-dir> <file> [file ...]\n       p2p-send publish-tree <server.json> <state-dir> <folder>\n       p2p-send serve <server.json> <state-dir>"
+            "Usage: p2p-send setup <new-dir> <bind-ip:port> <peer-ip:port> [receivers]\n       p2p-send publish <server.json> <state-dir> <file> [file ...]\n       p2p-send publish-tree <server.json> <state-dir> <folder>\n       p2p-send serve <server.json> <state-dir>"
                 .to_string(),
         );
     }

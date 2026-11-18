@@ -75,7 +75,7 @@ impl Client {
         verify_peer(
             connection.alpn_protocol(),
             connection.peer_certificates(),
-            &peer,
+            &[peer],
         )?;
         Ok(StreamOwned::new(connection, stream))
     }
@@ -105,8 +105,16 @@ impl Server {
 
     pub fn accept(
         &self,
-        mut stream: impl Read + Write,
+        stream: impl Read + Write,
         peer: CertificatePin,
+    ) -> Result<impl Read + Write, TlsError> {
+        self.accept_registered(stream, &[peer])
+    }
+
+    pub fn accept_registered(
+        &self,
+        mut stream: impl Read + Write,
+        peers: &[CertificatePin],
     ) -> Result<impl Read + Write, TlsError> {
         let mut connection = ServerConnection::new(self.config.clone())?;
         while connection.is_handshaking() {
@@ -117,7 +125,7 @@ impl Server {
         verify_peer(
             connection.alpn_protocol(),
             connection.peer_certificates(),
-            &peer,
+            peers,
         )?;
         Ok(StreamOwned::new(connection, stream))
     }
@@ -126,7 +134,7 @@ impl Server {
 fn verify_peer(
     alpn: Option<&[u8]>,
     chain: Option<&[CertificateDer<'_>]>,
-    pin: &CertificatePin,
+    pins: &[CertificatePin],
 ) -> Result<(), TlsError> {
     if alpn != Some(ALPN) {
         return Err(TlsError::UnexpectedProtocol);
@@ -134,7 +142,7 @@ fn verify_peer(
     let leaf = chain
         .and_then(|chain| chain.first())
         .ok_or(TlsError::MissingPeerCertificate)?;
-    if certificate_pin(leaf) != *pin {
+    if !pins.contains(&certificate_pin(leaf)) {
         return Err(TlsError::UnexpectedCertificate);
     }
     Ok(())

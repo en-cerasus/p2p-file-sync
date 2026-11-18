@@ -13,7 +13,15 @@ use rcgen::{
 use serde_json::json;
 use time::{Duration, OffsetDateTime};
 
-pub fn create(output: &Path, bind: SocketAddr, endpoint: SocketAddr) -> Result<(), String> {
+pub fn create(
+    output: &Path,
+    bind: SocketAddr,
+    endpoint: SocketAddr,
+    receivers: usize,
+) -> Result<(), String> {
+    if !(1..=32).contains(&receivers) {
+        return Err("Generate between 1 and 32 receiver configurations.".into());
+    }
     if bind.port() == 0
         || bind.port() != endpoint.port()
         || endpoint.ip().is_unspecified()
@@ -54,38 +62,55 @@ pub fn create(output: &Path, bind: SocketAddr, endpoint: SocketAddr) -> Result<(
     let host = endpoint.ip().to_string();
     let (server_cert, server_key) = issue(vec![host.clone()], ExtendedKeyUsagePurpose::ServerAuth)
         .map_err(certificate_error)?;
-    let (client_cert, client_key) =
-        issue(Vec::new(), ExtendedKeyUsagePurpose::ClientAuth).map_err(certificate_error)?;
-
     let sender = output.join("sender");
-    let receiver = output.join("receiver");
     fs::create_dir(output).map_err(write_error)?;
     fs::create_dir(&sender).map_err(write_error)?;
-    fs::create_dir(&receiver).map_err(write_error)?;
-    for (directory, cert, key) in [
-        (&sender, &server_cert, &server_key),
-        (&receiver, &client_cert, &client_key),
-    ] {
-        write_new(&directory.join("ca.der"), ca.der().as_ref()).map_err(write_error)?;
-        write_new(&directory.join("certificate.der"), cert.der().as_ref()).map_err(write_error)?;
-        write_new(&directory.join("private-key.der"), &key.serialize_der()).map_err(write_error)?;
-    }
+
+    write_new(&sender.join("ca.der"), ca.der().as_ref()).map_err(write_error)?;
+    write_new(&sender.join("certificate.der"), server_cert.der().as_ref()).map_err(write_error)?;
+    write_new(&sender.join("private-key.der"), &server_key.serialize_der()).map_err(write_error)?;
     write_new(&sender.join("event-key.bin"), &seed).map_err(write_error)?;
+    let server_pin = hex(&sha256(server_cert.der().as_ref()));
+    let mut client_pins = Vec::with_capacity(receivers);
+
+    for index in 1..=receivers {
+        let (client_cert, client_key) =
+            issue(Vec::new(), ExtendedKeyUsagePurpose::ClientAuth).map_err(certificate_error)?;
+        let receiver = if receivers == 1 {
+            output.join("receiver")
+        } else {
+            output.join(format!("receiver-{index}"))
+        };
+        fs::create_dir(&receiver).map_err(write_error)?;
+        write_new(&receiver.join("ca.der"), ca.der().as_ref()).map_err(write_error)?;
+        write_new(
+            &receiver.join("certificate.der"),
+            client_cert.der().as_ref(),
+        )
+        .map_err(write_error)?;
+        write_new(
+            &receiver.join("private-key.der"),
+            &client_key.serialize_der(),
+        )
+        .map_err(write_error)?;
+        client_pins.push(hex(&sha256(client_cert.der().as_ref())));
+        let client = json!({
+            "share": share, "generation": 1, "members": { (member.as_str()): "writer" },
+            "address": endpoint.to_string(), "server_name": host,
+            "server_pin": server_pin,
+            "ca_der": "ca.der", "certificate_der": "certificate.der", "private_key_der": "private-key.der",
+        });
+        write_new(&receiver.join("direct.json"), client.to_string().as_bytes())
+            .map_err(write_error)?;
+    }
 
     let server = json!({
         "share": share, "generation": 1, "members": { (member.as_str()): "writer" },
-        "bind": bind.to_string(), "client_pin": hex(&sha256(client_cert.der().as_ref())),
+        "bind": bind.to_string(), "client_pins": client_pins,
         "ca_der": "ca.der", "certificate_der": "certificate.der",
         "private_key_der": "private-key.der", "event_key": "event-key.bin",
     });
-    let client = json!({
-        "share": share, "generation": 1, "members": { (member.as_str()): "writer" },
-        "address": endpoint.to_string(), "server_name": host,
-        "server_pin": hex(&sha256(server_cert.der().as_ref())),
-        "ca_der": "ca.der", "certificate_der": "certificate.der", "private_key_der": "private-key.der",
-    });
     write_new(&sender.join("server.json"), server.to_string().as_bytes()).map_err(write_error)?;
-    write_new(&receiver.join("direct.json"), client.to_string().as_bytes()).map_err(write_error)?;
     Ok(())
 }
 

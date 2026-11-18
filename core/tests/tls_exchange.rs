@@ -131,7 +131,7 @@ fn exchanges_signed_events_only_after_mutual_tls_and_pin_validation() {
             direct::serve(
                 &server,
                 socket,
-                client_pin,
+                &[client_pin],
                 Duration::from_secs(5),
                 &mut store,
                 &roster,
@@ -197,7 +197,7 @@ fn encode_hex(bytes: &[u8]) -> String {
 }
 
 #[test]
-fn command_line_publish_can_be_served_to_the_receive_host() {
+fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
     use p2p_sync_core::host::{pull_from_config, Sender};
 
     let root = tempfile::tempdir().unwrap();
@@ -208,12 +208,16 @@ fn command_line_publish_can_be_served_to_the_receive_host() {
         command
             .arg("setup")
             .arg(&setup)
-            .args(["127.0.0.1:8765", "127.0.0.1:8765"]);
+            .args(["127.0.0.1:8765", "127.0.0.1:8765", "2"]);
         command
     };
     assert!(setup_command().output().unwrap().status.success());
     assert!(!setup_command().output().unwrap().status.success());
-    assert!(!setup.join("receiver/event-key.bin").exists());
+    assert!(!setup.join("receiver-1/event-key.bin").exists());
+    assert_ne!(
+        std::fs::read(setup.join("receiver-1/certificate.der")).unwrap(),
+        std::fs::read(setup.join("receiver-2/certificate.der")).unwrap()
+    );
 
     let server_config = setup.join("sender/server.json");
     let server_state = path.join("server-state");
@@ -243,26 +247,39 @@ fn command_line_publish_can_be_served_to_the_receive_host() {
     let mut sender = Sender::open(&server_config, &server_state).unwrap();
     let listener = sender.bind().unwrap();
     let address = listener.local_addr().unwrap();
-    let receive_config = setup.join("receiver/direct.json");
-    let mut settings: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&receive_config).unwrap()).unwrap();
-    settings["address"] = address.to_string().into();
-    std::fs::write(&receive_config, settings.to_string()).unwrap();
-    let destination = path.join("destination");
-    std::fs::create_dir(&destination).unwrap();
     std::thread::scope(|threads| {
         let serving = threads.spawn(move || {
-            let (socket, _) = listener.accept().unwrap();
-            sender.serve(socket).unwrap();
+            for _ in 0..2 {
+                let (socket, _) = listener.accept().unwrap();
+                sender.serve(socket).unwrap();
+            }
         });
-        let report =
-            pull_from_config(&receive_config, &path.join("client-state"), &destination).unwrap();
-        assert_eq!(report.files_published, 1);
-        assert_eq!(
-            std::fs::read(destination.join("譜面/試験譜面.tja")).unwrap(),
-            contents
-        );
-        assert!(destination.join("空フォルダー").is_dir());
+        for index in 1..=2 {
+            let receive_config = setup.join(format!("receiver-{index}/direct.json"));
+            let mut settings: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&receive_config).unwrap()).unwrap();
+            settings["address"] = address.to_string().into();
+            std::fs::write(&receive_config, settings.to_string()).unwrap();
+            let destination = path.join(format!("destination-{index}"));
+            std::fs::create_dir(&destination).unwrap();
+            let report =
+                pull_from_config(&receive_config, &path.join("client-state"), &destination)
+                    .unwrap();
+            assert_eq!(report.files_published, 1);
+            assert_eq!(
+                std::fs::read(destination.join("譜面/試験譜面.tja")).unwrap(),
+                contents
+            );
+            assert!(destination.join("空フォルダー").is_dir());
+        }
         serving.join().unwrap();
     });
+
+    let mut legacy: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&server_config).unwrap()).unwrap();
+    let pin = legacy["client_pins"][0].clone();
+    legacy.as_object_mut().unwrap().remove("client_pins");
+    legacy["client_pin"] = pin;
+    std::fs::write(&server_config, legacy.to_string()).unwrap();
+    assert!(Sender::open(&server_config, &server_state).is_ok());
 }

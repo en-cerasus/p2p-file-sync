@@ -57,14 +57,16 @@ pub fn pull(
 pub fn serve(
     server: &Server,
     socket: TcpStream,
-    peer: CertificatePin,
+    peers: &[CertificatePin],
     timeout: Duration,
     store: &mut Store,
     roster: &Roster,
     completed: &BlobStore,
 ) -> Result<(), DirectError> {
     configure(&socket, timeout).map_err(DirectError::Socket)?;
-    let mut connection = server.accept(socket, peer).map_err(DirectError::Tls)?;
+    let mut connection = server
+        .accept_registered(socket, peers)
+        .map_err(DirectError::Tls)?;
     let mut session = ShareSession::default();
     while session
         .serve_next(&mut connection, store, completed, roster)

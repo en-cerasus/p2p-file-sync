@@ -55,7 +55,7 @@ GitHub Actionsの「Build unsigned iOS IPA」も手動で実行できます。�
 cargo run --locked --release -p p2p-sync-core --bin p2p-send -- setup .\trial-setup 127.0.0.1:8765 127.0.0.1:8765
 ```
 
-`sender/server.json` と `receiver/direct.json` が生成されます。別端末で試すときは、受信端末から到達可能な配信PCのIPアドレスを、待受と接続先に指定してください。受信端末へ移すのは `receiver` フォルダーだけです。どちらにも秘密鍵があるため、公開フォルダーやGitに追加しないでください。試験証明書の有効期間は30日です。
+`sender/server.json` と `receiver/direct.json` が生成されます。別端末で試すときは、受信端末から到達可能な配信PCのIPアドレスを、待受と接続先に指定してください。受信端末へ移すのは `receiver` フォルダーだけです。どちらにも秘密鍵があるため、公開フォルダーやGitに追加しないでください。試験証明書の有効期間は30日です。複数台で試す場合はsetupコマンドの末尾に台数（1〜32）を指定し、各受信端末に異なる receiver-N フォルダーを移します。
 
 手動で設定する場合は、
 受信設定と同じ `share`、`generation`、`members` を持つ `server.json` を用意します。配信には次のフィールドを指定します。
@@ -63,7 +63,7 @@ cargo run --locked --release -p p2p-sync-core --bin p2p-send -- setup .\trial-se
 |JSON項目|内容|
 |---|---|
 |`bind`|TCP待受のアドレスとポート。同一PCでの試験は `127.0.0.1:8765`|
-|`client_pin`|受信側証明書DERのSHA-256を64桁の16進数で指定|
+|`client_pin`|受信側証明書DERのSHA-256を64桁の16進数で指定。複数台の場合は client_pins 配列を指定|
 |`ca_der`、`certificate_der`、`private_key_der`|CA証明書、配信側証明書、配信側秘密鍵のDERファイル名|
 |`event_key`|配信側Ed25519秘密鍵の32バイトseedを保存したファイル。対応する公開鍵を `members` に `writer` として登録|
 
@@ -74,7 +74,7 @@ cargo run --locked --release -p p2p-sync-core --bin p2p-send -- publish .\trial-
 cargo run --locked --release -p p2p-sync-core --bin p2p-send -- serve .\trial-setup\sender\server.json .\server-state
 ```
 
-現在は受信側証明書を1件指定する手動接続です。配信開始のGUIは未実装です。
+現在は受信端末の証明書を事前登録する手動接続です。配信開始のGUIは未実装です。
 
 譜面集をまとめて登録する場合は、`publish` の代わりに `publish-tree` を使います。
 
