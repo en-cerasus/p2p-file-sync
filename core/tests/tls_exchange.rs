@@ -200,31 +200,26 @@ fn encode_hex(bytes: &[u8]) -> String {
 fn command_line_publish_can_be_served_to_the_receive_host() {
     use p2p_sync_core::host::{pull_from_config, Sender};
 
-    let (_, ca_der, server, client) = identities();
     let root = tempfile::tempdir().unwrap();
     let path = root.path();
-    let files = [
-        ("ca.der", ca_der.as_ref()),
-        ("server.der", server.chain[0].as_ref()),
-        ("server-key.der", server.key.secret_der()),
-        ("client.der", client.chain[0].as_ref()),
-        ("client-key.der", client.key.secret_der()),
-    ];
-    for (name, body) in files {
-        std::fs::write(path.join(name), body).unwrap();
-    }
-    let key = PeerSigningKey::from_bytes(&[22; 32]);
-    std::fs::write(path.join("event-key.bin"), key.to_bytes()).unwrap();
-    let member = encode_hex(&key.verifying_key().to_bytes());
-    let share = encode_hex(&[10; 16]);
-    let server_config = path.join("server.json");
+    let setup = path.join("setup");
+    let setup_command = || {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"));
+        command
+            .arg("setup")
+            .arg(&setup)
+            .args(["127.0.0.1:8765", "127.0.0.1:8765"]);
+        command
+    };
+    assert!(setup_command().output().unwrap().status.success());
+    assert!(!setup_command().output().unwrap().status.success());
+    assert!(!setup.join("receiver/event-key.bin").exists());
+
+    let server_config = setup.join("sender/server.json");
     let server_state = path.join("server-state");
-    let settings = serde_json::json!({
-        "share": share, "generation": 1, "members": { (member.as_str()): "writer" },
-        "bind": "127.0.0.1:0", "client_pin": encode_hex(&certificate_pin(&client.chain[0])),
-        "ca_der": "ca.der", "certificate_der": "server.der",
-        "private_key_der": "server-key.der", "event_key": "event-key.bin"
-    });
+    let mut settings: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&server_config).unwrap()).unwrap();
+    settings["bind"] = "127.0.0.1:0".into();
     std::fs::write(&server_config, settings.to_string()).unwrap();
     let source = path.join("試験譜面.tja");
     let contents = b"TITLE:Command line published";
@@ -245,13 +240,10 @@ fn command_line_publish_can_be_served_to_the_receive_host() {
     let mut sender = Sender::open(&server_config, &server_state).unwrap();
     let listener = sender.bind().unwrap();
     let address = listener.local_addr().unwrap();
-    let receive_config = path.join("direct.json");
-    let settings = serde_json::json!({
-        "share": share, "generation": 1, "members": { (member.as_str()): "writer" },
-        "address": address.to_string(), "server_name": "localhost",
-        "server_pin": encode_hex(&certificate_pin(&server.chain[0])),
-        "ca_der": "ca.der", "certificate_der": "client.der", "private_key_der": "client-key.der"
-    });
+    let receive_config = setup.join("receiver/direct.json");
+    let mut settings: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&receive_config).unwrap()).unwrap();
+    settings["address"] = address.to_string().into();
     std::fs::write(&receive_config, settings.to_string()).unwrap();
     let destination = path.join("destination");
     std::fs::create_dir(&destination).unwrap();

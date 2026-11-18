@@ -33,7 +33,7 @@ GitHub Actionsの「Build unsigned iOS IPA」も手動で実行できます。�
 
 ## 直接接続の試験設定
 
-試験には、接続先で配信中のピアと、事前に発行した相互TLS用の証明書・秘密鍵が必要です。WindowsはJSONを選択します。iOSはJSONと証明書類を入れたフォルダーを選択します。iOSのJSON名は `direct.json`、同期先はアプリのDocuments内の `P2PSync` です。
+試験用の証明書・秘密鍵と接続設定は配信コマンドの `setup` で生成できます。WindowsはJSONを選択します。iOSはJSONと証明書類を入れたフォルダーを選択します。iOSのJSON名は `direct.json`、同期先はアプリのDocuments内の `P2PSync` です。
 
 |JSON項目|内容|
 |---|---|
@@ -49,6 +49,15 @@ GitHub Actionsの「Build unsigned iOS IPA」も手動で実行できます。�
 
 ### Windowsからの試験配信
 
+同じPCで試す場合は、アクセス権を管理できる作業フォルダーで、まだ存在しない `trial-setup` を指定します。
+
+```powershell
+cargo run --locked --release -p p2p-sync-core --bin p2p-send -- setup .\trial-setup 127.0.0.1:8765 127.0.0.1:8765
+```
+
+`sender/server.json` と `receiver/direct.json` が生成されます。別端末で試すときは、受信端末から到達可能な配信PCのIPアドレスを、待受と接続先に指定してください。受信端末へ移すのは `receiver` フォルダーだけです。どちらにも秘密鍵があるため、公開フォルダーやGitに追加しないでください。試験証明書の有効期間は30日です。
+
+手動で設定する場合は、
 受信設定と同じ `share`、`generation`、`members` を持つ `server.json` を用意します。配信には次のフィールドを指定します。
 
 |JSON項目|内容|
@@ -61,8 +70,8 @@ GitHub Actionsの「Build unsigned iOS IPA」も手動で実行できます。�
 ルート直下に共有するファイルを登録してから配信を開始します。同じ状態フォルダーを両コマンドに渡します。停止はCtrl+Cです。
 
 ```powershell
-cargo run --locked --release -p p2p-sync-core --bin p2p-send -- publish .\server.json .\server-state .\song.tja
-cargo run --locked --release -p p2p-sync-core --bin p2p-send -- serve .\server.json .\server-state
+cargo run --locked --release -p p2p-sync-core --bin p2p-send -- publish .\trial-setup\sender\server.json .\server-state .\song.tja
+cargo run --locked --release -p p2p-sync-core --bin p2p-send -- serve .\trial-setup\sender\server.json .\server-state
 ```
 
-現在は受信側証明書を1件指定する手動接続です。証明書の発行ツールと配信画面は未実装です。
+現在は受信側証明書を1件指定する手動接続です。配信開始のGUIは未実装です。
