@@ -15,3 +15,6 @@ serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 tempfile = "3.27"
 unicode-normalization = "0.1.26"
+cap-std = "4.0.3"
+cap-fs-ext = "4.0.3"
+getrandom = "0.4"

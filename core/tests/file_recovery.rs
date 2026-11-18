@@ -223,3 +223,69 @@ fn stages_only_verified_versions_and_migrates_the_initial_schema() {
     drop(store);
     assert_eq!(f.open().pending_files().unwrap(), [f.intent]);
 }
+
+#[test]
+fn creates_nested_file_in_selected_root_and_preserves_a_collision() {
+    let f = Fixture::new();
+    let root = f.folder.path().join("destination");
+    std::fs::create_dir_all(root.join("譜面")).unwrap();
+    let dir = [6; 16];
+    let object = [7; 16];
+    let content = metadata(b"new");
+    let mut store = f.open();
+    store
+        .apply_verified(Event {
+            id: EventId {
+                peer: PEER,
+                sequence: 3,
+            },
+            context: [(PEER, 2)].into(),
+            object: dir,
+            change: Change::Create(Entry {
+                parent: None,
+                name: "譜面".into(),
+                kind: EntryKind::Directory,
+            }),
+        })
+        .unwrap();
+    let id = EventId {
+        peer: PEER,
+        sequence: 4,
+    };
+    store
+        .apply_verified(Event {
+            id,
+            context: [(PEER, 3)].into(),
+            object,
+            change: Change::Create(Entry {
+                parent: Some(dir),
+                ..content_entry(content.hash)
+            }),
+        })
+        .unwrap();
+    let intent = FileIntent {
+        object,
+        event: id,
+        previous: None,
+        desired: Some(content),
+    };
+    store.stage_file(&f.blobs, &intent).unwrap();
+    let destination = root.join("譜面").join("song.tja");
+    std::fs::write(&destination, b"user content").unwrap();
+    assert_eq!(
+        store.recover_new_file(&f.blobs, &root, object).unwrap(),
+        Recovery::Diverged
+    );
+    assert_eq!(std::fs::read(&destination).unwrap(), b"user content");
+    std::fs::remove_file(&destination).unwrap();
+    drop(store);
+
+    let mut store = f.open();
+    assert_eq!(
+        store.recover_new_file(&f.blobs, &root, object).unwrap(),
+        Recovery::Applied
+    );
+    assert_eq!(std::fs::read(&destination).unwrap(), b"new");
+    assert_eq!(std::fs::read_dir(root.join("譜面")).unwrap().count(), 1);
+    assert!(store.pending_files().unwrap().is_empty());
+}

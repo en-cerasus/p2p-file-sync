@@ -1,10 +1,11 @@
-use std::{fs::File, io};
+use std::{fs::File, io, path::Path};
 
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     blob::{Blob, BlobStore},
+    local_target::{open_root, NewFileTarget},
     projection::Projection,
     replica::{EntryKind, EventId, ObjectId, Replica},
     store::{decode, decode_column, encode, Store, StoreError},
@@ -130,33 +131,70 @@ impl Store {
         };
 
         let allow_write = matches_head(replica, &intent);
-        if let Some(previous) = intent.previous {
-            blobs.open_verified(previous)?;
-        }
-        let replacement = intent
-            .desired
-            .map(|blob| blobs.open_verified(blob))
-            .transpose()?;
-        let current = target.inspect(object)?;
-        let result = if current == intent.desired {
-            Recovery::AlreadyApplied
-        } else if current != intent.previous {
-            return Ok(Recovery::Diverged);
-        } else if !allow_write {
-            return Ok(Recovery::Superseded);
-        } else if target.replace_if_current(&intent, replacement)? {
-            Recovery::Applied
-        } else {
-            return Ok(Recovery::Diverged);
-        };
-
-        tx.execute(
-            "DELETE FROM file_intent WHERE object = ?1",
-            [object.as_slice()],
-        )?;
-        tx.commit()?;
-        Ok(result)
+        reconcile(tx, blobs, target, &intent, allow_write)
     }
+
+    /// Publish a new file under a user-selected local root. This backend
+    /// never overwrites an existing path, including one created concurrently.
+    pub fn recover_new_file(
+        &mut self,
+        blobs: &BlobStore,
+        root: &Path,
+        object: ObjectId,
+    ) -> Result<Recovery, MaterializeError> {
+        let (tx, replica) = self.begin_indexed_write()?;
+        let Some(intent) = load_intent(&tx, object)? else {
+            return Ok(Recovery::NonePending);
+        };
+        if intent.previous.is_some() || intent.desired.is_none() {
+            return Err(MaterializeError::InvalidIntent);
+        }
+        if !matches_head(replica, &intent) {
+            return Ok(Recovery::Superseded);
+        }
+        let projection = Projection::new(replica);
+        let path = projection
+            .path(object)
+            .map_err(|_| MaterializeError::InvalidIntent)?;
+        let mut target = NewFileTarget::open(&open_root(root)?, &path)?;
+        reconcile(tx, blobs, &mut target, &intent, true)
+    }
+}
+
+fn reconcile(
+    tx: rusqlite::Transaction<'_>,
+    blobs: &BlobStore,
+    target: &mut impl FileTarget,
+    intent: &FileIntent,
+    allow_write: bool,
+) -> Result<Recovery, MaterializeError> {
+    let object = intent.object;
+    if let Some(previous) = intent.previous {
+        blobs.open_verified(previous)?;
+    }
+    let replacement = intent
+        .desired
+        .map(|blob| blobs.open_verified(blob))
+        .transpose()?;
+    let current = target.inspect(object)?;
+    let result = if current == intent.desired {
+        Recovery::AlreadyApplied
+    } else if current != intent.previous {
+        return Ok(Recovery::Diverged);
+    } else if !allow_write {
+        return Ok(Recovery::Superseded);
+    } else if target.replace_if_current(intent, replacement)? {
+        Recovery::Applied
+    } else {
+        return Ok(Recovery::Diverged);
+    };
+
+    tx.execute(
+        "DELETE FROM file_intent WHERE object = ?1",
+        [object.as_slice()],
+    )?;
+    tx.commit()?;
+    Ok(result)
 }
 
 fn load_intent(

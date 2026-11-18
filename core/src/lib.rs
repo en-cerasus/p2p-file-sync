@@ -1,4 +1,5 @@
 pub mod blob;
+mod local_target;
 pub mod materialize;
 pub mod names;
 pub mod projection;
