@@ -277,14 +277,21 @@ impl Store {
                 let Ok(mut old) = NewFileTarget::existing(&root, &old_components) else {
                     return Ok(false);
                 };
-                if !old
-                    .inspect(object)
-                    .is_ok_and(|actual| actual == Some(previous))
+                let same_slot = same_name_slot(&old_path, &path);
+                if (same_slot && !old.is_only_spelling().unwrap_or(false))
+                    || !old
+                        .inspect(object)
+                        .is_ok_and(|actual| actual == Some(previous))
                 {
                     let Ok(mut new) = NewFileTarget::existing(&root, &new_components) else {
                         return Ok(false);
                     };
-                    if !old.name_is_vacant().unwrap_or(false)
+                    let moved = if same_slot {
+                        new.is_only_spelling()
+                    } else {
+                        old.name_is_vacant()
+                    };
+                    if !moved.unwrap_or(false)
                         || !new
                             .inspect(object)
                             .is_ok_and(|actual| actual == Some(previous))
@@ -387,7 +394,8 @@ impl Store {
         else {
             return Ok(Recovery::Superseded);
         };
-        if !projection.vacant(old_entry.parent, &old_entry.name) {
+        let same_slot = same_name_slot(&old_path, &path);
+        if !same_slot && !projection.vacant(old_entry.parent, &old_entry.name) {
             return Ok(Recovery::Diverged);
         }
         let root = open_root(root)?;
@@ -395,13 +403,18 @@ impl Store {
         let target_components: Vec<_> = path.iter().map(String::as_str).collect();
         let source = NewFileTarget::existing(&root, &source_components)?;
         let mut target = NewFileTarget::existing(&root, &target_components)?;
-        let result = if source.name_is_vacant()?
+        let already_renamed = if same_slot {
+            target.is_only_spelling()?
+        } else {
+            source.name_is_vacant()?
+        };
+        let result = if already_renamed
             && target
                 .inspect(object)
                 .is_ok_and(|blob| blob == Some(previous))
         {
             Recovery::AlreadyApplied
-        } else if source.move_verified(&target, previous)? {
+        } else if source.move_verified(&target, previous, same_slot)? {
             Recovery::Applied
         } else {
             return Ok(Recovery::Diverged);
@@ -463,6 +476,19 @@ impl Store {
         let components: Vec<_> = path.iter().map(String::as_str).collect();
         let mut target = NewFileTarget::existing(&open_root(root)?, &components)?;
         reconcile(tx, blobs, &mut target, &intent, Some(path), true)
+    }
+}
+
+#[cfg(windows)]
+fn same_name_slot(before: &[String], after: &[String]) -> bool {
+    use crate::names::collision_key;
+
+    match (before.split_last(), after.split_last()) {
+        (Some((old, old_parent)), Some((new, new_parent))) if old_parent == new_parent => {
+            collision_key(old)
+                .is_ok_and(|key| collision_key(new).is_ok_and(|new_key| new_key == key))
+        }
+        _ => false,
     }
 }
 

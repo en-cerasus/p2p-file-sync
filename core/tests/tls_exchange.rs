@@ -544,6 +544,11 @@ fn running_sender_refreshes_its_source_and_serves_new_files() {
                     .unwrap();
                 let (socket, _) = listener.accept().unwrap();
                 sender.serve(socket).unwrap();
+                sender
+                    .relocate("folder/final.tja", "folder/Final.TJA")
+                    .unwrap();
+                let (socket, _) = listener.accept().unwrap();
+                sender.serve(socket).unwrap();
             });
             let report = pull_from_config(&receiver, &client_state, &destination).unwrap();
             assert_eq!(report.files_blocked, 1);
@@ -557,6 +562,14 @@ fn running_sender_refreshes_its_source_and_serves_new_files() {
                 std::fs::read(destination.join("folder/final.tja")).unwrap(),
                 b"initial"
             );
+            let report = pull_from_config(&receiver, &client_state, &destination).unwrap();
+            assert_eq!(report.files_updated, 1);
+            let exact_names: Vec<_> = std::fs::read_dir(destination.join("folder"))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            assert!(exact_names.iter().any(|name| name == "Final.TJA"));
+            assert!(!exact_names.iter().any(|name| name == "final.tja"));
             server.join().unwrap();
         });
     }

@@ -86,8 +86,18 @@ impl NewFileTarget {
     }
 
     #[cfg(windows)]
-    pub(crate) fn move_verified(&self, destination: &Self, expected: Blob) -> io::Result<bool> {
-        if !destination.name_is_vacant()? {
+    pub(crate) fn move_verified(
+        &self,
+        destination: &Self,
+        expected: Blob,
+        same_slot: bool,
+    ) -> io::Result<bool> {
+        let safe = if same_slot {
+            self.is_only_spelling()?
+        } else {
+            destination.name_is_vacant()?
+        };
+        if !safe {
             return Ok(false);
         }
         let Some(file) = self.lock_verified(&self.name, expected)? else {
@@ -98,6 +108,27 @@ impl NewFileTarget {
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
             Err(error) => Err(error),
         }
+    }
+
+    /// Check the stored spelling and reject a second spelling on a
+    /// case-sensitive directory. Opening by name alone cannot do this.
+    #[cfg(windows)]
+    pub(crate) fn is_only_spelling(&self) -> io::Result<bool> {
+        let key = collision_key(&self.name).map_err(|_| invalid_name())?;
+        let mut found = false;
+        for entry in self.parent.entries()? {
+            let name = entry?.file_name();
+            if let Some(name) = name
+                .to_str()
+                .filter(|name| collision_key(name).is_ok_and(|candidate| candidate == key))
+            {
+                if name != self.name {
+                    return Ok(false);
+                }
+                found = true;
+            }
+        }
+        Ok(found)
     }
 
     #[cfg(windows)]
