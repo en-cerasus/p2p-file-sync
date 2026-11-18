@@ -52,7 +52,7 @@ impl BlobStore {
     }
 
     pub fn open_verified(&self, expected: Blob) -> io::Result<File> {
-        let mut file = File::open(self.path(expected.hash))?;
+        let mut file = self.open_candidate(expected.hash)?;
         if !file.metadata()?.is_file() {
             return Err(invalid("blob is not a regular file"));
         }
@@ -62,6 +62,10 @@ impl BlobStore {
         }
         file.rewind()?;
         Ok(file)
+    }
+
+    pub(crate) fn open_candidate(&self, hash: ContentHash) -> io::Result<File> {
+        File::open(self.path(hash))
     }
 
     fn path(&self, hash: ContentHash) -> PathBuf {

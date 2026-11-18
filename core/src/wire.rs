@@ -48,7 +48,11 @@ impl From<CatchupError> for WireError {
 /// with framing errors must be closed by the caller.
 pub fn serve_pull(stream: &mut (impl Read + Write), store: &mut Store) -> Result<(), WireError> {
     let request = read_frame(stream, PULL, MAX_FRONTIER_PEERS * FRONTIER_ENTRY_BYTES)?;
-    let remote = decode_frontier(&request)?;
+    write_page(stream, store, &request)
+}
+
+fn write_page(stream: &mut impl Write, store: &mut Store, request: &[u8]) -> Result<(), WireError> {
+    let remote = decode_frontier(request)?;
     let page = outgoing_page(store, &remote)?;
     let mut response = Vec::new();
     response.push(u8::from(page.has_more));
@@ -97,6 +101,10 @@ pub fn serve_manifest(
     if request != manifest.file().hash {
         return Err(WireError::UnavailableContent);
     }
+    write_manifest(stream, manifest)
+}
+
+fn write_manifest(stream: &mut impl Write, manifest: &Manifest) -> Result<(), WireError> {
     let mut response = Vec::with_capacity(8 + manifest.hashes().len() * 32);
     response.extend_from_slice(&manifest.file().length.to_be_bytes());
     for hash in manifest.hashes() {
@@ -149,6 +157,15 @@ pub fn serve_chunk(
     source: &mut (impl Read + Seek),
 ) -> Result<(), WireError> {
     let request = read_frame(stream, GET_CHUNK, 36)?;
+    write_chunk(stream, manifest, source, &request)
+}
+
+fn write_chunk(
+    stream: &mut impl Write,
+    manifest: &Manifest,
+    source: &mut (impl Read + Seek),
+    request: &[u8],
+) -> Result<(), WireError> {
     if request.len() != 36 {
         return Err(WireError::InvalidFrame);
     }
@@ -182,19 +199,99 @@ pub fn pull_chunk(
     Ok(())
 }
 
-fn read_frame(stream: &mut impl Read, kind: u8, max_bytes: usize) -> Result<Vec<u8>, WireError> {
+/// Per-connection file selection. Run only after the caller authenticates
+/// the peer for this exact share generation. A reconnect selects a manifest
+/// again and may continue requesting only missing chunks.
+#[derive(Default)]
+pub struct ShareSession {
+    selected: Option<(Manifest, std::fs::File)>,
+}
+
+impl ShareSession {
+    pub fn serve_next(
+        &mut self,
+        stream: &mut (impl Read + Write),
+        store: &mut Store,
+        completed: &BlobStore,
+    ) -> Result<(), WireError> {
+        let (kind, length) = read_header(stream)?;
+        match kind {
+            PULL => {
+                let body = read_body(stream, length, MAX_FRONTIER_PEERS * FRONTIER_ENTRY_BYTES)?;
+                write_page(stream, store, &body)
+            }
+            GET_MANIFEST => {
+                self.selected = None;
+                let body = read_body(stream, length, 32)?;
+                let hash: ContentHash = body.try_into().map_err(|_| WireError::InvalidFrame)?;
+                store.refresh().map_err(CatchupError::Store)?;
+                if !has_signed_content(store, hash) {
+                    return Err(WireError::UnavailableContent);
+                }
+                let mut file = completed.open_candidate(hash)?;
+                let metadata = file.metadata()?;
+                if !metadata.is_file() {
+                    return Err(WireError::UnavailableContent);
+                }
+                let manifest = Manifest::build(&mut file, metadata.len())?;
+                if manifest.file().hash != hash {
+                    return Err(WireError::UnavailableContent);
+                }
+                write_manifest(stream, &manifest)?;
+                self.selected = Some((manifest, file));
+                Ok(())
+            }
+            GET_CHUNK => {
+                let body = read_body(stream, length, 36)?;
+                let (manifest, file) = self
+                    .selected
+                    .as_mut()
+                    .ok_or(WireError::UnavailableContent)?;
+                write_chunk(stream, manifest, file, &body)
+            }
+            _ => Err(WireError::InvalidFrame),
+        }
+    }
+}
+
+fn has_signed_content(store: &Store, hash: ContentHash) -> bool {
+    store.event_order().iter().copied().any(|id| {
+        store.signed_event(id).is_some()
+            && store
+                .replica()
+                .get(id)
+                .and_then(|event| event.change.entry())
+                .is_some_and(|entry| entry.kind == EntryKind::File(hash))
+    })
+}
+
+fn read_header(stream: &mut impl Read) -> Result<(u8, usize), WireError> {
     let mut header = [0; 9];
     stream.read_exact(&mut header)?;
-    if header[..4] != MAGIC || header[4] != kind {
+    if header[..4] != MAGIC {
         return Err(WireError::InvalidFrame);
     }
-    let length = u32::from_be_bytes(header[5..].try_into().unwrap()) as usize;
-    if length > max_bytes {
+    Ok((
+        header[4],
+        u32::from_be_bytes(header[5..].try_into().unwrap()) as usize,
+    ))
+}
+
+fn read_body(stream: &mut impl Read, length: usize, limit: usize) -> Result<Vec<u8>, WireError> {
+    if length > limit {
         return Err(WireError::InvalidFrame);
     }
     let mut body = vec![0; length];
     stream.read_exact(&mut body)?;
     Ok(body)
+}
+
+fn read_frame(stream: &mut impl Read, kind: u8, max_bytes: usize) -> Result<Vec<u8>, WireError> {
+    let (actual, length) = read_header(stream)?;
+    if actual != kind {
+        return Err(WireError::InvalidFrame);
+    }
+    read_body(stream, length, max_bytes)
 }
 
 fn write_frame(stream: &mut impl Write, kind: u8, body: &[u8]) -> Result<(), WireError> {

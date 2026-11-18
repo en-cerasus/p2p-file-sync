@@ -170,3 +170,32 @@ fn transfers_missing_chunks_after_a_network_reconnection() {
     assert_eq!(result, data);
     server.join().unwrap();
 }
+
+#[test]
+fn share_session_refuses_content_without_a_signed_event_even_when_blob_exists() {
+    use p2p_sync_core::{
+        blob::{Blob, BlobStore},
+        sha256,
+    };
+    let folder = tempfile::tempdir().unwrap();
+    let blobs = BlobStore::open(folder.path()).unwrap();
+    let data = b"unshared file";
+    let hash = sha256(data);
+    blobs
+        .put(
+            Blob {
+                hash,
+                length: data.len() as u64,
+            },
+            &data[..],
+        )
+        .unwrap();
+    let roster = roster_for([9; 32]);
+    let mut store = Store::open(":memory:", roster.membership().clone()).unwrap();
+    let request = [b"P2P1".as_slice(), &[3], &32_u32.to_be_bytes(), &hash].concat();
+    let mut stream = Scripted(Cursor::new(request));
+    assert!(matches!(
+        ShareSession::default().serve_next(&mut stream, &mut store, &blobs),
+        Err(WireError::UnavailableContent)
+    ));
+}
