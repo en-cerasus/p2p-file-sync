@@ -8,9 +8,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     archive::ArchivedFile,
-    auth::{Role, Roster},
+    auth::{AuthError, Role, Roster},
     blob::{Blob, BlobStore},
-    replica::{Apply, ContentHash, EntryKind, Event, EventId, PeerId, Replica, VersionVector},
+    replica::{
+        Apply, ContentHash, EntryKind, Event, EventId, PeerId, Reject, Replica, VersionVector,
+    },
 };
 
 const DOMAIN: &[u8] = b"p2p-file-sync/generation-transition/v1\0";
@@ -60,7 +62,7 @@ impl GenerationCheckpoint {
         Ok(contents.len())
     }
 
-    fn verify_history(&self, roster: &Roster) -> Result<(), TransitionError> {
+    fn verify_history(&self, roster: &Roster) -> Result<Replica, TransitionError> {
         if self.events.len() != self.signed_events.len() {
             return Err(TransitionError::InvalidHistory);
         }
@@ -101,7 +103,7 @@ impl GenerationCheckpoint {
         {
             return Err(TransitionError::InvalidHistory);
         }
-        Ok(())
+        Ok(replica)
     }
 
     /// Copy the unique live, protected and archived contents of a verified
@@ -225,6 +227,79 @@ pub enum TransitionError {
     InvalidHistory,
 }
 
+/// A verified migration baseline and its next-generation event admission
+/// rules. The host is responsible for persisting and activating it.
+pub struct GenerationBaseline {
+    roster: Roster,
+    checkpoint: GenerationCheckpoint,
+    replica: Replica,
+}
+
+#[derive(Debug)]
+pub enum BaselineError {
+    Transition(TransitionError),
+    Contents(CheckpointDataError),
+    Authentication(AuthError),
+    BeforeBaseline,
+    InvalidContext,
+    Rejected(Reject),
+}
+
+impl GenerationBaseline {
+    pub fn load(
+        transition: &[u8],
+        bytes: &[u8],
+        administrator: &VerifyingKey,
+        previous: &Roster,
+        contents: &BlobStore,
+    ) -> Result<Self, BaselineError> {
+        let old = previous.membership();
+        let transition =
+            GenerationTransition::verify(transition, administrator, old.share, old.generation)
+                .map_err(BaselineError::Transition)?;
+        let (checkpoint, replica) = transition
+            .reconstruct(bytes, previous)
+            .map_err(BaselineError::Transition)?;
+        checkpoint
+            .verify_contents(contents)
+            .map_err(BaselineError::Contents)?;
+        Ok(Self {
+            roster: Roster::new(transition.share, transition.next, transition.members),
+            checkpoint,
+            replica,
+        })
+    }
+
+    pub fn checkpoint(&self) -> &GenerationCheckpoint {
+        &self.checkpoint
+    }
+
+    pub fn replica(&self) -> &Replica {
+        &self.replica
+    }
+
+    pub fn receive(&mut self, signed: &[u8]) -> Result<Apply, BaselineError> {
+        let event = self
+            .roster
+            .verify_event(signed)
+            .map_err(BaselineError::Authentication)?;
+        let frontier = &self.checkpoint.frontier;
+        if frontier
+            .iter()
+            .any(|(peer, sequence)| event.context.get(peer).unwrap_or(&0) < sequence)
+        {
+            return Err(BaselineError::BeforeBaseline);
+        }
+        let current = &self.roster.membership().members;
+        if event.context.iter().any(|(peer, &sequence)| {
+            !current.contains(peer) && frontier.get(peer) != Some(&sequence)
+        }) {
+            return Err(BaselineError::InvalidContext);
+        }
+        self.replica.apply(event).map_err(BaselineError::Rejected)
+    }
+}
+
 impl GenerationTransition {
     /// Match the exact bytes to the digest before decoding, then verify scope.
     pub fn verify_checkpoint(
@@ -232,6 +307,15 @@ impl GenerationTransition {
         bytes: &[u8],
         old_roster: &Roster,
     ) -> Result<GenerationCheckpoint, TransitionError> {
+        self.reconstruct(bytes, old_roster)
+            .map(|(checkpoint, _)| checkpoint)
+    }
+
+    fn reconstruct(
+        &self,
+        bytes: &[u8],
+        old_roster: &Roster,
+    ) -> Result<(GenerationCheckpoint, Replica), TransitionError> {
         if crate::sha256(bytes) != self.checkpoint {
             return Err(TransitionError::WrongCheckpoint);
         }
@@ -247,8 +331,8 @@ impl GenerationTransition {
         {
             return Err(TransitionError::WrongScope);
         }
-        checkpoint.verify_history(old_roster)?;
-        Ok(checkpoint)
+        let replica = checkpoint.verify_history(old_roster)?;
+        Ok((checkpoint, replica))
     }
 
     /// Use a separately trusted administrative key, rather than a sync writer key.

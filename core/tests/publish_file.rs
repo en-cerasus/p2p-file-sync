@@ -188,6 +188,86 @@ fn updates_and_tombstones_share_the_same_object_and_retain_previous_versions() {
 }
 
 #[test]
+fn migration_baseline_rejects_old_events_and_preserves_deleted_identity() {
+    use p2p_sync_core::{
+        generation::{BaselineError, GenerationBaseline, GenerationTransition},
+        replica::{Apply, Change, Entry, EntryKind, Event, EventId, Reject},
+    };
+    let folder = tempfile::tempdir().unwrap();
+    let source = folder.path().join("song.tja");
+    std::fs::write(&source, b"song").unwrap();
+    let blobs = BlobStore::open(folder.path().join("files")).unwrap();
+    let author = PeerSigningKey::from_bytes(&[31; 32]);
+    let replacement = PeerSigningKey::from_bytes(&[32; 32]);
+    let administrator = PeerSigningKey::from_bytes(&[33; 32]);
+    let old_peer = author.verifying_key().to_bytes();
+    let new_peer = replacement.verifying_key().to_bytes();
+    let roster = Roster::new([4; 16], 1, [(old_peer, Role::Writer)].into());
+    let mut store = Store::open(":memory:", roster.membership().clone()).unwrap();
+    let first = publish_file(
+        &source, &mut store, &roster, &author, &blobs, None, "song.tja",
+    )
+    .unwrap();
+    let deleted = revise_file(None, &mut store, &roster, &author, &blobs, first).unwrap();
+    let object = store.replica().get(deleted).unwrap().object;
+    let checkpoint = store
+        .generation_checkpoint(std::time::SystemTime::now())
+        .unwrap();
+    let bytes = checkpoint.encode().unwrap();
+    let members = [(new_peer, Role::Writer)].into();
+    let transition = GenerationTransition {
+        share: [4; 16],
+        previous: 1,
+        next: 2,
+        checkpoint: sha256(&bytes),
+        members,
+    }
+    .sign(&administrator)
+    .unwrap();
+    let mut baseline = GenerationBaseline::load(
+        &transition,
+        &bytes,
+        &administrator.verifying_key(),
+        &roster,
+        &blobs,
+    )
+    .unwrap();
+    assert!(matches!(
+        baseline.receive(store.signed_event(first).unwrap()),
+        Err(BaselineError::Authentication(_))
+    ));
+    let current = Roster::new([4; 16], 2, [(new_peer, Role::Writer)].into());
+    let mut event = Event {
+        id: EventId {
+            peer: new_peer,
+            sequence: 1,
+        },
+        context: Default::default(),
+        object,
+        change: Change::Create(Entry {
+            parent: None,
+            name: "song.tja".into(),
+            kind: EntryKind::File(sha256(b"song")),
+        }),
+    };
+    let signed = current.sign_event(&replacement, &event).unwrap();
+    assert!(matches!(
+        baseline.receive(&signed),
+        Err(BaselineError::BeforeBaseline)
+    ));
+    event.context = checkpoint.frontier;
+    let signed = current.sign_event(&replacement, &event).unwrap();
+    assert!(matches!(
+        baseline.receive(&signed),
+        Err(BaselineError::Rejected(Reject::InvalidBasis))
+    ));
+    assert_eq!(baseline.replica().heads(object).next().unwrap().id, deleted);
+    event.object = [98; 16];
+    let signed = current.sign_event(&replacement, &event).unwrap();
+    assert_eq!(baseline.receive(&signed).unwrap(), Apply::Added);
+}
+
+#[test]
 fn shared_move_keeps_the_file_identity_and_hash_and_refuses_collisions() {
     use p2p_sync_core::{
         projection::Projection,
