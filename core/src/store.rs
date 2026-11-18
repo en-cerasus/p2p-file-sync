@@ -12,7 +12,7 @@ use crate::{
 };
 
 const SCHEMA_VERSION: u32 = 2;
-const MAX_RECORD_BYTES: usize = 1024 * 1024;
+const MAX_RECORD_BYTES: usize = 2 * 1024 * 1024 + 256;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Membership {
@@ -50,12 +50,14 @@ impl From<postcard::Error> for StoreError {
 enum Record {
     Event(Event),
     Confirmation(Confirmation),
+    SignedEvent { event: Event, wire: Vec<u8> },
 }
 
 #[derive(Default)]
 struct Index {
     offset: i64,
     replica: Replica,
+    signed_events: BTreeMap<EventId, Vec<u8>>,
     protections: BTreeMap<(ObjectId, EventId, EventId), Protection>,
 }
 
@@ -114,6 +116,15 @@ impl Store {
         })
     }
 
+    pub(crate) fn membership(&self) -> &Membership {
+        &self.membership
+    }
+
+    /// Original signed event for forwarding to another peer.
+    pub fn signed_event(&self, id: EventId) -> Option<&[u8]> {
+        self.index.signed_events.get(&id).map(Vec::as_slice)
+    }
+
     pub fn replica(&self) -> &Replica {
         &self.index.replica
     }
@@ -140,6 +151,18 @@ impl Store {
     /// Accepts values only after the caller verifies their authentication.
     /// Missing dependencies leave the event uncommitted for the caller to retry.
     pub fn apply_verified(&mut self, event: Event) -> Result<Apply, StoreError> {
+        self.apply_record(event, None)
+    }
+
+    pub(crate) fn apply_signed(
+        &mut self,
+        event: Event,
+        wire: Vec<u8>,
+    ) -> Result<Apply, StoreError> {
+        self.apply_record(event, Some(wire))
+    }
+
+    fn apply_record(&mut self, event: Event, wire: Option<Vec<u8>>) -> Result<Apply, StoreError> {
         if !self.membership.members.contains(&event.id.peer)
             || !event
                 .context
@@ -159,7 +182,10 @@ impl Store {
             .validate(&event)
             .map_err(StoreError::Rejected)?;
         if outcome == Apply::Added {
-            let record = Record::Event(event);
+            let record = match wire {
+                Some(wire) => Record::SignedEvent { event, wire },
+                None => Record::Event(event),
+            };
             let position = append(&tx, &record)?;
             tx.commit()?;
             self.index.record(record, &self.membership)?;
@@ -210,7 +236,15 @@ impl Index {
     }
 
     fn record(&mut self, record: Record, membership: &Membership) -> Result<(), StoreError> {
+        let (record, signature) = match record {
+            Record::SignedEvent { event, wire } => {
+                let id = event.id;
+                (Record::Event(event), Some((id, wire)))
+            }
+            record => (record, None),
+        };
         match record {
+            Record::SignedEvent { .. } => unreachable!(),
             Record::Event(event) => {
                 if !membership.members.contains(&event.id.peer)
                     || !event
@@ -232,6 +266,9 @@ impl Index {
                     }
                 }
                 self.replica.record(event);
+                if let Some((id, wire)) = signature {
+                    self.signed_events.insert(id, wire);
+                }
             }
             Record::Confirmation(ack) => {
                 self.validate_confirmation(ack, membership)?;

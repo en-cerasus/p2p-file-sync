@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod blob;
 pub mod chunks;
 mod local_target;
