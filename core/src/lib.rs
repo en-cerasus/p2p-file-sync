@@ -1,3 +1,4 @@
+pub mod blob;
 pub mod replica;
 pub mod retention;
 pub mod store;
