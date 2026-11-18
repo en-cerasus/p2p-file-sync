@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     io::{self, Seek},
     path::Path,
 };
@@ -51,6 +52,7 @@ pub fn publish_file(
         roster,
         key,
         peer,
+        None,
         Entry {
             parent,
             name: name.into(),
@@ -75,6 +77,29 @@ pub fn publish_tree(
     key: &PeerSigningKey,
     completed: &BlobStore,
 ) -> Result<TreeSummary, PublishError> {
+    scan_tree(root, store, roster, key, completed, false)
+}
+
+/// Register new entries and update changed regular files in the selected
+/// folder. Missing entries are left as-is.
+pub fn refresh_tree(
+    root: &Path,
+    store: &mut Store,
+    roster: &Roster,
+    key: &PeerSigningKey,
+    completed: &BlobStore,
+) -> Result<TreeSummary, PublishError> {
+    scan_tree(root, store, roster, key, completed, true)
+}
+
+fn scan_tree(
+    root: &Path,
+    store: &mut Store,
+    roster: &Roster,
+    key: &PeerSigningKey,
+    completed: &BlobStore,
+    update: bool,
+) -> Result<TreeSummary, PublishError> {
     let peer = authorize(store, roster, key)?;
     let directory = open_root(root).map_err(PublishError::Io)?;
     let mut context = TreePublisher {
@@ -83,6 +108,7 @@ pub fn publish_tree(
         key,
         peer,
         completed,
+        update,
         summary: TreeSummary::default(),
     };
     context.visit(&directory, None, 0)?;
@@ -95,6 +121,7 @@ struct TreePublisher<'a> {
     key: &'a PeerSigningKey,
     peer: crate::replica::PeerId,
     completed: &'a BlobStore,
+    update: bool,
     summary: TreeSummary,
 }
 
@@ -114,6 +141,8 @@ impl TreePublisher<'_> {
             .collect::<io::Result<Vec<_>>>()
             .map_err(PublishError::Io)?;
         children.sort_by_cached_key(|entry| entry.file_name());
+        let mut names = BTreeSet::new();
+        let mut entries = Vec::new();
         for child in children {
             let kind = child.file_type().map_err(PublishError::Io)?;
             if !kind.is_dir() && !kind.is_file() {
@@ -128,7 +157,13 @@ impl TreePublisher<'_> {
                 self.summary.skipped += 1;
                 continue;
             }
-            collision_key(&name).map_err(PublishError::InvalidName)?;
+            let key = collision_key(&name).map_err(PublishError::InvalidName)?;
+            if !names.insert(key) {
+                return Err(PublishError::NameConflict);
+            }
+            entries.push((name, kind));
+        }
+        for (name, kind) in entries {
             if kind.is_dir() {
                 let child = directory
                     .open_dir_nofollow(&name)
@@ -161,7 +196,14 @@ impl TreePublisher<'_> {
     }
 
     fn add(&mut self, entry: Entry) -> Result<EventId, PublishError> {
-        publish_entry(self.store, self.roster, self.key, self.peer, entry)
+        publish_entry(
+            self.store,
+            self.roster,
+            self.key,
+            self.peer,
+            self.update.then_some(self.completed),
+            entry,
+        )
     }
 }
 
@@ -170,6 +212,7 @@ fn publish_entry(
     roster: &Roster,
     key: &PeerSigningKey,
     peer: crate::replica::PeerId,
+    updates: Option<&BlobStore>,
     entry: Entry,
 ) -> Result<EventId, PublishError> {
     let parent = entry.parent;
@@ -198,20 +241,51 @@ fn publish_entry(
         })
     });
     if let Some(existing) = occupied.next() {
-        if occupied.next().is_none()
-            && !replica.has_conflict(existing.object)
-            && store.signed_event(existing.id).is_some()
-            && existing
-                .change
-                .entry()
-                .is_some_and(|existing| existing.kind == entry.kind)
+        if occupied.next().is_some()
+            || replica.has_conflict(existing.object)
+            || store.signed_event(existing.id).is_none()
         {
+            return Err(PublishError::NameConflict);
+        }
+        let prior = existing.change.entry().ok_or(PublishError::StaleBase)?;
+        if prior.kind == entry.kind {
             return Ok(existing.id);
+        }
+        let base = existing.id;
+        let EntryKind::File(hash) = entry.kind else {
+            return Err(PublishError::NameConflict);
+        };
+        drop(occupied);
+        if let Some(completed) = updates {
+            return revise_content(Some(hash), store, roster, key, peer, completed, base);
         }
         return Err(PublishError::NameConflict);
     }
-
     drop(occupied);
+    if updates.is_some()
+        && replica.objects().any(|object| {
+            replica.heads(object).any(|head| {
+                let matches_path = |base| {
+                    replica
+                        .get(base)
+                        .and_then(|event| event.change.entry())
+                        .is_some_and(|prior| {
+                            prior.parent == parent
+                                && collision_key(&prior.name).is_ok_and(|key| key == name_key)
+                        })
+                };
+                match &head.change {
+                    Change::Revise { base, entry: None } => matches_path(*base),
+                    Change::Resolve { bases, entry: None } => {
+                        bases.iter().copied().any(matches_path)
+                    }
+                    _ => false,
+                }
+            })
+        })
+    {
+        return Err(PublishError::NameConflict);
+    }
     let mut object = [0; 16];
     getrandom::fill(&mut object)
         .map_err(|error| PublishError::Io(io::Error::other(error.to_string())))?;
@@ -231,6 +305,26 @@ pub fn revise_file(
 ) -> Result<EventId, PublishError> {
     let peer = authorize(store, roster, key)?;
     let replacement = source.map(|path| store_file(path, completed)).transpose()?;
+    revise_content(
+        replacement.map(|blob| blob.hash),
+        store,
+        roster,
+        key,
+        peer,
+        completed,
+        base,
+    )
+}
+
+fn revise_content(
+    replacement: Option<crate::replica::ContentHash>,
+    store: &mut Store,
+    roster: &Roster,
+    key: &PeerSigningKey,
+    peer: crate::replica::PeerId,
+    completed: &BlobStore,
+    base: EventId,
+) -> Result<EventId, PublishError> {
     store.refresh().map_err(PublishError::Store)?;
     let replica = store.replica();
     let original = replica.get(base).ok_or(PublishError::StaleBase)?;
@@ -264,12 +358,12 @@ pub fn revise_file(
     if old_manifest.file().hash != *old_hash {
         return Err(PublishError::MissingBaseContent);
     }
-    if replacement.is_some_and(|blob| blob.hash == *old_hash) {
+    if replacement == Some(*old_hash) {
         return Ok(base);
     }
 
-    let updated = replacement.map(|blob| Entry {
-        kind: EntryKind::File(blob.hash),
+    let updated = replacement.map(|hash| Entry {
+        kind: EntryKind::File(hash),
         ..entry.clone()
     });
     let change = Change::Revise {

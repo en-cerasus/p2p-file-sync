@@ -39,15 +39,15 @@ fn run() -> Result<(), String> {
     }
     if !matches!(
         mode,
-        Some("publish" | "publish-tree" | "update" | "delete" | "serve")
+        Some("publish" | "publish-tree" | "refresh-tree" | "update" | "delete" | "serve")
     ) || (mode == Some("publish") && args.len() < 4)
-        || (mode == Some("publish-tree") && args.len() != 4)
+        || (matches!(mode, Some("publish-tree" | "refresh-tree")) && args.len() != 4)
         || (mode == Some("update") && args.len() != 5)
         || (mode == Some("delete") && args.len() != 4)
         || (mode == Some("serve") && args.len() != 3)
     {
         return Err(
-            "Usage: p2p-send setup <new-dir> <bind-ip:port> <peer-ip:port> [receivers]\n       p2p-send publish <server.json> <state-dir> <file> [file ...]\n       p2p-send publish-tree <server.json> <state-dir> <folder>\n       p2p-send update <server.json> <state-dir> <shared/path> <source>\n       p2p-send delete <server.json> <state-dir> <shared/path>\n       p2p-send serve <server.json> <state-dir>"
+            "Usage: p2p-send setup <new-dir> <bind-ip:port> <peer-ip:port> [receivers]\n       p2p-send publish <server.json> <state-dir> <file> [file ...]\n       p2p-send publish-tree <server.json> <state-dir> <folder>\n       p2p-send refresh-tree <server.json> <state-dir> <folder>\n       p2p-send update <server.json> <state-dir> <shared/path> <source>\n       p2p-send delete <server.json> <state-dir> <shared/path>\n       p2p-send serve <server.json> <state-dir>"
                 .to_string(),
         );
     }
@@ -63,10 +63,14 @@ fn run() -> Result<(), String> {
         println!("Recorded change for {shared} (event {})", event.sequence);
         return Ok(());
     }
-    if mode == Some("publish-tree") {
-        let summary = sender
-            .publish_tree(Path::new(&args[3]))
-            .map_err(|error| format!("Could not publish folder: {error:?}"))?;
+    if matches!(mode, Some("publish-tree" | "refresh-tree")) {
+        let root = Path::new(&args[3]);
+        let summary = if mode == Some("refresh-tree") {
+            sender.refresh_tree(root)
+        } else {
+            sender.publish_tree(root)
+        }
+        .map_err(|error| format!("Could not publish folder: {error:?}"))?;
         println!(
             "Registered {} file(s) and {} folder(s); skipped {} link or special entry(s).",
             summary.files, summary.directories, summary.skipped

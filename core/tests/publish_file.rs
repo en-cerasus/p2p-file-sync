@@ -138,3 +138,47 @@ fn tree_publication_is_repeatable_and_skips_directory_links() {
         .objects()
         .any(|object| projection.path(object) == Ok(vec!["譜面", "song.tja"])));
 }
+
+#[test]
+fn refresh_updates_changed_files_without_deleting_missing_files_or_reviving_tombstones() {
+    use p2p_sync_core::publish::{publish_tree, refresh_tree};
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    let chart = source.join("譜面.tja");
+    let absent = source.join("removed-locally.tja");
+    std::fs::write(&chart, b"old").unwrap();
+    std::fs::write(&absent, b"keep").unwrap();
+    let key = PeerSigningKey::from_bytes(&[19; 32]);
+    let peer = key.verifying_key().to_bytes();
+    let roster = Roster::new([4; 16], 1, [(peer, Role::Writer)].into());
+    let blobs = BlobStore::open(root.path().join("blobs")).unwrap();
+    let mut store = Store::open(":memory:", roster.membership().clone()).unwrap();
+    publish_tree(&source, &mut store, &roster, &key, &blobs).unwrap();
+
+    std::fs::write(&chart, b"new").unwrap();
+    std::fs::remove_file(absent).unwrap();
+    refresh_tree(&source, &mut store, &roster, &key, &blobs).unwrap();
+    refresh_tree(&source, &mut store, &roster, &key, &blobs).unwrap();
+    assert_eq!(store.replica().clock()[&peer], 3);
+    let head = p2p_sync_core::replica::EventId { peer, sequence: 3 };
+    assert_eq!(
+        store
+            .replica()
+            .get(head)
+            .unwrap()
+            .change
+            .entry()
+            .unwrap()
+            .kind,
+        EntryKind::File(sha256(b"new"))
+    );
+    assert_eq!(store.replica().objects().count(), 2);
+
+    revise_file(None, &mut store, &roster, &key, &blobs, head).unwrap();
+    assert!(matches!(
+        refresh_tree(&source, &mut store, &roster, &key, &blobs),
+        Err(PublishError::NameConflict)
+    ));
+    assert_eq!(store.replica().clock()[&peer], 4);
+}

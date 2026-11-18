@@ -19,7 +19,7 @@ use crate::{
     direct::{self, DirectError, PeerEndpoint},
     names::collision_key,
     projection::Projection,
-    publish::{publish_file, publish_tree, revise_file, PublishError, TreeSummary},
+    publish::{publish_file, publish_tree, refresh_tree, revise_file, PublishError, TreeSummary},
     replica::{EntryKind, EventId, PeerId},
     store::{Store, StoreError},
     sync::{Destination, FileResult},
@@ -147,6 +147,17 @@ impl Sender {
 
     pub fn publish_tree(&mut self, root: &Path) -> Result<TreeSummary, HostError> {
         publish_tree(
+            root,
+            &mut self.store,
+            &self.roster,
+            &self.signer,
+            &self.completed,
+        )
+        .map_err(HostError::Publish)
+    }
+
+    pub fn refresh_tree(&mut self, root: &Path) -> Result<TreeSummary, HostError> {
+        refresh_tree(
             root,
             &mut self.store,
             &self.roster,
