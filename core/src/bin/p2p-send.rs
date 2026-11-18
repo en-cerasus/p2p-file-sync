@@ -1,6 +1,6 @@
 use std::{env, path::Path, process::ExitCode, thread, time::Duration};
 
-use p2p_sync_core::host::Sender;
+use p2p_sync_core::{host::Sender, replica::EventId};
 
 #[path = "p2p_send/setup.rs"]
 mod setup;
@@ -46,6 +46,8 @@ fn run() -> Result<(), String> {
                 | "update"
                 | "delete"
                 | "move"
+                | "conflicts"
+                | "resolve"
                 | "serve"
                 | "serve-tree"
         )
@@ -55,15 +57,51 @@ fn run() -> Result<(), String> {
         || (mode == Some("delete") && args.len() != 4)
         || (mode == Some("serve-tree") && args.len() != 5)
         || (mode == Some("serve") && args.len() != 3)
+        || (mode == Some("conflicts") && args.len() != 3)
+        || (mode == Some("resolve") && args.len() < 5)
     {
         return Err(
-            "Usage: p2p-send setup <new-dir> <bind-ip:port> <peer-ip:port> [receivers]\n       p2p-send publish <server.json> <state-dir> <file> [file ...]\n       p2p-send publish-tree <server.json> <state-dir> <folder>\n       p2p-send refresh-tree <server.json> <state-dir> <folder>\n       p2p-send update <server.json> <state-dir> <shared/path> <source>\n       p2p-send delete <server.json> <state-dir> <shared/path>\n       p2p-send move <server.json> <state-dir> <old/path> <new/path>\n       p2p-send serve <server.json> <state-dir>\n       p2p-send serve-tree <server.json> <state-dir> <folder> <interval-seconds>"
+            "Usage: p2p-send setup <new-dir> <bind-ip:port> <peer-ip:port> [receivers]\n       p2p-send publish <server.json> <state-dir> <file> [file ...]\n       p2p-send publish-tree <server.json> <state-dir> <folder>\n       p2p-send refresh-tree <server.json> <state-dir> <folder>\n       p2p-send update <server.json> <state-dir> <shared/path> <source>\n       p2p-send delete <server.json> <state-dir> <shared/path>\n       p2p-send move <server.json> <state-dir> <old/path> <new/path>\n       p2p-send conflicts <server.json> <state-dir>\n       p2p-send resolve <server.json> <state-dir> <chosen-id> <other-id> [other-id ...]\n       p2p-send serve <server.json> <state-dir>\n       p2p-send serve-tree <server.json> <state-dir> <folder> <interval-seconds>"
                 .to_string(),
         );
     }
 
     let mut sender = Sender::open(Path::new(&args[1]), Path::new(&args[2]))
         .map_err(|error| format!("Could not open sender configuration: {error:?}"))?;
+    if mode == Some("conflicts") {
+        let conflicts = sender
+            .conflicts()
+            .map_err(|error| format!("Could not list conflicts: {error:?}"))?;
+        for heads in conflicts {
+            println!("Conflict");
+            for head in heads {
+                let peer: String = head
+                    .id
+                    .peer
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect();
+                let description = head
+                    .change
+                    .entry()
+                    .map_or("(deleted)", |entry| entry.name.as_str());
+                println!("  {peer}:{}  {description}", head.id.sequence);
+            }
+        }
+        return Ok(());
+    }
+    if mode == Some("resolve") {
+        let choice = parse_event_id(&args[3])?;
+        let reviewed = args[3..]
+            .iter()
+            .map(|value| parse_event_id(value))
+            .collect::<Result<_, _>>()?;
+        let event = sender
+            .resolve_conflict(choice, reviewed)
+            .map_err(|error| format!("Could not resolve conflict: {error:?}"))?;
+        println!("Recorded resolution (event {})", event.sequence);
+        return Ok(());
+    }
     if matches!(mode, Some("update" | "delete" | "move")) {
         let shared = args[3].to_str().ok_or("Shared path must be UTF-8.")?;
         let event = if mode == Some("move") {
@@ -154,4 +192,28 @@ fn run() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn parse_event_id(value: &std::ffi::OsStr) -> Result<EventId, String> {
+    let error = || "Specify a candidate as <64-hex-peer-id>:<sequence>.".to_owned();
+    let (peer, sequence) = value
+        .to_str()
+        .and_then(|text| text.split_once(':'))
+        .ok_or_else(error)?;
+    if peer.len() != 64 || !peer.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(error());
+    }
+    let mut decoded = [0; 32];
+    for (index, byte) in decoded.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&peer[index * 2..index * 2 + 2], 16).map_err(|_| error())?;
+    }
+    let sequence = sequence
+        .parse::<u64>()
+        .ok()
+        .filter(|&value| value != 0)
+        .ok_or_else(error)?;
+    Ok(EventId {
+        peer: decoded,
+        sequence,
+    })
 }

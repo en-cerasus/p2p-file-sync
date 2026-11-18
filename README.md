@@ -82,6 +82,8 @@ cargo run --locked --release -p p2p-sync-core --bin p2p-send -- serve .\trial-se
 
 配信側は、更新・削除から48時間を過ぎた旧版を、全登録ピアの確認がそろい、現行版・未解決の競合・期限内の履歴からも参照されなくなった時点で整理します。削除イベントは同期に必要なため保持します。
 
+配信側の状態に競合がある場合は、`p2p-send conflicts <server.json> <state-dir>` で候補IDを確認できます。`p2p-send resolve <server.json> <state-dir> <採用する候補ID> <ほかの候補ID> ...` では、確認した候補をすべて指定します。候補が増減した場合は再確認が必要です。削除候補を採用すると共有上の削除を維持します。
+
 譜面集をまとめて登録する場合は、`publish` の代わりに `publish-tree` を使います。
 
 ```powershell

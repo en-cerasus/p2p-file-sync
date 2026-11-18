@@ -207,6 +207,7 @@ fn a_fresh_peer_caches_all_conflicting_versions_without_publishing_a_winner() {
     use p2p_sync_core::{
         blob::{Blob, BlobStore},
         projection::PathIssue,
+        publish::{resolve_file_conflict, PublishError},
         sha256,
         sync::{sync_new_files, Destination, FileResult},
     };
@@ -378,6 +379,47 @@ fn a_fresh_peer_caches_all_conflicting_versions_without_publishing_a_winner() {
     for blob in expected {
         assert!(completed.open_verified(blob).is_ok());
     }
+    let reviewed: std::collections::BTreeSet<_> = receiver
+        .replica()
+        .heads(object)
+        .map(|event| event.id)
+        .collect();
+    let choice = EventId {
+        peer: second_peer,
+        sequence: 1,
+    };
+    assert!(matches!(
+        resolve_file_conflict(
+            &mut receiver,
+            &roster,
+            &first_key,
+            &completed,
+            choice,
+            [choice].into()
+        ),
+        Err(PublishError::StaleBase)
+    ));
+    let id = resolve_file_conflict(
+        &mut receiver,
+        &roster,
+        &first_key,
+        &completed,
+        choice,
+        reviewed.clone(),
+    )
+    .unwrap();
+    let event = roster
+        .verify_event(receiver.signed_event(id).unwrap())
+        .unwrap();
+    let Change::Resolve { bases, entry } = event.change else {
+        panic!("expected a resolution")
+    };
+    assert_eq!(bases, reviewed);
+    assert_eq!(entry.unwrap().kind, EntryKind::File(sha256(b"right")));
+    assert!(!receiver.replica().has_conflict(object));
+    assert!(receiver
+        .protections()
+        .any(|protection| protection.content() == sha256(b"left")));
 }
 
 #[test]

@@ -64,9 +64,16 @@ impl<'a> Projection<'a> {
         }
     }
 
-    #[cfg(windows)]
     pub(crate) fn vacant(&self, parent: Option<ObjectId>, name: &str) -> bool {
         collision_key(name).is_ok_and(|key| !self.occupants.contains_key(&(parent, key)))
+    }
+
+    pub(crate) fn available_to(&self, object: ObjectId, entry: &Entry) -> bool {
+        collision_key(&entry.name).is_ok_and(|key| {
+            self.occupants
+                .get(&(entry.parent, key))
+                .is_none_or(|objects| objects.iter().all(|&occupant| occupant == object))
+        })
     }
 
     fn entry(&self, object: ObjectId) -> Result<&'a Entry, PathIssue> {

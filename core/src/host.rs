@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::Read,
     net::{SocketAddr, TcpListener, TcpStream},
@@ -20,10 +20,10 @@ use crate::{
     names::collision_key,
     projection::Projection,
     publish::{
-        publish_file, publish_tree, refresh_tree, relocate_file, revise_file, PublishError,
-        TreeSummary,
+        publish_file, publish_tree, refresh_tree, relocate_file, resolve_file_conflict,
+        revise_file, PublishError, TreeSummary,
     },
-    replica::{EntryKind, EventId, PeerId},
+    replica::{EntryKind, Event, EventId, PeerId},
     store::{Store, StoreError},
     sync::{Destination, FileResult},
     tls::{CertificatePin, Client, Credentials, Server, TlsError},
@@ -288,6 +288,33 @@ impl Sender {
             base,
             parent,
             name,
+        )
+        .map_err(HostError::Publish)
+    }
+
+    pub fn conflicts(&mut self) -> Result<Vec<Vec<Event>>, HostError> {
+        self.store.refresh().map_err(HostError::Store)?;
+        let replica = self.store.replica();
+        Ok(replica
+            .objects()
+            .filter(|&object| replica.has_conflict(object))
+            .map(|object| replica.heads(object).cloned().collect())
+            .collect())
+    }
+
+    pub fn resolve_conflict(
+        &mut self,
+        choice: EventId,
+        reviewed: BTreeSet<EventId>,
+    ) -> Result<EventId, HostError> {
+        let _lock = self.lock_state()?;
+        resolve_file_conflict(
+            &mut self.store,
+            &self.roster,
+            &self.signer,
+            &self.completed,
+            choice,
+            reviewed,
         )
         .map_err(HostError::Publish)
     }

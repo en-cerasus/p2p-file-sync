@@ -442,6 +442,82 @@ fn revise_content(
     append_change(store, roster, key, peer, object, change, Some(previous))
 }
 
+/// Resolve exactly the versions reviewed by the caller for a conflicting file.
+/// Choosing a deletion head keeps the deletion.
+pub fn resolve_file_conflict(
+    store: &mut Store,
+    roster: &Roster,
+    key: &PeerSigningKey,
+    completed: &BlobStore,
+    choice: EventId,
+    reviewed: BTreeSet<EventId>,
+) -> Result<EventId, PublishError> {
+    let peer = authorize(store, roster, key)?;
+    store.refresh().map_err(PublishError::Store)?;
+    let replica = store.replica();
+    let selected = replica.get(choice).ok_or(PublishError::StaleBase)?;
+    let object = selected.object;
+    let heads: BTreeSet<_> = replica.heads(object).map(|event| event.id).collect();
+    if !replica.has_conflict(object) || heads != reviewed || !heads.contains(&choice) {
+        return Err(PublishError::StaleBase);
+    }
+    let mut verified = BTreeSet::new();
+    for head in replica.heads(object) {
+        if store.signed_event(head.id).is_none() {
+            return Err(PublishError::StaleBase);
+        }
+        match head.change.entry().map(|entry| &entry.kind) {
+            Some(EntryKind::File(hash)) if verified.insert(*hash) => {
+                verified_content(completed, *hash)?;
+            }
+            Some(EntryKind::Directory) => return Err(PublishError::StaleBase),
+            _ => {}
+        }
+    }
+    let entry = selected.change.entry().cloned();
+    if let Some(entry) = &entry {
+        let projection = Projection::new(replica);
+        if !projection.available_to(object, entry) {
+            return Err(PublishError::NameConflict);
+        }
+        if let Some(parent) = entry.parent {
+            if projection.path(parent).is_err()
+                || !replica.heads(parent).any(|head| {
+                    head.change
+                        .entry()
+                        .is_some_and(|entry| entry.kind == EntryKind::Directory)
+                })
+            {
+                return Err(PublishError::InvalidParent);
+            }
+        }
+    }
+    append_change(
+        store,
+        roster,
+        key,
+        peer,
+        object,
+        Change::Resolve {
+            bases: heads,
+            entry,
+        },
+        None,
+    )
+}
+
+fn verified_content(
+    completed: &BlobStore,
+    hash: crate::replica::ContentHash,
+) -> Result<Blob, PublishError> {
+    let file = completed.open_candidate(hash).map_err(PublishError::Io)?;
+    let length = file.metadata().map_err(PublishError::Io)?.len();
+    drop(file);
+    let blob = Blob { hash, length };
+    completed.open_verified(blob).map_err(PublishError::Io)?;
+    Ok(blob)
+}
+
 fn append_change(
     store: &mut Store,
     roster: &Roster,
