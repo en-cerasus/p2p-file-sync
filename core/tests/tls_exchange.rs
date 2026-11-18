@@ -466,6 +466,7 @@ fn running_sender_refreshes_its_source_and_serves_new_files() {
 
     let source = root.join("shared");
     std::fs::create_dir(&source).unwrap();
+    std::fs::create_dir(source.join("folder")).unwrap();
     std::fs::write(source.join("existing.tja"), b"initial").unwrap();
     let sender = Sender::open(&sender_config, &state).unwrap();
     assert!(sender.validate_source_root(root).is_err());
@@ -512,4 +513,45 @@ fn running_sender_refreshes_its_source_and_serves_new_files() {
         std::fs::read(destination.join("追加.tja")).unwrap(),
         b"added while serving"
     );
+    #[cfg(windows)]
+    {
+        drop(child);
+        let output = Command::new(binary)
+            .arg("move")
+            .arg(&sender_config)
+            .arg(&state)
+            .args(["existing.tja", "folder/moved.tja"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut sender = Sender::open(&sender_config, &state).unwrap();
+        let listener = sender.bind().unwrap();
+        settings["address"] = listener.local_addr().unwrap().to_string().into();
+        std::fs::write(&receiver, settings.to_string()).unwrap();
+        let old = destination.join("existing.tja");
+        let new = destination.join("folder/moved.tja");
+        std::fs::write(&new, b"local file").unwrap();
+        std::thread::scope(|threads| {
+            let server = threads.spawn(move || {
+                for _ in 0..2 {
+                    let (socket, _) = listener.accept().unwrap();
+                    sender.serve(socket).unwrap();
+                }
+            });
+            let report = pull_from_config(&receiver, &client_state, &destination).unwrap();
+            assert_eq!(report.files_blocked, 1);
+            assert_eq!(std::fs::read(&old).unwrap(), b"initial");
+            assert_eq!(std::fs::read(&new).unwrap(), b"local file");
+            std::fs::remove_file(&new).unwrap();
+            let report = pull_from_config(&receiver, &client_state, &destination).unwrap();
+            assert_eq!(report.files_updated, 1);
+            assert!(!old.exists());
+            assert_eq!(std::fs::read(&new).unwrap(), b"initial");
+            server.join().unwrap();
+        });
+    }
 }

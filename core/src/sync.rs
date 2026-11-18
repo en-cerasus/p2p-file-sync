@@ -109,12 +109,12 @@ fn publish_heads(
             match projection.path(object) {
                 Ok(path) => {
                     let Some(head) = file_head else { continue };
-                    if applied.as_ref().and_then(|item| item.contents).is_some()
+                    let moving = applied.as_ref().and_then(|item| item.contents).is_some()
                         && applied
                             .as_ref()
                             .and_then(|item| item.path.as_ref())
-                            .is_none_or(|previous| !previous.iter().map(String::as_str).eq(path))
-                    {
+                            .is_none_or(|previous| !previous.iter().map(String::as_str).eq(path));
+                    if moving && !cfg!(windows) {
                         report.files.push((object, FileResult::Superseded));
                         continue;
                     }
@@ -123,11 +123,12 @@ fn publish_heads(
                         head.id,
                         applied.and_then(|item| item.contents),
                         true,
+                        moving,
                     ));
                 }
                 Err(PathIssue::Deleted(_)) => {
                     if let Some(previous) = applied.and_then(|item| item.contents) {
-                        files.push((object, first.id, Some(previous), false));
+                        files.push((object, first.id, Some(previous), false, false));
                     }
                 }
                 Err(issue) => report.files.push((object, FileResult::BlockedPath(issue))),
@@ -142,7 +143,41 @@ fn publish_heads(
         }
     }
 
-    for (object, event, previous, live) in files {
+    for (object, event, previous, live, moving) in files {
+        #[cfg(windows)]
+        if moving {
+            let Some(previous) = previous.filter(|blob| {
+                store
+                    .replica()
+                    .get(event)
+                    .and_then(|event| event.change.entry())
+                    .is_some_and(|entry| entry.kind == EntryKind::File(blob.hash))
+            }) else {
+                report.files.push((object, FileResult::Superseded));
+                continue;
+            };
+            let intent = FileIntent {
+                object,
+                event,
+                previous: Some(previous),
+                desired: Some(previous),
+            };
+            match store.stage_file(destination.completed, &intent) {
+                Ok(()) => {
+                    let outcome = store
+                        .recover_moved_file(destination.root, object)
+                        .map_err(SyncError::Materialize)?;
+                    report.files.push((object, update_result(outcome)));
+                }
+                Err(MaterializeError::AlreadyPending | MaterializeError::InvalidIntent) => {
+                    report.files.push((object, FileResult::PendingRecovery));
+                }
+                Err(error) => return Err(SyncError::Materialize(error)),
+            }
+            continue;
+        }
+        #[cfg(not(windows))]
+        debug_assert!(!moving);
         let previous = if store
             .retire_superseded_file(destination.completed, destination.root, object)
             .map_err(SyncError::Materialize)?

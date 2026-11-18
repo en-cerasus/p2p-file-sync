@@ -312,6 +312,68 @@ impl Store {
         Ok(true)
     }
 
+    #[cfg(windows)]
+    pub fn recover_moved_file(
+        &mut self,
+        root: &Path,
+        object: ObjectId,
+    ) -> Result<Recovery, MaterializeError> {
+        let (tx, replica) = self.begin_indexed_write()?;
+        let Some((intent, Some(path))) = load_intent(&tx, object)? else {
+            return Ok(Recovery::NonePending);
+        };
+        let Some(previous) = intent
+            .previous
+            .filter(|previous| Some(*previous) == intent.desired)
+        else {
+            return Err(MaterializeError::InvalidIntent);
+        };
+        let Some(applied) = read_applied(&tx, object)? else {
+            return Ok(Recovery::Superseded);
+        };
+        let Some(old_path) = applied.path.filter(|old_path| *old_path != path) else {
+            return Ok(Recovery::Superseded);
+        };
+        let projection = Projection::new(replica);
+        if applied.contents != Some(previous)
+            || !matches_head(replica, &intent)
+            || !projection
+                .path(object)
+                .is_ok_and(|current| current.into_iter().eq(path.iter().map(String::as_str)))
+        {
+            return Ok(Recovery::Superseded);
+        }
+        let Some(old_entry) = replica
+            .get(applied.event)
+            .and_then(|event| event.change.entry())
+        else {
+            return Ok(Recovery::Superseded);
+        };
+        if !projection.vacant(old_entry.parent, &old_entry.name) {
+            return Ok(Recovery::Diverged);
+        }
+        let root = open_root(root)?;
+        let source_components: Vec<_> = old_path.iter().map(String::as_str).collect();
+        let target_components: Vec<_> = path.iter().map(String::as_str).collect();
+        let source = NewFileTarget::existing(&root, &source_components)?;
+        let mut target = NewFileTarget::existing(&root, &target_components)?;
+        let result = if source.name_is_vacant()?
+            && target
+                .inspect(object)
+                .is_ok_and(|blob| blob == Some(previous))
+        {
+            Recovery::AlreadyApplied
+        } else if source.move_verified(&target, previous)? {
+            Recovery::Applied
+        } else {
+            return Ok(Recovery::Diverged);
+        };
+        record_applied(&tx, &intent, Some(path))?;
+        remove_intent(&tx, object)?;
+        tx.commit()?;
+        Ok(result)
+    }
+
     /// Apply a tombstone only to the recorded local version at its original
     /// path. Windows locks and removes the exact verified file by handle.
     #[cfg(windows)]

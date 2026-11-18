@@ -86,6 +86,21 @@ impl NewFileTarget {
     }
 
     #[cfg(windows)]
+    pub(crate) fn move_verified(&self, destination: &Self, expected: Blob) -> io::Result<bool> {
+        if !destination.name_is_vacant()? {
+            return Ok(false);
+        }
+        let Some(file) = self.lock_verified(&self.name, expected)? else {
+            return Ok(false);
+        };
+        match rename_into(&file, Some(&destination.parent), &destination.name) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    #[cfg(windows)]
     fn delete_named_verified(&self, name: &str, expected: Blob) -> io::Result<bool> {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::Storage::FileSystem::{
@@ -313,6 +328,11 @@ fn update_backup(intent: &FileIntent) -> String {
 
 #[cfg(windows)]
 fn rename_by_handle(file: &cap_std::fs::File, name: &str) -> io::Result<()> {
+    rename_into(file, None, name)
+}
+
+#[cfg(windows)]
+fn rename_into(file: &cap_std::fs::File, parent: Option<&Dir>, name: &str) -> io::Result<()> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::FILE_RENAME_INFO;
 
@@ -337,7 +357,7 @@ fn rename_by_handle(file: &cap_std::fs::File, name: &str) -> io::Result<()> {
         return Err(invalid_name());
     }
     let offset = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
-    // A null root and a plain filename rename within the existing parent.
+    buffer.prefix.RootDirectory = parent.map_or(std::ptr::null_mut(), AsRawHandle::as_raw_handle);
     buffer.prefix.FileNameLength = (name.len() * 2) as u32;
     let address = (&mut buffer as *mut RenameBuffer).cast::<u8>();
     let mut status_block = IO_STATUS_BLOCK::default();
