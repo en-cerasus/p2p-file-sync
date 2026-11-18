@@ -16,7 +16,7 @@ use crate::{
     replica::{Change, EntryKind, EventId, ObjectId, Replica},
     retention::{Confirmation, PeerState},
     store::Store,
-    sync::{sync_new_files, sync_serving_cache, Destination, FileResult, SyncError, SyncReport},
+    sync::{sync_cancellable, sync_serving_cache, Destination, FileResult, SyncError, SyncReport},
     tls::{CertificatePin, Client, Server, TlsError},
     wire::{finish_session, send_confirmation, SessionProgress, ShareSession, WireError},
 };
@@ -79,7 +79,7 @@ pub(crate) fn pull_with_reader(
             cancelled,
         };
         let root = destination.root;
-        let report = sync_new_files(&mut connection, store, roster, destination)
+        let report = sync_cancellable(&mut connection, store, roster, destination, cancelled)
             .map_err(DirectError::Sync)?;
         if let Some(reader) = reader {
             confirm_applied(&mut connection, store, roster, reader, root, &report)?;

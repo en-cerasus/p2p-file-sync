@@ -30,6 +30,7 @@ pub enum SyncError {
     Materialize(MaterializeError),
     Store(StoreError),
     Content(std::io::Error),
+    Cancelled,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -60,6 +61,17 @@ pub fn sync_new_files(
     roster: &Roster,
     destination: Destination<'_>,
 ) -> Result<SyncReport, SyncError> {
+    sync_cancellable(stream, store, roster, destination, &|| false)
+}
+
+pub(crate) fn sync_cancellable(
+    stream: &mut (impl Read + Write),
+    store: &mut Store,
+    roster: &Roster,
+    destination: Destination<'_>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<SyncReport, SyncError> {
+    check_cancelled(cancelled)?;
     let events_added = fetch_events(stream, store, roster)?;
     let report = publish_heads(
         stream,
@@ -69,6 +81,7 @@ pub fn sync_new_files(
             events_added,
             ..Default::default()
         },
+        cancelled,
     )?;
     cache_versions(
         stream,
@@ -117,6 +130,7 @@ fn publish_heads(
     store: &mut Store,
     destination: &Destination<'_>,
     mut report: SyncReport,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<SyncReport, SyncError> {
     store.refresh().map_err(SyncError::Store)?;
     let projection = Projection::new(store.replica());
@@ -175,11 +189,13 @@ fn publish_heads(
     if !directories.is_empty() {
         let root = open_root(destination.root).map_err(SyncError::Content)?;
         for components in directories {
+            check_cancelled(cancelled)?;
             open_or_create_directories(&root, &components).map_err(SyncError::Content)?;
         }
     }
 
     for (object, event, previous, live, moving) in files {
+        check_cancelled(cancelled)?;
         let (previous, moving) = if store
             .retire_superseded_file(destination.completed, destination.root, object)
             .map_err(SyncError::Materialize)?
@@ -225,6 +241,7 @@ fn publish_heads(
                 previous: Some(previous),
                 desired: Some(desired),
             };
+            check_cancelled(cancelled)?;
             match store.stage_file(destination.completed, &intent) {
                 Ok(()) => {
                     let outcome = store
@@ -303,6 +320,7 @@ fn publish_heads(
             None
         };
         let is_update = previous.is_some() && previous != desired;
+        check_cancelled(cancelled)?;
         store
             .stage_file(
                 destination.completed,
@@ -341,6 +359,13 @@ fn publish_heads(
         report.files.push((object, file_result(outcome)));
     }
     Ok(report)
+}
+
+fn check_cancelled(cancelled: &dyn Fn() -> bool) -> Result<(), SyncError> {
+    if cancelled() {
+        return Err(SyncError::Cancelled);
+    }
+    Ok(())
 }
 
 fn cache_versions(
