@@ -68,7 +68,7 @@ pub fn sync_new_files(
                 return Err(SyncError::IncompleteEvents);
             }
             let report = publish_heads(stream, store, &destination, report)?;
-            fetch_protected_originals(stream, store, &destination)?;
+            fetch_conflict_contents(stream, store, &destination)?;
             return Ok(report);
         }
     }
@@ -242,15 +242,26 @@ fn publish_heads(
     Ok(report)
 }
 
-fn fetch_protected_originals(
+fn fetch_conflict_contents(
     stream: &mut (impl Read + Write),
     store: &Store,
     destination: &Destination<'_>,
 ) -> Result<(), SyncError> {
+    let replica = store.replica();
+    let originals = store
+        .active_protections()
+        .map(|protection| (protection.original(), protection.content()));
+    let candidates = replica
+        .objects()
+        .filter(|&object| replica.has_conflict(object))
+        .flat_map(|object| replica.heads(object))
+        .filter_map(|event| match event.change.entry()?.kind {
+            EntryKind::File(hash) => Some((event.id, hash)),
+            EntryKind::Directory => None,
+        });
     let mut requested = BTreeSet::new();
-    for protection in store.active_protections() {
-        let hash = protection.content();
-        if store.signed_event(protection.original()).is_none() || !requested.insert(hash) {
+    for (event, hash) in originals.chain(candidates) {
+        if store.signed_event(event).is_none() || !requested.insert(hash) {
             continue;
         }
         match destination.completed.open_candidate(hash) {
@@ -258,7 +269,7 @@ fn fetch_protected_originals(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(SyncError::Content(error)),
         }
-        match fetch_content(stream, store, destination, protection.original()) {
+        match fetch_content(stream, store, destination, event) {
             Ok(_) | Err(SyncError::Wire(WireError::UnavailableContent)) => {}
             Err(error) => return Err(error),
         }

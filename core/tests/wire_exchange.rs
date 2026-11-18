@@ -203,6 +203,139 @@ fn share_session_refuses_content_without_a_signed_event_even_when_blob_exists() 
 }
 
 #[test]
+fn a_fresh_peer_caches_all_conflicting_versions_without_publishing_a_winner() {
+    use p2p_sync_core::{
+        blob::{Blob, BlobStore},
+        projection::PathIssue,
+        sha256,
+        sync::{sync_new_files, Destination, FileResult},
+    };
+    let folder = tempfile::tempdir().unwrap();
+    let source = BlobStore::open(folder.path().join("source")).unwrap();
+    let chunks = BlobStore::open(folder.path().join("chunks")).unwrap();
+    let completed = BlobStore::open(folder.path().join("completed")).unwrap();
+    let destination = folder.path().join("destination");
+    std::fs::create_dir(&destination).unwrap();
+    let first_key = PeerSigningKey::from_bytes(&[40; 32]);
+    let second_key = PeerSigningKey::from_bytes(&[41; 32]);
+    let first_peer = first_key.verifying_key().to_bytes();
+    let second_peer = second_key.verifying_key().to_bytes();
+    let roster = Roster::new(
+        [1; 16],
+        1,
+        [(first_peer, Role::Writer), (second_peer, Role::Writer)].into(),
+    );
+    let object = [5; 16];
+    let base = EventId {
+        peer: first_peer,
+        sequence: 1,
+    };
+    let mut sender =
+        Store::open(folder.path().join("sender.db"), roster.membership().clone()).unwrap();
+    let mut receiver = Store::open(
+        folder.path().join("receiver.db"),
+        roster.membership().clone(),
+    )
+    .unwrap();
+    let mut expected = Vec::new();
+    for (key, id, data) in [
+        (&first_key, base, b"base".as_slice()),
+        (
+            &first_key,
+            EventId {
+                peer: first_peer,
+                sequence: 2,
+            },
+            b"left".as_slice(),
+        ),
+        (
+            &second_key,
+            EventId {
+                peer: second_peer,
+                sequence: 1,
+            },
+            b"right".as_slice(),
+        ),
+    ] {
+        let blob = Blob {
+            hash: sha256(data),
+            length: data.len() as u64,
+        };
+        source.put(blob, data).unwrap();
+        expected.push(blob);
+        let entry = Entry {
+            parent: None,
+            name: "song.tja".into(),
+            kind: EntryKind::File(blob.hash),
+        };
+        let (context, change) = if id == base {
+            (VersionVector::new(), Change::Create(entry))
+        } else {
+            (
+                [(first_peer, 1)].into(),
+                Change::Revise {
+                    base,
+                    entry: Some(entry),
+                },
+            )
+        };
+        let signed = roster
+            .sign_event(
+                key,
+                &Event {
+                    id,
+                    context,
+                    object,
+                    change,
+                },
+            )
+            .unwrap();
+        roster.receive(&mut sender, &signed).unwrap();
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    std::thread::scope(|threads| {
+        let roster = &roster;
+        let server = threads.spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            configure(&stream);
+            let mut session = ShareSession::default();
+            while session
+                .serve_next(&mut stream, &mut sender, &source, roster)
+                .unwrap()
+                == SessionProgress::Continue
+            {}
+        });
+        let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(5)).unwrap();
+        configure(&stream);
+        let report = sync_new_files(
+            &mut stream,
+            &mut receiver,
+            roster,
+            Destination {
+                root: &destination,
+                chunks: &chunks,
+                completed: &completed,
+            },
+        )
+        .unwrap();
+        finish_session(&mut stream).unwrap();
+        server.join().unwrap();
+        assert_eq!(
+            report.files,
+            [(
+                object,
+                FileResult::BlockedPath(PathIssue::Divergent(object))
+            )]
+        );
+    });
+    assert!(!destination.join("song.tja").exists());
+    for blob in expected {
+        assert!(completed.open_verified(blob).is_ok());
+    }
+}
+
+#[test]
 fn an_applied_file_gets_a_durable_update_intent_with_verified_old_and_new_content() {
     use p2p_sync_core::{
         blob::{Blob, BlobStore},
