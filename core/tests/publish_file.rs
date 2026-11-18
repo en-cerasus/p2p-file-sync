@@ -60,6 +60,7 @@ fn selected_files_are_verified_and_signed_and_names_are_collision_checked() {
 
 #[test]
 fn updates_and_tombstones_share_the_same_object_and_retain_previous_versions() {
+    use std::time::SystemTime;
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("song.tja");
     std::fs::write(&source, b"first").unwrap();
@@ -67,7 +68,8 @@ fn updates_and_tombstones_share_the_same_object_and_retain_previous_versions() {
     let peer = key.verifying_key().to_bytes();
     let roster = Roster::new([4; 16], 1, [(peer, Role::Writer)].into());
     let blobs = BlobStore::open(directory.path().join("completed")).unwrap();
-    let mut store = Store::open(":memory:", roster.membership().clone()).unwrap();
+    let database = directory.path().join("sync.db");
+    let mut store = Store::open(&database, roster.membership().clone()).unwrap();
 
     let first = publish_file(&source, &mut store, &roster, &key, &blobs, None, "song.tja").unwrap();
     let object = store.replica().get(first).unwrap().object;
@@ -91,6 +93,19 @@ fn updates_and_tombstones_share_the_same_object_and_retain_previous_versions() {
     assert_eq!(removal.object, object);
     assert!(removal.change.entry().is_none());
     assert_eq!(store.replica().clock()[&peer], 3);
+    drop(store);
+    let store = Store::open(&database, roster.membership().clone()).unwrap();
+    let history = store.archives(SystemTime::now()).unwrap();
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].event, second);
+    assert_eq!(history[0].replaced_by, last);
+    assert_eq!(history[1].event, first);
+    assert_eq!(history[1].replaced_by, second);
+    assert_eq!(history[1].path, Some(vec!["song.tja".into()]));
+    assert_eq!(store.protections().count(), 2);
+    assert!(store
+        .protections()
+        .all(|protection| protection.can_release(store.replica().clock())));
     assert_eq!(std::fs::read(source).unwrap(), b"second");
     for contents in [b"first".as_slice(), b"second".as_slice()] {
         assert!(blobs

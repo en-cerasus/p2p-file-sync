@@ -12,6 +12,7 @@ use crate::{
     blob::{Blob, BlobStore},
     chunks::Manifest,
     local_target::open_root,
+    materialize::AppliedFile,
     names::{collision_key, NameError},
     projection::Projection,
     replica::{Apply, Change, Entry, EntryKind, Event, EventId, ObjectId},
@@ -290,7 +291,7 @@ fn publish_entry(
     getrandom::fill(&mut object)
         .map_err(|error| PublishError::Io(io::Error::other(error.to_string())))?;
     let change = Change::Create(entry);
-    append_change(store, roster, key, peer, object, change)
+    append_change(store, roster, key, peer, object, change, None)
 }
 
 /// Publish a new version of an existing regular file, or a deletion when
@@ -333,11 +334,13 @@ fn revise_content(
     if heads.next().map(|event| event.id) != Some(base)
         || heads.next().is_some()
         || store.signed_event(base).is_none()
-        || Projection::new(replica).path(object).is_err()
     {
         return Err(PublishError::StaleBase);
     }
     drop(heads);
+    let path = Projection::new(replica)
+        .path(object)
+        .map_err(|_| PublishError::StaleBase)?;
     let Some(
         entry @ Entry {
             kind: EntryKind::File(old_hash),
@@ -370,7 +373,12 @@ fn revise_content(
         base,
         entry: updated,
     };
-    append_change(store, roster, key, peer, object, change)
+    let previous = AppliedFile {
+        event: base,
+        contents: Some(old_manifest.file()),
+        path: Some(path.into_iter().map(str::to_owned).collect()),
+    };
+    append_change(store, roster, key, peer, object, change, Some(previous))
 }
 
 fn append_change(
@@ -380,6 +388,7 @@ fn append_change(
     peer: crate::replica::PeerId,
     object: ObjectId,
     change: Change,
+    previous: Option<AppliedFile>,
 ) -> Result<EventId, PublishError> {
     let context = store.replica().clock().clone();
     let sequence = context
@@ -395,8 +404,16 @@ fn append_change(
         change,
     };
     let wire = roster.sign_event(key, &event).map_err(PublishError::Auth)?;
-    match roster.receive(store, &wire).map_err(PublishError::Auth)? {
-        Apply::Added | Apply::Duplicate => Ok(event.id),
+    let id = event.id;
+    let outcome = if let Some(previous) = previous {
+        store
+            .apply_publication(event, wire, previous)
+            .map_err(PublishError::Store)?
+    } else {
+        roster.receive(store, &wire).map_err(PublishError::Auth)?
+    };
+    match outcome {
+        Apply::Added | Apply::Duplicate => Ok(id),
         Apply::MissingDependencies(_) => Err(PublishError::Retry),
     }
 }

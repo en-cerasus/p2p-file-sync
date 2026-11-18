@@ -428,7 +428,13 @@ fn record_applied(
     path: Option<Vec<String>>,
 ) -> Result<(), MaterializeError> {
     if let Some(previous) = read_applied(tx, intent.object)? {
-        record_archive(tx, intent.object, previous, intent.event, intent.desired)?;
+        record_archive(
+            tx,
+            intent.object,
+            previous,
+            intent.event,
+            intent.desired.map(|blob| blob.hash),
+        )?;
     }
     let applied = AppliedFile {
         event: intent.event,

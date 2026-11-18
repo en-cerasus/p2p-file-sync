@@ -7,6 +7,8 @@ use rusqlite::{params, Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    archive::record_archive,
+    materialize::AppliedFile,
     replica::{Apply, Change, EntryKind, Event, EventId, ObjectId, PeerId, Reject, Replica},
     retention::{Confirmation, Protection},
 };
@@ -176,7 +178,7 @@ impl Store {
     /// Accepts values only after the caller verifies their authentication.
     /// Missing dependencies leave the event uncommitted for the caller to retry.
     pub fn apply_verified(&mut self, event: Event) -> Result<Apply, StoreError> {
-        self.apply_record(event, None)
+        self.apply_record(event, None, None)
     }
 
     pub(crate) fn apply_signed(
@@ -184,10 +186,26 @@ impl Store {
         event: Event,
         wire: Vec<u8>,
     ) -> Result<Apply, StoreError> {
-        self.apply_record(event, Some(wire))
+        self.apply_record(event, Some(wire), None)
     }
 
-    fn apply_record(&mut self, event: Event, wire: Option<Vec<u8>>) -> Result<Apply, StoreError> {
+    /// Commit a locally authored revision of the published snapshot together
+    /// with its history and the publishing peer's own confirmation.
+    pub(crate) fn apply_publication(
+        &mut self,
+        event: Event,
+        wire: Vec<u8>,
+        previous: AppliedFile,
+    ) -> Result<Apply, StoreError> {
+        self.apply_record(event, Some(wire), Some(previous))
+    }
+
+    fn apply_record(
+        &mut self,
+        event: Event,
+        wire: Option<Vec<u8>>,
+        previous: Option<AppliedFile>,
+    ) -> Result<Apply, StoreError> {
         if !self.membership.members.contains(&event.id.peer)
             || !event
                 .context
@@ -207,13 +225,41 @@ impl Store {
             .validate(&event)
             .map_err(StoreError::Rejected)?;
         if outcome == Apply::Added {
+            let confirmation = if let Some(previous) = previous {
+                let desired = match &event.change {
+                    Change::Revise { base, entry } if *base == previous.event => {
+                        match entry.as_ref().map(|entry| &entry.kind) {
+                            Some(EntryKind::File(hash)) => Some(*hash),
+                            None => None,
+                            Some(EntryKind::Directory) => return Err(StoreError::InvalidRecord),
+                        }
+                    }
+                    _ => return Err(StoreError::InvalidRecord),
+                };
+                record_archive(&tx, event.object, previous, event.id, desired)?;
+                Some(Record::Confirmation(Confirmation {
+                    generation: self.membership.generation,
+                    peer: event.id.peer,
+                    object: event.object,
+                    successor: event.id,
+                    sent_through: event.id.sequence,
+                }))
+            } else {
+                None
+            };
             let record = match wire {
                 Some(wire) => Record::SignedEvent { event, wire },
                 None => Record::Event(event),
             };
-            let position = append(&tx, &record)?;
+            let mut position = append(&tx, &record)?;
+            if let Some(confirmation) = &confirmation {
+                position = append(&tx, confirmation)?;
+            }
             tx.commit()?;
             self.index.record(record, &self.membership)?;
+            if let Some(confirmation) = confirmation {
+                self.index.record(confirmation, &self.membership)?;
+            }
             self.index.offset = position;
         }
         Ok(outcome)

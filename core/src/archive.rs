@@ -192,11 +192,11 @@ pub(crate) fn record_archive(
     object: ObjectId,
     previous: AppliedFile,
     successor: EventId,
-    desired: Option<Blob>,
+    desired: Option<ContentHash>,
 ) -> Result<(), StoreError> {
     let Some(content) = previous
         .contents
-        .filter(|&previous| Some(previous) != desired)
+        .filter(|previous| Some(previous.hash) != desired)
     else {
         return Ok(());
     };
