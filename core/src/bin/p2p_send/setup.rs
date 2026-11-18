@@ -106,6 +106,7 @@ pub fn create(
     }
 
     let mut clients = Vec::with_capacity(receivers);
+    let mut reader_endpoints = Vec::with_capacity(receivers);
     for index in 1..=receivers {
         let (client_cert, client_key) = issue(
             vec![host.clone()],
@@ -137,6 +138,11 @@ pub fn create(
         write_event_key(&receiver, "reader", &mut members, write_error)?;
         let mut listen = bind;
         listen.set_port(bind.port() + writers + index as u16 - 1);
+        let mut address = endpoint;
+        address.set_port(endpoint.port() + writers + index as u16 - 1);
+        reader_endpoints.push(json!({
+            "address": address.to_string(), "server_name": host, "server_pin": pin,
+        }));
         clients.push((receiver, listen, pin));
     }
     let direct_config = |peers: &[serde_json::Value], reader: bool| {
@@ -155,8 +161,19 @@ pub fn create(
         }
         client
     };
-    for (receiver, listen, pin) in clients {
-        let client = direct_config(&endpoints, true);
+    for (index, (receiver, listen, pin)) in clients.into_iter().enumerate() {
+        let peers: Vec<_> = endpoints
+            .iter()
+            .chain(
+                reader_endpoints
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(other, peer)| (other != index).then_some(peer)),
+            )
+            .take(9)
+            .cloned()
+            .collect();
+        let client = direct_config(&peers, true);
         write_new(&receiver.join("direct.json"), client.to_string().as_bytes())
             .map_err(write_error)?;
         let pins: Vec<_> = client_pins.iter().filter(|peer| **peer != pin).collect();
@@ -182,12 +199,15 @@ pub fn create(
             server.to_string().as_bytes(),
         )
         .map_err(write_error)?;
-        if writers > 1 {
+        {
             let other_peers: Vec<_> = endpoints
                 .iter()
                 .enumerate()
                 .filter(|(other, _)| *other != index)
-                .map(|(_, endpoint)| endpoint.clone())
+                .map(|(_, endpoint)| endpoint)
+                .chain(reader_endpoints.iter())
+                .take(9)
+                .cloned()
                 .collect();
             let client = direct_config(&other_peers, false);
             write_new(

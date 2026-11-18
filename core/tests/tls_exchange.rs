@@ -291,6 +291,15 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
         std::fs::read(setup.join("receiver-1/certificate.der")).unwrap(),
         std::fs::read(setup.join("receiver-2/certificate.der")).unwrap()
     );
+    let second_direct: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(setup.join("receiver-2/direct.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        second_direct["fallback_peers"][0]["server_pin"],
+        encode_hex(&sha256(
+            &std::fs::read(setup.join("receiver-1/certificate.der")).unwrap(),
+        ))
+    );
 
     let server_config = setup.join("sender/server.json");
     let server_state = path.join("server-state");
@@ -383,10 +392,7 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
         let mut settings: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&relay_direct).unwrap()).unwrap();
         settings["address"] = listener.local_addr().unwrap().to_string().into();
-        settings["server_pin"] = encode_hex(&sha256(
-            &std::fs::read(setup.join("receiver-1/certificate.der")).unwrap(),
-        ))
-        .into();
+        settings["server_pin"] = second_direct["fallback_peers"][0]["server_pin"].clone();
         settings.as_object_mut().unwrap().remove("fallback_peers");
         std::fs::write(&relay_direct, settings.to_string()).unwrap();
         let serving = threads.spawn(move || {
