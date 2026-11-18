@@ -288,7 +288,7 @@ internal sealed class SyncWindow : Window
         {
             var pull = await Task.Run(() => SyncCore.Pull(config, state, root, operation.Token));
             result.Text = pull.Status == 0
-                ? $"イベント {pull.Summary.EventsAdded} 件、新規 {pull.Summary.FilesPublished} 件、更新 {pull.Summary.FilesUpdated} 件、削除 {pull.Summary.FilesRemoved} 件、変更なし {pull.Summary.FilesPresent} 件、保留 {pull.Summary.FilesBlocked} 件\n保護原本 {pull.Summary.ProtectedFiles} 件 ({pull.Summary.ProtectedBytes:N0} バイト)、未取得 {pull.Summary.ProtectedMissing} 件"
+                ? $"イベント {pull.Summary.EventsAdded} 件、新規 {pull.Summary.FilesPublished} 件、更新 {pull.Summary.FilesUpdated} 件、削除 {pull.Summary.FilesRemoved} 件、変更なし {pull.Summary.FilesPresent} 件、保留 {pull.Summary.FilesBlocked} 件\n保護原本 {pull.Summary.ProtectedFiles} 件 ({pull.Summary.ProtectedBytes:N0} バイト)、未取得 {pull.Summary.ProtectedMissing} 件\n履歴の保存容量 {pull.HistoryBytes:N0} バイト、未取得 {pull.HistoryMissing} 件"
                 : SyncCore.ErrorMessage(pull.Status);
             if (pull.Status == 0)
             {
@@ -384,9 +384,11 @@ internal static class SyncCore
     private sealed record SyncDetails(
         [property: JsonPropertyName("originals")] ProtectedOriginal[] Originals,
         [property: JsonPropertyName("conflicts")] FileConflict[] Conflicts,
-        [property: JsonPropertyName("history")] HistoryEntry[] History);
+        [property: JsonPropertyName("history")] HistoryEntry[] History,
+        [property: JsonPropertyName("history_bytes")] ulong HistoryBytes,
+        [property: JsonPropertyName("history_missing")] ulong HistoryMissing);
 
-    internal static (int Status, PullSummary Summary, ProtectedOriginal[] Originals, FileConflict[] Conflicts, HistoryEntry[] History) Pull(
+    internal static (int Status, PullSummary Summary, ProtectedOriginal[] Originals, FileConflict[] Conflicts, HistoryEntry[] History, ulong HistoryBytes, ulong HistoryMissing) Pull(
         string config, string state, string destination, CancellationToken cancellation)
     {
         byte[] configBytes = Encoding.UTF8.GetBytes(config);
@@ -406,10 +408,11 @@ internal static class SyncCore
             }, IntPtr.Zero, _ => cancellation.IsCancellationRequested ? (byte)1 : (byte)0);
         if (status != 0)
         {
-            return (status, summary, [], [], []);
+            return (status, summary, [], [], [], 0, 0);
         }
         var details = json is null ? null : JsonSerializer.Deserialize<SyncDetails>(json);
-        return details is null ? (6, summary, [], [], []) : (status, summary, details.Originals, details.Conflicts, details.History);
+        return details is null ? (6, summary, [], [], [], 0, 0) :
+            (status, summary, details.Originals, details.Conflicts, details.History, details.HistoryBytes, details.HistoryMissing);
     }
 
     internal static string ErrorMessage(int status) => status switch

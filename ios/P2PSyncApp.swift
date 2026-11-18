@@ -307,7 +307,7 @@ struct DirectSyncView: View {
             originals = summary.originals
             conflicts = summary.conflicts
             history = summary.history
-            result = "イベント \(summary.eventsAdded) 件、新規 \(summary.filesPublished) 件、更新 \(summary.filesUpdated) 件、削除 \(summary.filesRemoved) 件、変更なし \(summary.filesPresent) 件、保留 \(summary.filesBlocked) 件\n保護原本 \(summary.protectedFiles) 件 (\(summary.protectedBytes.formatted()) バイト)、未取得 \(summary.protectedMissing) 件"
+            result = "イベント \(summary.eventsAdded) 件、新規 \(summary.filesPublished) 件、更新 \(summary.filesUpdated) 件、削除 \(summary.filesRemoved) 件、変更なし \(summary.filesPresent) 件、保留 \(summary.filesBlocked) 件\n保護原本 \(summary.protectedFiles) 件 (\(summary.protectedBytes.formatted()) バイト)、未取得 \(summary.protectedMissing) 件\n履歴の保存容量 \(summary.historyBytes.formatted()) バイト、未取得 \(summary.historyMissing) 件"
         } catch SyncRunner.Failure.busy {
             result = "別の同期が進行中です。"
         } catch SyncRunner.Failure.permissionUnavailable {

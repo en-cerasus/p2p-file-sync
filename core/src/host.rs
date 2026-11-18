@@ -1097,6 +1097,8 @@ pub(crate) fn pull_with_originals(
     let history = store
         .archives(std::time::SystemTime::now())
         .map_err(HostError::Store)?;
+    let (history_bytes, history_missing) =
+        crate::archive::history_storage(&history, &completed).map_err(HostError::Io)?;
     Ok((
         PullSummaryV3 {
             sync: summary,
@@ -1108,6 +1110,8 @@ pub(crate) fn pull_with_originals(
             originals,
             conflicts,
             history,
+            history_bytes,
+            history_missing,
         },
     ))
 }

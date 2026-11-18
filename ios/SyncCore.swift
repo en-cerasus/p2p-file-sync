@@ -79,6 +79,8 @@ enum SyncCore {
         let originals: [ProtectedOriginal]
         let conflicts: [FileConflict]
         let history: [HistoryEntry]
+        let historyBytes: UInt64
+        let historyMissing: UInt64
     }
 
     struct FileConflict: Decodable, Identifiable, Sendable {
@@ -108,6 +110,8 @@ enum SyncCore {
         let originals: [ProtectedOriginal]
         let conflicts: [FileConflict]
         let history: [HistoryEntry]
+        let history_bytes: UInt64
+        let history_missing: UInt64
     }
 
     private struct PullContext {
@@ -158,7 +162,9 @@ enum SyncCore {
             protectedMissing: summary.protected_missing,
             originals: details.originals,
             conflicts: details.conflicts,
-            history: details.history
+            history: details.history,
+            historyBytes: details.history_bytes,
+            historyMissing: details.history_missing
         )
     }
 }

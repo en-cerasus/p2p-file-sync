@@ -22,6 +22,68 @@ pub struct SyncDetails {
     pub originals: Vec<ProtectedOriginal>,
     pub conflicts: Vec<FileConflict>,
     pub history: Vec<ArchivedFile>,
+    pub history_bytes: u64,
+    pub history_missing: u64,
+}
+
+pub fn history_storage(history: &[ArchivedFile], blobs: &BlobStore) -> io::Result<(u64, u64)> {
+    let mut seen = BTreeSet::new();
+    let mut bytes = 0_u64;
+    let mut missing = 0_u64;
+    for entry in history {
+        if !seen.insert(entry.content.hash) {
+            continue;
+        }
+        match blobs.open_candidate(entry.content.hash) {
+            Ok(file) => {
+                let metadata = file.metadata()?;
+                if metadata.is_file() {
+                    bytes = bytes.saturating_add(metadata.len());
+                } else {
+                    missing += 1;
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => missing += 1,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok((bytes, missing))
+}
+
+#[cfg(test)]
+mod history_storage_tests {
+    use super::*;
+
+    #[test]
+    fn counts_present_history_blobs_once_and_reports_missing_content() {
+        let root = tempfile::tempdir().unwrap();
+        let blobs = BlobStore::open(root.path().join("files")).unwrap();
+        let present = Blob {
+            hash: crate::sha256(b"archived"),
+            length: 8,
+        };
+        let absent = Blob {
+            hash: crate::sha256(b"absent"),
+            length: 6,
+        };
+        blobs.put(present, &b"archived"[..]).unwrap();
+        let event = EventId {
+            peer: [1; 32],
+            sequence: 1,
+        };
+        let entry = |content| ArchivedFile {
+            object: [2; 16],
+            event,
+            replaced_by: event,
+            content,
+            path: None,
+            archived_at: 0,
+        };
+        assert_eq!(
+            history_storage(&[entry(present), entry(present), entry(absent)], &blobs).unwrap(),
+            (8, 1)
+        );
+    }
 }
 
 #[derive(Debug, Serialize)]
