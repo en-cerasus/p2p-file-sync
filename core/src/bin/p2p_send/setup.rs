@@ -38,6 +38,8 @@ pub fn create(
     getrandom::fill(&mut seed).map_err(|error| error.to_string())?;
     let signer = PeerSigningKey::from_bytes(&seed);
     let member = hex(signer.verifying_key().as_bytes());
+    let mut members = serde_json::Map::new();
+    members.insert(member, json!("writer"));
     let share = hex(&share);
 
     let now = OffsetDateTime::now_utc();
@@ -73,6 +75,7 @@ pub fn create(
     let server_pin = hex(&sha256(server_cert.der().as_ref()));
     let mut client_pins = Vec::with_capacity(receivers);
 
+    let mut clients = Vec::with_capacity(receivers);
     for index in 1..=receivers {
         let (client_cert, client_key) =
             issue(Vec::new(), ExtendedKeyUsagePurpose::ClientAuth).map_err(certificate_error)?;
@@ -94,18 +97,27 @@ pub fn create(
         )
         .map_err(write_error)?;
         client_pins.push(hex(&sha256(client_cert.der().as_ref())));
+        let mut reader_seed = [0; 32];
+        getrandom::fill(&mut reader_seed).map_err(|error| error.to_string())?;
+        let reader = PeerSigningKey::from_bytes(&reader_seed);
+        members.insert(hex(reader.verifying_key().as_bytes()), json!("reader"));
+        write_new(&receiver.join("event-key.bin"), &reader_seed).map_err(write_error)?;
+        clients.push(receiver);
+    }
+    for receiver in clients {
         let client = json!({
-            "share": share, "generation": 1, "members": { (member.as_str()): "writer" },
+            "share": share, "generation": 1, "members": members,
             "address": endpoint.to_string(), "server_name": host,
             "server_pin": server_pin,
             "ca_der": "ca.der", "certificate_der": "certificate.der", "private_key_der": "private-key.der",
+            "event_key": "event-key.bin",
         });
         write_new(&receiver.join("direct.json"), client.to_string().as_bytes())
             .map_err(write_error)?;
     }
 
     let server = json!({
-        "share": share, "generation": 1, "members": { (member.as_str()): "writer" },
+        "share": share, "generation": 1, "members": members,
         "bind": bind.to_string(), "client_pins": client_pins,
         "ca_der": "ca.der", "certificate_der": "certificate.der",
         "private_key_der": "private-key.der", "event_key": "event-key.bin",

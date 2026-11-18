@@ -213,7 +213,11 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
     };
     assert!(setup_command().output().unwrap().status.success());
     assert!(!setup_command().output().unwrap().status.success());
-    assert!(!setup.join("receiver-1/event-key.bin").exists());
+    let fingerprints = ["sender", "receiver-1", "receiver-2"]
+        .map(|name| sha256(&std::fs::read(setup.join(name).join("event-key.bin")).unwrap()));
+    assert_ne!(fingerprints[0], fingerprints[1]);
+    assert_ne!(fingerprints[0], fingerprints[2]);
+    assert_ne!(fingerprints[1], fingerprints[2]);
     assert_ne!(
         std::fs::read(setup.join("receiver-1/certificate.der")).unwrap(),
         std::fs::read(setup.join("receiver-2/certificate.der")).unwrap()
@@ -385,6 +389,19 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
             assert!(originals.iter().any(|entry| {
                 entry["names"][0] == "試験譜面.tja" && entry["bytes"] == contents.len() as u64
             }));
+            let seed = std::fs::read(receiver.parent().unwrap().join("event-key.bin")).unwrap();
+            let reader = PeerSigningKey::from_bytes(seed.as_slice().try_into().unwrap());
+            let reader = reader.verifying_key().to_bytes();
+            let reader_hex: String = reader.iter().map(|byte| format!("{byte:02x}")).collect();
+            let deleted_revision = originals
+                .iter()
+                .find(|entry| entry["bytes"] == b"TITLE:Revision".len() as u64)
+                .unwrap();
+            assert!(!deleted_revision["waiting"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["peer"] == reader_hex));
             assert!(!existing.join("譜面/試験譜面.tja").exists());
         }
         session.join().unwrap();

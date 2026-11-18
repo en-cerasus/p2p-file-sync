@@ -42,6 +42,7 @@ struct Config {
     ca_der: PathBuf,
     certificate_der: PathBuf,
     private_key_der: PathBuf,
+    event_key: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -362,6 +363,22 @@ pub(crate) fn pull_with_originals(
     let config: Config = serde_json::from_slice(&read_bounded(configuration, MAX_CONFIG_BYTES)?)
         .map_err(|_| HostError::Configuration)?;
     let roster = build_roster(&config.share, config.generation, config.members)?;
+    let reader = config
+        .event_key
+        .map(|name| {
+            let directory = configuration.parent().ok_or(HostError::Configuration)?;
+            let material = read_bounded(&directory.join(name), 32)?;
+            let seed = material
+                .as_slice()
+                .try_into()
+                .map_err(|_| HostError::Configuration)?;
+            let key = PeerSigningKey::from_bytes(seed);
+            if !roster.is_reader(key.verifying_key().as_bytes()) {
+                return Err(HostError::Configuration);
+            }
+            Ok(key)
+        })
+        .transpose()?;
     let server_pin = hex(&config.server_pin)?;
     let server_name =
         ServerName::try_from(config.server_name).map_err(|_| HostError::Configuration)?;
@@ -400,7 +417,7 @@ pub(crate) fn pull_with_originals(
     store
         .prune_archives(std::time::SystemTime::now())
         .map_err(HostError::Store)?;
-    let report = direct::pull(
+    let report = direct::pull_with_reader(
         &client,
         &peer,
         Duration::from_secs(15),
@@ -411,6 +428,7 @@ pub(crate) fn pull_with_originals(
             chunks: &chunks,
             completed: &completed,
         },
+        reader.as_ref(),
     )
     .map_err(HostError::Direct)?;
     let mut summary = PullSummaryV2 {

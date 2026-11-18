@@ -44,6 +44,7 @@ GitHub Actionsの「Build unsigned iOS IPA」も手動で実行できます。�
 |`server_name`|配信ピアの証明書に含まれる名前|
 |`server_pin`|配信ピアの証明書DERのSHA-256を64桁の16進数で指定|
 |`ca_der`、`certificate_der`、`private_key_der`|それぞれCA証明書、クライアント証明書、クライアント秘密鍵のDERファイル名。JSONからの相対パスを使用可能|
+|`event_key`|確認の署名に使う受信側Ed25519秘密鍵の32バイトseed。対応する公開鍵は `members` の `reader` に登録。旧設定では省略可能|
 
 鍵や接続設定は信頼できるローカルファイルを使用してください。接続先の登録・配信開始・証明書発行の画面と、Windowsは、同期先で反映済みの版と一致するファイルを更新・削除できます。
 

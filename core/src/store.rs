@@ -228,6 +228,21 @@ impl Store {
         self.index.refresh(&tx, &self.membership)?;
         self.index
             .validate_confirmation(confirmation, &self.membership)?;
+        if self
+            .index
+            .protections
+            .range(
+                (confirmation.object, confirmation.successor, FIRST_EVENT)
+                    ..=(confirmation.object, confirmation.successor, LAST_EVENT),
+            )
+            .all(|(_, protection)| {
+                protection
+                    .confirmed_through(confirmation.peer)
+                    .is_some_and(|through| through >= confirmation.sent_through)
+            })
+        {
+            return Ok(());
+        }
 
         let record = Record::Confirmation(confirmation);
         let position = append(&tx, &record)?;

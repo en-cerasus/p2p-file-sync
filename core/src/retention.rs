@@ -58,6 +58,14 @@ impl Protection {
         self.original
     }
 
+    pub(crate) fn successor(&self) -> EventId {
+        self.successor
+    }
+
+    pub(crate) fn confirmed_through(&self, peer: PeerId) -> Option<u64> {
+        self.members.get(&peer).copied().flatten()
+    }
+
     pub fn content(&self) -> ContentHash {
         self.content
     }

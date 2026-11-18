@@ -62,6 +62,10 @@ impl Roster {
         &self.membership
     }
 
+    pub(crate) fn is_reader(&self, peer: &PeerId) -> bool {
+        self.roles.get(peer) == Some(&Role::Reader)
+    }
+
     pub fn sign_event(&self, key: &SigningKey, event: &Event) -> Result<Vec<u8>, AuthError> {
         let author = key.verifying_key().to_bytes();
         self.check_writer(&author)?;
