@@ -1,3 +1,4 @@
+import BackgroundTasks
 import Foundation
 import SwiftUI
 import UIKit
@@ -5,9 +6,86 @@ import UniformTypeIdentifiers
 
 @main
 struct P2PSyncApp: App {
+    @Environment(\.scenePhase) private var phase
+
     var body: some Scene {
         WindowGroup {
             NavigationStack { DirectSyncView() }
+        }
+        .onChange(of: phase) { _, newPhase in
+            if newPhase == .background {
+                BackgroundSync.schedule()
+            }
+        }
+        .backgroundTask(.appRefresh(BackgroundSync.identifier)) {
+            await BackgroundSync.run()
+        }
+    }
+}
+
+@MainActor
+private enum BackgroundSync {
+    static let identifier = "io.github.en-cerasus.p2p-file-sync.refresh"
+    static let bookmarkKey = "directConfigBookmark"
+    static let enabledKey = "directAutomaticSync"
+
+    static func schedule() {
+        let defaults = UserDefaults.standard
+        guard defaults.bool(forKey: enabledKey),
+              let bookmark = defaults.data(forKey: bookmarkKey), !bookmark.isEmpty else {
+            BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: identifier)
+            return
+        }
+        let request = BGAppRefreshTaskRequest(identifier: identifier)
+        request.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
+        try? BGTaskScheduler.shared.submit(request)
+    }
+
+    static func run() async {
+        let defaults = UserDefaults.standard
+        guard defaults.bool(forKey: enabledKey),
+              let bookmark = defaults.data(forKey: bookmarkKey), !bookmark.isEmpty else { return }
+        schedule()
+        var stale = false
+        guard let folder = try? URL(resolvingBookmarkData: bookmark, options: [.withoutUI],
+                                    relativeTo: nil, bookmarkDataIsStale: &stale) else { return }
+        _ = try? await SyncRunner.shared.run(folder: folder, cancellation: SyncCore.Cancellation())
+    }
+}
+
+private actor SyncRunner {
+    static let shared = SyncRunner()
+    private var running = false
+
+    enum Failure: Error {
+        case busy
+        case permissionUnavailable
+    }
+
+    func run(folder: URL, cancellation: SyncCore.Cancellation) async throws -> SyncCore.PullSummary {
+        guard !running else { throw Failure.busy }
+        try Task.checkCancellation()
+        running = true
+        defer { running = false }
+        return try await withTaskCancellationHandler {
+            try await Task.detached(priority: .utility) {
+                guard folder.startAccessingSecurityScopedResource() else {
+                    throw Failure.permissionUnavailable
+                }
+                defer { folder.stopAccessingSecurityScopedResource() }
+                let manager = FileManager.default
+                let state = try manager.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                            appropriateFor: nil, create: true)
+                    .appendingPathComponent("P2PSync", isDirectory: true)
+                let destination = try manager.url(for: .documentDirectory, in: .userDomainMask,
+                                                  appropriateFor: nil, create: true)
+                    .appendingPathComponent("P2PSync", isDirectory: true)
+                try manager.createDirectory(at: destination, withIntermediateDirectories: true)
+                return try SyncCore.pull(configuration: folder.appendingPathComponent("direct.json"),
+                                         state: state, destination: destination, cancellation: cancellation)
+            }.value
+        } onCancel: {
+            cancellation.cancel()
         }
     }
 }
@@ -34,8 +112,8 @@ private final class SyncExecutionTime {
 @MainActor
 struct DirectSyncView: View {
     @Environment(\.scenePhase) private var phase
-    @AppStorage("directConfigBookmark") private var configBookmark = Data()
-    @AppStorage("directAutomaticSync") private var automaticSync = false
+    @AppStorage(BackgroundSync.bookmarkKey) private var configBookmark = Data()
+    @AppStorage(BackgroundSync.enabledKey) private var automaticSync = false
     @State private var configFolder: URL?
     @State private var pickingFolder = false
     @State private var syncing = false
@@ -59,7 +137,7 @@ struct DirectSyncView: View {
             }
             .disabled(syncing)
 
-            Toggle("10 秒ごとに自動同期", isOn: $automaticSync)
+            Toggle("自動同期", isOn: $automaticSync)
                 .disabled(configFolder == nil)
 
             if syncing {
@@ -91,6 +169,7 @@ struct DirectSyncView: View {
             }
         }
         .navigationTitle("直接同期")
+        .onChange(of: automaticSync) { _, _ in BackgroundSync.schedule() }
         .task(id: phase) {
             if phase == .active && configFolder == nil && !pickingFolder {
                 restoreConfigFolder()
@@ -116,13 +195,9 @@ struct DirectSyncView: View {
         }
     }
 
-    private enum ConfigAccessError: Error {
-        case permissionUnavailable
-    }
-
     private func bookmark(for url: URL) throws -> Data {
         guard url.startAccessingSecurityScopedResource() else {
-            throw ConfigAccessError.permissionUnavailable
+            throw SyncRunner.Failure.permissionUnavailable
         }
         defer { url.stopAccessingSecurityScopedResource() }
         return try url.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil)
@@ -149,7 +224,7 @@ struct DirectSyncView: View {
                 configBookmark = try bookmark(for: url)
             } else {
                 guard url.startAccessingSecurityScopedResource() else {
-                    throw ConfigAccessError.permissionUnavailable
+                    throw SyncRunner.Failure.permissionUnavailable
                 }
                 url.stopAccessingSecurityScopedResource()
             }
@@ -171,28 +246,17 @@ struct DirectSyncView: View {
             syncing = false
         }
         do {
-            let summary = try await Task.detached(priority: .userInitiated) {
-                guard configFolder.startAccessingSecurityScopedResource() else {
-                    throw ConfigAccessError.permissionUnavailable
-                }
-                defer { configFolder.stopAccessingSecurityScopedResource() }
-
-                let manager = FileManager.default
-                let state = try manager.url(for: .applicationSupportDirectory, in: .userDomainMask,
-                                            appropriateFor: nil, create: true)
-                    .appendingPathComponent("P2PSync", isDirectory: true)
-                let destination = try manager.url(for: .documentDirectory, in: .userDomainMask,
-                                                  appropriateFor: nil, create: true)
-                    .appendingPathComponent("P2PSync", isDirectory: true)
-                try manager.createDirectory(at: destination, withIntermediateDirectories: true)
-                return try SyncCore.pull(
-                    configuration: configFolder.appendingPathComponent("direct.json"),
-                    state: state, destination: destination, cancellation: cancellation
-                )
-            }.value
+            // Leaving the foreground stops polling, while UIKit may still
+            // grant time for this already-started sync to finish.
+            let operation = Task {
+                try await SyncRunner.shared.run(folder: configFolder, cancellation: cancellation)
+            }
+            let summary = try await operation.value
             originals = summary.originals
             result = "イベント \(summary.eventsAdded) 件、新規 \(summary.filesPublished) 件、更新 \(summary.filesUpdated) 件、削除 \(summary.filesRemoved) 件、変更なし \(summary.filesPresent) 件、保留 \(summary.filesBlocked) 件\n保護原本 \(summary.protectedFiles) 件 (\(summary.protectedBytes.formatted()) バイト)、未取得 \(summary.protectedMissing) 件"
-        } catch ConfigAccessError.permissionUnavailable {
+        } catch SyncRunner.Failure.busy {
+            result = "別の同期が進行中です。"
+        } catch SyncRunner.Failure.permissionUnavailable {
             self.configFolder = nil
             originals = []
             result = "接続設定フォルダーへのアクセスを失いました。もう一度選択してください。"
