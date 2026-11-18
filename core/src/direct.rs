@@ -28,6 +28,7 @@ pub enum DirectError {
     Sync(SyncError),
     Wire(WireError),
     Confirmation(AuthError),
+    Cancelled,
 }
 
 /// A peer established by the host's trusted configuration. The endpoint
@@ -47,7 +48,16 @@ pub fn pull(
     roster: &Roster,
     destination: Destination<'_>,
 ) -> Result<SyncReport, DirectError> {
-    pull_with_reader(client, peer, timeout, store, roster, destination, None)
+    pull_with_reader(
+        client,
+        peer,
+        timeout,
+        store,
+        roster,
+        destination,
+        None,
+        &|| false,
+    )
 }
 
 pub(crate) fn pull_with_reader(
@@ -58,17 +68,66 @@ pub(crate) fn pull_with_reader(
     roster: &Roster,
     destination: Destination<'_>,
     reader: Option<&PeerSigningKey>,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<SyncReport, DirectError> {
-    let mut connection = connect(client, peer, timeout)?;
-
-    let root = destination.root;
-    let report =
-        sync_new_files(&mut connection, store, roster, destination).map_err(DirectError::Sync)?;
-    if let Some(reader) = reader {
-        confirm_applied(&mut connection, store, roster, reader, root, &report)?;
+    if cancelled() {
+        return Err(DirectError::Cancelled);
     }
-    finish_session(&mut connection).map_err(DirectError::Wire)?;
-    Ok(report)
+    let result = (|| {
+        let mut connection = CancellableStream {
+            inner: connect(client, peer, timeout)?,
+            cancelled,
+        };
+        let root = destination.root;
+        let report = sync_new_files(&mut connection, store, roster, destination)
+            .map_err(DirectError::Sync)?;
+        if let Some(reader) = reader {
+            confirm_applied(&mut connection, store, roster, reader, root, &report)?;
+        }
+        finish_session(&mut connection).map_err(DirectError::Wire)?;
+        Ok(report)
+    })();
+    if cancelled() {
+        Err(DirectError::Cancelled)
+    } else {
+        result
+    }
+}
+
+struct CancellableStream<'a, S> {
+    inner: S,
+    cancelled: &'a dyn Fn() -> bool,
+}
+
+impl<S> CancellableStream<'_, S> {
+    fn check(&self) -> io::Result<()> {
+        if (self.cancelled)() {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "sync cancelled",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl<S: io::Read> io::Read for CancellableStream<'_, S> {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        self.check()?;
+        self.inner.read(bytes)
+    }
+}
+
+impl<S: io::Write> io::Write for CancellableStream<'_, S> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.check()?;
+        self.inner.write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.check()?;
+        self.inner.flush()
+    }
 }
 
 pub(crate) fn pull_serving_cache(
@@ -272,4 +331,36 @@ pub fn serve(
 fn configure(socket: &TcpStream, timeout: Duration) -> io::Result<()> {
     socket.set_read_timeout(Some(timeout))?;
     socket.set_write_timeout(Some(timeout))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        cell::Cell,
+        io::{Cursor, Read, Write},
+    };
+
+    #[test]
+    fn cancellation_stops_io_without_consuming_more_bytes() {
+        let cancelled = Cell::new(false);
+        let mut stream = CancellableStream {
+            inner: Cursor::new(vec![1, 2, 3]),
+            cancelled: &|| cancelled.get(),
+        };
+        let mut byte = [0];
+        stream.read_exact(&mut byte).unwrap();
+        assert_eq!(byte, [1]);
+        cancelled.set(true);
+        assert_eq!(
+            stream.read_exact(&mut byte).unwrap_err().kind(),
+            io::ErrorKind::ConnectionAborted
+        );
+        assert_eq!(
+            stream.write_all(&[9]).unwrap_err().kind(),
+            io::ErrorKind::ConnectionAborted
+        );
+        assert_eq!(stream.inner.position(), 1);
+        assert_eq!(stream.inner.into_inner(), [1, 2, 3]);
+    }
 }

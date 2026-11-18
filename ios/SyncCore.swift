@@ -2,6 +2,23 @@ import CP2PSync
 import Foundation
 
 enum SyncCore {
+    final class Cancellation: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+
+        func cancel() {
+            lock.lock()
+            defer { lock.unlock() }
+            cancelled = true
+        }
+
+        func isCancelled() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return cancelled
+        }
+    }
+
     enum CoreError: Error {
         case incompatibleABI(UInt32)
         case hashingFailed(Int32)
@@ -62,34 +79,45 @@ enum SyncCore {
         let originals: [ProtectedOriginal]
     }
 
-    static func pull(configuration: URL, state: URL, destination: URL) throws -> PullSummary {
+    private struct PullContext {
+        let cancellation: Cancellation
+        var json: Data?
+    }
+
+    static func pull(configuration: URL, state: URL, destination: URL,
+                     cancellation: Cancellation = Cancellation()) throws -> PullSummary {
         var summary = p2p_sync_pull_summary_v3()
         let config = Array(configuration.path.utf8)
         let storage = Array(state.path.utf8)
         let output = Array(destination.path.utf8)
-        var json: Data?
-        let status = withUnsafeMutablePointer(to: &json) { context in
+        var callbacks = PullContext(cancellation: cancellation, json: nil)
+        let status = withUnsafeMutablePointer(to: &callbacks) { context in
             config.withUnsafeBufferPointer { configBytes in
                 storage.withUnsafeBufferPointer { storageBytes in
                     output.withUnsafeBufferPointer { outputBytes in
-                        p2p_sync_pull_v4(
+                        p2p_sync_pull_v5(
                             configBytes.baseAddress, configBytes.count,
                             storageBytes.baseAddress, storageBytes.count,
                             outputBytes.baseAddress, outputBytes.count,
                             &summary,
                             { context, data, length in
                                 guard let context, let data else { return }
-                                context.assumingMemoryBound(to: Optional<Data>.self).pointee =
+                                context.assumingMemoryBound(to: PullContext.self).pointee.json =
                                     Data(bytes: data, count: length)
                             },
-                            UnsafeMutableRawPointer(context)
+                            UnsafeMutableRawPointer(context),
+                            { context in
+                                guard let context else { return 0 }
+                                return context.assumingMemoryBound(to: PullContext.self)
+                                    .pointee.cancellation.isCancelled() ? 1 : 0
+                            }
                         )
                     }
                 }
             }
         }
         guard status == P2P_SYNC_OK else { throw CoreError.pullFailed(status) }
-        guard let json else { throw CoreError.missingOriginalsReport }
+        guard let json = callbacks.json else { throw CoreError.missingOriginalsReport }
         return PullSummary(
             eventsAdded: summary.sync.events_added, filesPublished: summary.sync.files_published,
             filesPresent: summary.sync.files_present, filesBlocked: summary.sync.files_blocked,

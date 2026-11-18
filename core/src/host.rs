@@ -817,14 +817,19 @@ pub fn pull_detailed(
     state_root: &Path,
     destination: &Path,
 ) -> Result<PullSummaryV3, HostError> {
-    pull_with_originals(configuration, state_root, destination).map(|(summary, _)| summary)
+    pull_with_originals(configuration, state_root, destination, &|| false)
+        .map(|(summary, _)| summary)
 }
 
 pub(crate) fn pull_with_originals(
     configuration: &Path,
     state_root: &Path,
     destination: &Path,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<(PullSummaryV3, Vec<crate::archive::ProtectedOriginal>), HostError> {
+    if cancelled() {
+        return Err(HostError::Direct(DirectError::Cancelled));
+    }
     let config: Config = serde_json::from_slice(&read_bounded(configuration, MAX_CONFIG_BYTES)?)
         .map_err(|_| HostError::Configuration)?;
     let peers = config.endpoints()?;
@@ -910,6 +915,7 @@ pub(crate) fn pull_with_originals(
             },
             // Confirmations are currently exchanged with the primary only.
             reader.as_ref().filter(|_| index == 0),
+            cancelled,
         );
         match report {
             Ok(report) => {
@@ -929,6 +935,7 @@ pub(crate) fn pull_with_originals(
                     files.insert(object, result);
                 }
             }
+            Err(DirectError::Cancelled) => return Err(HostError::Direct(DirectError::Cancelled)),
             Err(error) => {
                 first_error.get_or_insert(error);
             }

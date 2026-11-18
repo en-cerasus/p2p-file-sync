@@ -16,8 +16,9 @@ struct P2PSyncApp: App {
 private final class SyncExecutionTime {
     private var taskID: UIBackgroundTaskIdentifier = .invalid
 
-    init() {
+    init(cancellation: SyncCore.Cancellation) {
         taskID = UIApplication.shared.beginBackgroundTask(withName: "Finish P2P synchronization") { [weak self] in
+            cancellation.cancel()
             self?.end()
         }
     }
@@ -163,7 +164,8 @@ struct DirectSyncView: View {
         guard let configFolder, !syncing, phase == .active, !pickingFolder else { return }
         syncing = true
         result = ""
-        let executionTime = SyncExecutionTime()
+        let cancellation = SyncCore.Cancellation()
+        let executionTime = SyncExecutionTime(cancellation: cancellation)
         defer {
             executionTime.end()
             syncing = false
@@ -185,7 +187,7 @@ struct DirectSyncView: View {
                 try manager.createDirectory(at: destination, withIntermediateDirectories: true)
                 return try SyncCore.pull(
                     configuration: configFolder.appendingPathComponent("direct.json"),
-                    state: state, destination: destination
+                    state: state, destination: destination, cancellation: cancellation
                 )
             }.value
             originals = summary.originals
@@ -199,6 +201,7 @@ struct DirectSyncView: View {
             case 1, 2: result = "接続設定または保存先を確認してください。"
             case 3: result = "設定ファイルや保存領域にアクセスできませんでした。"
             case 4: result = "TLS 証明書または秘密鍵を読み込めませんでした。"
+            case 7: result = "同期を中断しました。次回は保存済みのデータを再利用します。"
             default: result = "同期に失敗しました。接続先、証明書、同期先を確認してください。"
             }
         } catch is DecodingError {

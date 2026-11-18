@@ -11,6 +11,7 @@ extern "C" {
 #define P2P_SYNC_SHA256_SIZE 32
 #define P2P_SYNC_OK 0
 #define P2P_SYNC_INVALID_ARGUMENT 1
+#define P2P_SYNC_CANCELLED 7
 
 uint32_t p2p_sync_abi_version(void);
 
@@ -69,6 +70,17 @@ int32_t p2p_sync_pull_v4(const uint8_t *config, size_t config_len,
                          const uint8_t *destination, size_t destination_len,
                          p2p_sync_pull_summary_v3 *output,
                          p2p_sync_originals_callback originals, void *context);
+
+/* The optional cancellation callback runs on the calling thread. Return a
+   nonzero value to stop at the next I/O boundary. The output stays unchanged
+   on cancellation. Both callbacks borrow the same context. */
+typedef uint8_t (*p2p_sync_cancel_callback)(void *context);
+int32_t p2p_sync_pull_v5(const uint8_t *config, size_t config_len,
+                         const uint8_t *state, size_t state_len,
+                         const uint8_t *destination, size_t destination_len,
+                         p2p_sync_pull_summary_v3 *output,
+                         p2p_sync_originals_callback originals, void *context,
+                         p2p_sync_cancel_callback cancellation);
 
 #ifdef __cplusplus
 }

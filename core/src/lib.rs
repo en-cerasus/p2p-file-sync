@@ -136,6 +136,7 @@ pub unsafe extern "C" fn p2p_sync_pull(
             output,
             None,
             std::ptr::null_mut(),
+            None,
         )
     }
 }
@@ -164,6 +165,7 @@ pub unsafe extern "C" fn p2p_sync_pull_v2(
             output,
             None,
             std::ptr::null_mut(),
+            None,
         )
     }
 }
@@ -192,6 +194,7 @@ pub unsafe extern "C" fn p2p_sync_pull_v3(
             output,
             None,
             std::ptr::null_mut(),
+            None,
         )
     }
 }
@@ -225,6 +228,42 @@ pub unsafe extern "C" fn p2p_sync_pull_v4(
             output,
             originals,
             context,
+            None,
+        )
+    }
+}
+
+type CancellationCallback = extern "C" fn(*mut std::ffi::c_void) -> u8;
+
+/// Pull with optional cancellation. Return 7 when cancellation is observed.
+///
+/// # Safety
+/// Paths and output follow p2p_sync_pull. The callback must not unwind or
+/// retain the borrowed JSON buffer. Both callbacks use the supplied context.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_pull_v5(
+    config: *const u8,
+    config_len: usize,
+    state: *const u8,
+    state_len: usize,
+    destination: *const u8,
+    destination_len: usize,
+    output: *mut host::PullSummaryV3,
+    originals: Option<OriginalsCallback>,
+    context: *mut std::ffi::c_void,
+    cancellation: Option<CancellationCallback>,
+) -> i32 {
+    unsafe {
+        pull_to_output(
+            [
+                (config, config_len),
+                (state, state_len),
+                (destination, destination_len),
+            ],
+            output,
+            originals,
+            context,
+            cancellation,
         )
     }
 }
@@ -234,6 +273,7 @@ unsafe fn pull_to_output<T: From<host::PullSummaryV3>>(
     output: *mut T,
     originals: Option<OriginalsCallback>,
     context: *mut std::ffi::c_void,
+    cancellation: Option<CancellationCallback>,
 ) -> i32 {
     if output.is_null() {
         return INVALID_ARGUMENT;
@@ -256,18 +296,21 @@ unsafe fn pull_to_output<T: From<host::PullSummaryV3>>(
         let (Some(config), Some(state), Some(destination)) = (config, state, destination) else {
             return Err(INVALID_ARGUMENT);
         };
-        let (summary, entries) =
-            host::pull_with_originals(config, state, destination).map_err(|error| match error {
-                host::HostError::Configuration | host::HostError::InactiveGeneration => 2,
-                host::HostError::Io(_) | host::HostError::Store(_) => 3,
-                host::HostError::Tls(_) => 4,
-                host::HostError::Direct(_)
-                | host::HostError::Publish(_)
-                | host::HostError::Transition(_)
-                | host::HostError::CheckpointData(_)
-                | host::HostError::Baseline(_)
-                | host::HostError::CheckpointTooLarge => 5,
-            })?;
+        let (summary, entries) = host::pull_with_originals(config, state, destination, &|| {
+            cancellation.is_some_and(|check| check(context) != 0)
+        })
+        .map_err(|error| match error {
+            host::HostError::Configuration | host::HostError::InactiveGeneration => 2,
+            host::HostError::Io(_) | host::HostError::Store(_) => 3,
+            host::HostError::Tls(_) => 4,
+            host::HostError::Direct(direct::DirectError::Cancelled) => 7,
+            host::HostError::Direct(_)
+            | host::HostError::Publish(_)
+            | host::HostError::Transition(_)
+            | host::HostError::CheckpointData(_)
+            | host::HostError::Baseline(_)
+            | host::HostError::CheckpointTooLarge => 5,
+        })?;
         let json = originals
             .map(|_| serde_json::to_vec(&entries))
             .transpose()
