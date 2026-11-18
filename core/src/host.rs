@@ -171,15 +171,19 @@ impl Sender {
     }
 
     fn lock_state(&self) -> Result<File, HostError> {
-        let file = OpenOptions::new()
+        let file = self.open_state_lock()?;
+        file.lock().map_err(HostError::Io)?;
+        Ok(file)
+    }
+
+    fn open_state_lock(&self) -> Result<File, HostError> {
+        OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .open(&self.write_lock)
-            .map_err(HostError::Io)?;
-        file.lock().map_err(HostError::Io)?;
-        Ok(file)
+            .map_err(HostError::Io)
     }
 
     fn sweep_archives(&mut self) -> Result<(), HostError> {
@@ -401,8 +405,13 @@ impl Sender {
 
     pub fn serve(&mut self, socket: TcpStream) -> Result<(), HostError> {
         {
-            let _lock = self.lock_state()?;
-            self.sweep_archives()?;
+            let lock = self.open_state_lock()?;
+            // A concurrent outbound pull may be waiting for this peer to serve.
+            match lock.try_lock() {
+                Ok(()) => self.sweep_archives()?,
+                Err(std::fs::TryLockError::WouldBlock) => {}
+                Err(std::fs::TryLockError::Error(error)) => return Err(HostError::Io(error)),
+            }
         }
         direct::serve(
             &self.server,

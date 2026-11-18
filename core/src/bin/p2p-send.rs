@@ -2,6 +2,11 @@ use std::{env, path::Path, process::ExitCode, thread, time::Duration};
 
 use p2p_sync_core::{host::Sender, replica::EventId};
 
+enum PollSource {
+    Folder(std::path::PathBuf),
+    Peer(std::path::PathBuf),
+}
+
 #[path = "p2p_send/setup.rs"]
 mod setup;
 
@@ -51,19 +56,20 @@ fn run() -> Result<(), String> {
                 | "catch-up"
                 | "serve"
                 | "serve-tree"
+                | "serve-peer"
         )
     ) || (mode == Some("publish") && args.len() < 4)
         || (matches!(mode, Some("publish-tree" | "refresh-tree")) && args.len() != 4)
         || (matches!(mode, Some("update" | "move")) && args.len() != 5)
         || (mode == Some("delete") && args.len() != 4)
-        || (mode == Some("serve-tree") && args.len() != 5)
+        || (matches!(mode, Some("serve-tree" | "serve-peer")) && args.len() != 5)
         || (mode == Some("serve") && args.len() != 3)
         || (mode == Some("conflicts") && args.len() != 3)
         || (mode == Some("resolve") && args.len() < 5)
         || (mode == Some("catch-up") && args.len() != 4)
     {
         return Err(
-            "Usage: p2p-send setup <new-dir> <bind-ip:port> <peer-ip:port> [receivers]\n       p2p-send publish <server.json> <state-dir> <file> [file ...]\n       p2p-send publish-tree <server.json> <state-dir> <folder>\n       p2p-send refresh-tree <server.json> <state-dir> <folder>\n       p2p-send update <server.json> <state-dir> <shared/path> <source>\n       p2p-send delete <server.json> <state-dir> <shared/path>\n       p2p-send move <server.json> <state-dir> <old/path> <new/path>\n       p2p-send conflicts <server.json> <state-dir>\n       p2p-send catch-up <server.json> <state-dir> <direct.json>\n       p2p-send resolve <server.json> <state-dir> <chosen-id> <other-id> [other-id ...]\n       p2p-send serve <server.json> <state-dir>\n       p2p-send serve-tree <server.json> <state-dir> <folder> <interval-seconds>"
+            "Usage: p2p-send setup <new-dir> <bind-ip:port> <peer-ip:port> [receivers]\n       p2p-send publish <server.json> <state-dir> <file> [file ...]\n       p2p-send publish-tree <server.json> <state-dir> <folder>\n       p2p-send refresh-tree <server.json> <state-dir> <folder>\n       p2p-send update <server.json> <state-dir> <shared/path> <source>\n       p2p-send delete <server.json> <state-dir> <shared/path>\n       p2p-send move <server.json> <state-dir> <old/path> <new/path>\n       p2p-send conflicts <server.json> <state-dir>\n       p2p-send catch-up <server.json> <state-dir> <direct.json>\n       p2p-send resolve <server.json> <state-dir> <chosen-id> <other-id> [other-id ...]\n       p2p-send serve <server.json> <state-dir>\n       p2p-send serve-peer <server.json> <state-dir> <direct.json> <interval-seconds>\n       p2p-send serve-tree <server.json> <state-dir> <folder> <interval-seconds>"
                 .to_string(),
         );
     }
@@ -154,21 +160,26 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
 
-    let polling = if mode == Some("serve-tree") {
+    let polling = if matches!(mode, Some("serve-tree" | "serve-peer")) {
         let seconds = args[4]
             .to_str()
             .and_then(|value| value.parse::<u64>().ok())
             .filter(|seconds| (1..=86_400).contains(seconds))
-            .ok_or("Use a scan interval from 1 to 86400 seconds.")?;
-        let root = sender
-            .validate_source_root(Path::new(&args[3]))
-            .map_err(|error| format!("Invalid source directory: {error:?}"))?;
-        sender
-            .refresh_tree(&root)
-            .map_err(|error| format!("Initial scan failed: {error:?}"))?;
+            .ok_or("Use an interval from 1 to 86400 seconds.")?;
+        let source = if mode == Some("serve-tree") {
+            let root = sender
+                .validate_source_root(Path::new(&args[3]))
+                .map_err(|error| format!("Invalid source directory: {error:?}"))?;
+            sender
+                .refresh_tree(&root)
+                .map_err(|error| format!("Initial scan failed: {error:?}"))?;
+            PollSource::Folder(root)
+        } else {
+            PollSource::Peer(Path::new(&args[3]).to_owned())
+        };
         let worker = Sender::open(Path::new(&args[1]), Path::new(&args[2]))
             .map_err(|error| format!("Could not open scan worker: {error:?}"))?;
-        Some((worker, root, Duration::from_secs(seconds)))
+        Some((worker, source, Duration::from_secs(seconds)))
     } else {
         None
     };
@@ -176,16 +187,25 @@ fn run() -> Result<(), String> {
     let listener = sender
         .bind()
         .map_err(|error| format!("Could not bind listener: {error:?}"))?;
-    if let Some((mut worker, root, interval)) = polling {
+    if let Some((mut worker, source, interval)) = polling {
         thread::Builder::new()
-            .name("source-scan".into())
-            .spawn(move || loop {
-                thread::sleep(interval);
-                let scan = worker
-                    .validate_source_root(&root)
-                    .and_then(|root| worker.refresh_tree(&root));
-                if let Err(error) = scan {
-                    eprintln!("Source scan failed: {error:?}");
+            .name("share-refresh".into())
+            .spawn(move || {
+                if matches!(source, PollSource::Folder(_)) {
+                    thread::sleep(interval);
+                }
+                loop {
+                    let result = match &source {
+                        PollSource::Folder(root) => worker
+                            .validate_source_root(root)
+                            .and_then(|root| worker.refresh_tree(&root))
+                            .map(|_| ()),
+                        PollSource::Peer(config) => worker.catch_up(config).map(|_| ()),
+                    };
+                    if let Err(error) = result {
+                        eprintln!("Share refresh failed: {error:?}");
+                    }
+                    thread::sleep(interval);
                 }
             })
             .map_err(|error| error.to_string())?;

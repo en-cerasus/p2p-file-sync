@@ -546,6 +546,40 @@ fn running_sender_refreshes_its_source_and_serves_new_files() {
         std::fs::read(destination.join("追加.tja")).unwrap(),
         b"added while serving"
     );
+    let mirror_state = root.join("mirror-state");
+    let mut mirror = ChildGuard(
+        Command::new(binary)
+            .arg("serve-peer")
+            .arg(&sender_config)
+            .arg(&mirror_state)
+            .arg(&receiver)
+            .arg("1")
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut ready = String::new();
+    BufReader::new(mirror.0.stdout.take().unwrap())
+        .read_line(&mut ready)
+        .unwrap();
+    let mirror_address = ready.trim().strip_prefix("Serving on ").unwrap();
+    let mirror_receiver = receiver.with_file_name("mirror.json");
+    let mut mirror_settings = settings.clone();
+    mirror_settings["address"] = mirror_address.into();
+    std::fs::write(&mirror_receiver, mirror_settings.to_string()).unwrap();
+    let mirror_destination = root.join("mirror-destination");
+    std::fs::create_dir(&mirror_destination).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !mirror_destination.join("追加.tja").exists() {
+        pull_from_config(&mirror_receiver, &client_state, &mirror_destination).unwrap();
+        assert!(Instant::now() < deadline, "running mirror did not catch up");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(
+        std::fs::read(mirror_destination.join("追加.tja")).unwrap(),
+        b"added while serving"
+    );
+    drop(mirror);
     #[cfg(windows)]
     {
         drop(child);
