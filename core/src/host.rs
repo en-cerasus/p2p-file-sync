@@ -155,7 +155,13 @@ impl Sender {
         roster
             .check_writer(&signer.verifying_key().to_bytes())
             .map_err(|_| HostError::Configuration)?;
-        let server = Server::new(roots, credentials).map_err(HostError::Tls)?;
+        let server = Server::new(
+            roots,
+            credentials,
+            roster.membership().share,
+            roster.membership().generation,
+        )
+        .map_err(HostError::Tls)?;
         let root = state_root
             .join(config.share.to_ascii_lowercase())
             .join(config.generation.to_string());
@@ -401,7 +407,13 @@ impl Sender {
             &config.certificate_der,
             &config.private_key_der,
         )?;
-        let client = Client::new(roots, credentials).map_err(HostError::Tls)?;
+        let client = Client::new(
+            roots,
+            credentials,
+            self.roster.membership().share,
+            self.roster.membership().generation,
+        )
+        .map_err(HostError::Tls)?;
         let _lock = self.lock_state()?;
         let chunks =
             BlobStore::open(self.write_lock.with_file_name("chunks")).map_err(HostError::Io)?;
@@ -572,7 +584,13 @@ pub(crate) fn pull_with_originals(
         &config.certificate_der,
         &config.private_key_der,
     )?;
-    let client = Client::new(roots, credentials).map_err(HostError::Tls)?;
+    let client = Client::new(
+        roots,
+        credentials,
+        roster.membership().share,
+        roster.membership().generation,
+    )
+    .map_err(HostError::Tls)?;
 
     if !destination.is_dir() {
         return Err(HostError::Configuration);

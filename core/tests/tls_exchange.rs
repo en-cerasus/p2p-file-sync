@@ -65,7 +65,7 @@ fn exchanges_signed_events_only_after_mutual_tls_and_pin_validation() {
     let (roots, ca_der, server_credentials, client_credentials) = identities();
     let client_pin = certificate_pin(&client_credentials.chain[0]);
     let server_pin = certificate_pin(&server_credentials.chain[0]);
-    let server = Server::new(roots.clone(), server_credentials).unwrap();
+    let server = Server::new(roots.clone(), server_credentials, [3; 16], 1).unwrap();
     let folder = tempfile::tempdir().unwrap();
     let config = folder.path().join("direct.json");
     let state = folder.path().join("state");
@@ -82,7 +82,7 @@ fn exchanges_signed_events_only_after_mutual_tls_and_pin_validation() {
         client_credentials.key.secret_der(),
     )
     .unwrap();
-    let client = Client::new(roots, client_credentials).unwrap();
+    let client = Client::new(roots, client_credentials, [3; 16], 1).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
 
@@ -145,6 +145,14 @@ fn exchanges_signed_events_only_after_mutual_tls_and_pin_validation() {
                 server.accept(socket, [0; 32]),
                 Err(TlsError::UnexpectedCertificate)
             ));
+            for _ in 0..2 {
+                let (socket, _) = listener.accept().unwrap();
+                configure(&socket);
+                assert!(matches!(
+                    server.accept(socket, client_pin),
+                    Err(TlsError::Handshake(_) | TlsError::UnexpectedProtocol)
+                ));
+            }
         });
 
         let setup = serde_json::json!({
@@ -188,6 +196,23 @@ fn exchanges_signed_events_only_after_mutual_tls_and_pin_validation() {
             client.connect(socket, ServerName::try_from("localhost").unwrap(), [0; 32]),
             Err(TlsError::UnexpectedCertificate)
         ));
+        for (share, generation) in [([3; 16], 2), ([6; 16], 1)] {
+            let mut wrong = setup.clone();
+            wrong["share"] = encode_hex(&share).into();
+            wrong["generation"] = generation.into();
+            let config = folder.path().join("wrong.json");
+            std::fs::write(&config, wrong.to_string()).unwrap();
+            assert!(matches!(
+                p2p_sync_core::host::pull_from_config(
+                    &config,
+                    &folder.path().join("wrong-state"),
+                    &destination,
+                ),
+                Err(p2p_sync_core::host::HostError::Direct(
+                    direct::DirectError::Tls(_)
+                ))
+            ));
+        }
         worker.join().unwrap();
     });
 }

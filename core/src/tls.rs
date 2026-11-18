@@ -12,7 +12,12 @@ use rustls::{
     ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection, StreamOwned,
 };
 
-const ALPN: &[u8] = b"p2p-file-sync/1";
+const ALPN: &[u8] = b"p2p-file-sync/2";
+
+fn scoped_protocol(share: [u8; 16], generation: u64) -> Vec<u8> {
+    let scope = [ALPN, &share, &generation.to_be_bytes()].concat();
+    [ALPN, &crate::sha256(&scope)].concat()
+}
 
 pub type CertificatePin = [u8; 32];
 
@@ -46,12 +51,17 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(roots: RootCertStore, credentials: Credentials) -> Result<Self, TlsError> {
+    pub fn new(
+        roots: RootCertStore,
+        credentials: Credentials,
+        share: [u8; 16],
+        generation: u64,
+    ) -> Result<Self, TlsError> {
         let mut config = ClientConfig::builder_with_provider(Arc::new(default_provider()))
             .with_protocol_versions(&[&TLS13])?
             .with_root_certificates(roots)
             .with_client_auth_cert(credentials.chain, credentials.key)?;
-        config.alpn_protocols = vec![ALPN.to_vec()];
+        config.alpn_protocols = vec![scoped_protocol(share, generation)];
         config.resumption = Resumption::disabled();
         Ok(Self {
             config: Arc::new(config),
@@ -73,6 +83,7 @@ impl Client {
                 .map_err(TlsError::Handshake)?;
         }
         verify_peer(
+            &self.config.alpn_protocols[0],
             connection.alpn_protocol(),
             connection.peer_certificates(),
             &[peer],
@@ -86,7 +97,12 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(roots: RootCertStore, credentials: Credentials) -> Result<Self, TlsError> {
+    pub fn new(
+        roots: RootCertStore,
+        credentials: Credentials,
+        share: [u8; 16],
+        generation: u64,
+    ) -> Result<Self, TlsError> {
         let provider = Arc::new(default_provider());
         let verifier =
             WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider.clone())
@@ -96,7 +112,7 @@ impl Server {
             .with_protocol_versions(&[&TLS13])?
             .with_client_cert_verifier(verifier)
             .with_single_cert(credentials.chain, credentials.key)?;
-        config.alpn_protocols = vec![ALPN.to_vec()];
+        config.alpn_protocols = vec![scoped_protocol(share, generation)];
         config.send_tls13_tickets = 0;
         Ok(Self {
             config: Arc::new(config),
@@ -123,6 +139,7 @@ impl Server {
                 .map_err(TlsError::Handshake)?;
         }
         verify_peer(
+            &self.config.alpn_protocols[0],
             connection.alpn_protocol(),
             connection.peer_certificates(),
             peers,
@@ -132,11 +149,12 @@ impl Server {
 }
 
 fn verify_peer(
+    expected: &[u8],
     alpn: Option<&[u8]>,
     chain: Option<&[CertificateDer<'_>]>,
     pins: &[CertificatePin],
 ) -> Result<(), TlsError> {
-    if alpn != Some(ALPN) {
+    if alpn != Some(expected) {
         return Err(TlsError::UnexpectedProtocol);
     }
     let leaf = chain
