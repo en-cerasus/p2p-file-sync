@@ -253,7 +253,7 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
     let address = listener.local_addr().unwrap();
     std::thread::scope(|threads| {
         let serving = threads.spawn(move || {
-            for _ in 0..2 {
+            for _ in 0..3 {
                 let (socket, _) = listener.accept().unwrap();
                 sender.serve(socket).unwrap();
             }
@@ -284,6 +284,39 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
             );
             assert!(destination.join("空フォルダー").is_dir());
         }
+        let direct = setup.join("receiver-1/direct.json");
+        let mirror_state = path.join("mirror-state");
+        let imported = std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
+            .arg("catch-up")
+            .arg(&server_config)
+            .arg(&mirror_state)
+            .arg(&direct)
+            .output()
+            .unwrap();
+        assert!(
+            imported.status.success(),
+            "{}",
+            String::from_utf8_lossy(&imported.stderr)
+        );
+        serving.join().unwrap();
+        let mut mirror = Sender::open(&server_config, &mirror_state).unwrap();
+        let listener = mirror.bind().unwrap();
+        let mut settings: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&direct).unwrap()).unwrap();
+        settings["address"] = listener.local_addr().unwrap().to_string().into();
+        std::fs::write(&direct, settings.to_string()).unwrap();
+        let serving = threads.spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            mirror.serve(socket).unwrap();
+        });
+        let destination = path.join("mirror-destination");
+        std::fs::create_dir(&destination).unwrap();
+        let report = pull_from_config(&direct, &path.join("client-state"), &destination).unwrap();
+        assert_eq!(report.files_published, 1);
+        assert_eq!(
+            std::fs::read(destination.join("譜面/試験譜面.tja")).unwrap(),
+            contents
+        );
         serving.join().unwrap();
     });
 

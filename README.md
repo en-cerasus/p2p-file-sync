@@ -80,6 +80,8 @@ cargo run --locked --release -p p2p-sync-core --bin p2p-send -- serve .\trial-se
 
 現在は受信端末の証明書を事前登録する手動接続です。配信開始のGUIは未実装です。
 
+`p2p-send catch-up <server.json> <state-dir> <direct.json>` は、同じ共有・世代で登録された別の配信先から、署名付きイベントと取得可能なファイル本体を配信用キャッシュへ取り込みます。取り込んだデータは `serve` で再配信でき、作業フォルダーには書き込みません。接続には `direct.json` の主接続先を使います。
+
 配信側は、更新・削除から48時間を過ぎた旧版を、全登録ピアの確認がそろい、現行版・未解決の競合・期限内の履歴からも参照されなくなった時点で整理します。削除イベントは同期に必要なため保持します。
 
 配信側の状態に競合がある場合は、`p2p-send conflicts <server.json> <state-dir>` で候補IDを確認できます。`p2p-send resolve <server.json> <state-dir> <採用する候補ID> <ほかの候補ID> ...` では、確認した候補をすべて指定します。候補が増減した場合は再確認が必要です。削除候補を採用すると共有上の削除を維持します。

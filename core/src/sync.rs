@@ -60,17 +60,53 @@ pub fn sync_new_files(
     roster: &Roster,
     destination: Destination<'_>,
 ) -> Result<SyncReport, SyncError> {
-    let mut report = SyncReport::default();
+    let events_added = fetch_events(stream, store, roster)?;
+    let report = publish_heads(
+        stream,
+        store,
+        &destination,
+        SyncReport {
+            events_added,
+            ..Default::default()
+        },
+    )?;
+    cache_versions(
+        stream,
+        store,
+        destination.chunks,
+        destination.completed,
+        false,
+    )?;
+    Ok(report)
+}
+
+/// Update a serving peer's cache without materializing into a local folder.
+pub(crate) fn sync_serving_cache(
+    stream: &mut (impl Read + Write),
+    store: &mut Store,
+    roster: &Roster,
+    chunks: &BlobStore,
+    completed: &BlobStore,
+) -> Result<usize, SyncError> {
+    let events_added = fetch_events(stream, store, roster)?;
+    cache_versions(stream, store, chunks, completed, true)?;
+    Ok(events_added)
+}
+
+fn fetch_events(
+    stream: &mut (impl Read + Write),
+    store: &mut Store,
+    roster: &Roster,
+) -> Result<usize, SyncError> {
+    let mut added = 0;
     for _ in 0..MAX_PAGES_PER_PASS {
         let (events, more) = pull_page(stream, store, roster).map_err(SyncError::Wire)?;
-        report.events_added += events.added;
+        added += events.added;
         if !more {
             if events.deferred != 0 {
                 return Err(SyncError::IncompleteEvents);
             }
-            let report = publish_heads(stream, store, &destination, report)?;
-            fetch_conflict_contents(stream, store, &destination)?;
-            return Ok(report);
+            return Ok(added);
         }
     }
     Err(SyncError::IncompleteEvents)
@@ -169,7 +205,13 @@ fn publish_heads(
                 report.files.push((object, FileResult::Superseded));
                 continue;
             };
-            let desired = match fetch_content(stream, store, destination, event) {
+            let desired = match fetch_content(
+                stream,
+                store,
+                destination.chunks,
+                destination.completed,
+                event,
+            ) {
                 Ok(blob) => blob,
                 Err(SyncError::Wire(WireError::UnavailableContent)) => {
                     report.files.push((object, FileResult::UnavailableContent));
@@ -243,7 +285,13 @@ fn publish_heads(
         }
 
         let desired = if live {
-            match fetch_content(stream, store, destination, event) {
+            match fetch_content(
+                stream,
+                store,
+                destination.chunks,
+                destination.completed,
+                event,
+            ) {
                 Ok(blob) => Some(blob),
                 Err(SyncError::Wire(WireError::UnavailableContent)) => {
                     report.files.push((object, FileResult::UnavailableContent));
@@ -295,10 +343,12 @@ fn publish_heads(
     Ok(report)
 }
 
-fn fetch_conflict_contents(
+fn cache_versions(
     stream: &mut (impl Read + Write),
     store: &Store,
-    destination: &Destination<'_>,
+    chunks: &BlobStore,
+    completed: &BlobStore,
+    include_live: bool,
 ) -> Result<(), SyncError> {
     let replica = store.replica();
     let originals = store
@@ -306,7 +356,7 @@ fn fetch_conflict_contents(
         .map(|protection| (protection.original(), protection.content()));
     let candidates = replica
         .objects()
-        .filter(|&object| replica.has_conflict(object))
+        .filter(|&object| include_live || replica.has_conflict(object))
         .flat_map(|object| replica.heads(object))
         .filter_map(|event| match event.change.entry()?.kind {
             EntryKind::File(hash) => Some((event.id, hash)),
@@ -317,12 +367,12 @@ fn fetch_conflict_contents(
         if store.signed_event(event).is_none() || !requested.insert(hash) {
             continue;
         }
-        match destination.completed.open_candidate(hash) {
+        match completed.open_candidate(hash) {
             Ok(_) => continue,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(SyncError::Content(error)),
         }
-        match fetch_content(stream, store, destination, event) {
+        match fetch_content(stream, store, chunks, completed, event) {
             Ok(_) | Err(SyncError::Wire(WireError::UnavailableContent)) => {}
             Err(error) => return Err(error),
         }
@@ -333,7 +383,8 @@ fn fetch_conflict_contents(
 fn fetch_content(
     stream: &mut (impl Read + Write),
     store: &Store,
-    destination: &Destination<'_>,
+    chunks: &BlobStore,
+    completed: &BlobStore,
     event: EventId,
 ) -> Result<crate::blob::Blob, SyncError> {
     let Some(&EntryKind::File(hash)) = store
@@ -345,15 +396,12 @@ fn fetch_content(
     else {
         return Err(SyncError::Wire(WireError::UnavailableContent));
     };
-    match destination.completed.open_candidate(hash) {
+    match completed.open_candidate(hash) {
         Ok(file) => {
             let length = file.metadata().map_err(SyncError::Content)?.len();
             drop(file);
             let blob = crate::blob::Blob { hash, length };
-            destination
-                .completed
-                .open_verified(blob)
-                .map_err(SyncError::Content)?;
+            completed.open_verified(blob).map_err(SyncError::Content)?;
             return Ok(blob);
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -361,13 +409,13 @@ fn fetch_content(
     }
     let manifest = pull_manifest(stream, store, event).map_err(SyncError::Wire)?;
     for index in manifest
-        .missing_chunks(destination.chunks)
+        .missing_chunks(chunks)
         .map_err(SyncError::Content)?
     {
-        pull_chunk(stream, &manifest, destination.chunks, index).map_err(SyncError::Wire)?;
+        pull_chunk(stream, &manifest, chunks, index).map_err(SyncError::Wire)?;
     }
     manifest
-        .finish(destination.chunks, destination.completed)
+        .finish(chunks, completed)
         .map_err(SyncError::Content)?;
     Ok(manifest.file())
 }

@@ -362,6 +362,43 @@ impl Sender {
         TcpListener::bind(self.address).map_err(HostError::Io)
     }
 
+    /// Import signed peer changes and verified content into this sender's cache.
+    pub fn catch_up(&mut self, configuration: &Path) -> Result<usize, HostError> {
+        let config: Config =
+            serde_json::from_slice(&read_bounded(configuration, MAX_CONFIG_BYTES)?)
+                .map_err(|_| HostError::Configuration)?;
+        let scope = build_roster(&config.share, config.generation, config.members)?;
+        if scope.membership() != self.roster.membership() {
+            return Err(HostError::Configuration);
+        }
+        let peer = EndpointConfig {
+            address: config.address,
+            server_name: config.server_name,
+            server_pin: config.server_pin,
+        }
+        .validate()?;
+        let (roots, credentials) = read_credentials(
+            configuration,
+            &config.ca_der,
+            &config.certificate_der,
+            &config.private_key_der,
+        )?;
+        let client = Client::new(roots, credentials).map_err(HostError::Tls)?;
+        let _lock = self.lock_state()?;
+        let chunks =
+            BlobStore::open(self.write_lock.with_file_name("chunks")).map_err(HostError::Io)?;
+        direct::pull_serving_cache(
+            &client,
+            &peer,
+            Duration::from_secs(15),
+            &mut self.store,
+            &self.roster,
+            &chunks,
+            &self.completed,
+        )
+        .map_err(HostError::Direct)
+    }
+
     pub fn serve(&mut self, socket: TcpStream) -> Result<(), HostError> {
         {
             let _lock = self.lock_state()?;

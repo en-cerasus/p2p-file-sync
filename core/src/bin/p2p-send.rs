@@ -48,6 +48,7 @@ fn run() -> Result<(), String> {
                 | "move"
                 | "conflicts"
                 | "resolve"
+                | "catch-up"
                 | "serve"
                 | "serve-tree"
         )
@@ -59,15 +60,23 @@ fn run() -> Result<(), String> {
         || (mode == Some("serve") && args.len() != 3)
         || (mode == Some("conflicts") && args.len() != 3)
         || (mode == Some("resolve") && args.len() < 5)
+        || (mode == Some("catch-up") && args.len() != 4)
     {
         return Err(
-            "Usage: p2p-send setup <new-dir> <bind-ip:port> <peer-ip:port> [receivers]\n       p2p-send publish <server.json> <state-dir> <file> [file ...]\n       p2p-send publish-tree <server.json> <state-dir> <folder>\n       p2p-send refresh-tree <server.json> <state-dir> <folder>\n       p2p-send update <server.json> <state-dir> <shared/path> <source>\n       p2p-send delete <server.json> <state-dir> <shared/path>\n       p2p-send move <server.json> <state-dir> <old/path> <new/path>\n       p2p-send conflicts <server.json> <state-dir>\n       p2p-send resolve <server.json> <state-dir> <chosen-id> <other-id> [other-id ...]\n       p2p-send serve <server.json> <state-dir>\n       p2p-send serve-tree <server.json> <state-dir> <folder> <interval-seconds>"
+            "Usage: p2p-send setup <new-dir> <bind-ip:port> <peer-ip:port> [receivers]\n       p2p-send publish <server.json> <state-dir> <file> [file ...]\n       p2p-send publish-tree <server.json> <state-dir> <folder>\n       p2p-send refresh-tree <server.json> <state-dir> <folder>\n       p2p-send update <server.json> <state-dir> <shared/path> <source>\n       p2p-send delete <server.json> <state-dir> <shared/path>\n       p2p-send move <server.json> <state-dir> <old/path> <new/path>\n       p2p-send conflicts <server.json> <state-dir>\n       p2p-send catch-up <server.json> <state-dir> <direct.json>\n       p2p-send resolve <server.json> <state-dir> <chosen-id> <other-id> [other-id ...]\n       p2p-send serve <server.json> <state-dir>\n       p2p-send serve-tree <server.json> <state-dir> <folder> <interval-seconds>"
                 .to_string(),
         );
     }
 
     let mut sender = Sender::open(Path::new(&args[1]), Path::new(&args[2]))
         .map_err(|error| format!("Could not open sender configuration: {error:?}"))?;
+    if mode == Some("catch-up") {
+        let added = sender
+            .catch_up(Path::new(&args[3]))
+            .map_err(|error| format!("Could not synchronize serving cache: {error:?}"))?;
+        println!("Imported {added} event(s).");
+        return Ok(());
+    }
     if mode == Some("conflicts") {
         let conflicts = sender
             .conflicts()

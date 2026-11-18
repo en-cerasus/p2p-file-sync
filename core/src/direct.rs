@@ -16,7 +16,7 @@ use crate::{
     replica::{Change, EntryKind, EventId, ObjectId, Replica},
     retention::{Confirmation, PeerState},
     store::Store,
-    sync::{sync_new_files, Destination, FileResult, SyncError, SyncReport},
+    sync::{sync_new_files, sync_serving_cache, Destination, FileResult, SyncError, SyncReport},
     tls::{CertificatePin, Client, Server, TlsError},
     wire::{finish_session, send_confirmation, SessionProgress, ShareSession, WireError},
 };
@@ -59,11 +59,7 @@ pub(crate) fn pull_with_reader(
     destination: Destination<'_>,
     reader: Option<&PeerSigningKey>,
 ) -> Result<SyncReport, DirectError> {
-    let socket = TcpStream::connect_timeout(&peer.address, timeout).map_err(DirectError::Socket)?;
-    configure(&socket, timeout).map_err(DirectError::Socket)?;
-    let mut connection = client
-        .connect(socket, peer.server_name.clone(), peer.certificate)
-        .map_err(DirectError::Tls)?;
+    let mut connection = connect(client, peer, timeout)?;
 
     let root = destination.root;
     let report =
@@ -73,6 +69,34 @@ pub(crate) fn pull_with_reader(
     }
     finish_session(&mut connection).map_err(DirectError::Wire)?;
     Ok(report)
+}
+
+pub(crate) fn pull_serving_cache(
+    client: &Client,
+    peer: &PeerEndpoint,
+    timeout: Duration,
+    store: &mut Store,
+    roster: &Roster,
+    chunks: &BlobStore,
+    completed: &BlobStore,
+) -> Result<usize, DirectError> {
+    let mut connection = connect(client, peer, timeout)?;
+    let added = sync_serving_cache(&mut connection, store, roster, chunks, completed)
+        .map_err(DirectError::Sync)?;
+    finish_session(&mut connection).map_err(DirectError::Wire)?;
+    Ok(added)
+}
+
+fn connect(
+    client: &Client,
+    peer: &PeerEndpoint,
+    timeout: Duration,
+) -> Result<impl io::Read + io::Write + use<>, DirectError> {
+    let socket = TcpStream::connect_timeout(&peer.address, timeout).map_err(DirectError::Socket)?;
+    configure(&socket, timeout).map_err(DirectError::Socket)?;
+    client
+        .connect(socket, peer.server_name.clone(), peer.certificate)
+        .map_err(DirectError::Tls)
 }
 
 fn confirm_applied(
