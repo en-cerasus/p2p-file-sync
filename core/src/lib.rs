@@ -4,6 +4,7 @@ pub mod blob;
 pub mod catchup;
 pub mod chunks;
 pub mod direct;
+pub mod generation;
 pub mod host;
 mod local_target;
 pub mod materialize;

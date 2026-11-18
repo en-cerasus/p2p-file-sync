@@ -14,7 +14,7 @@ const HEADER_BYTES: usize = 16 + 8 + 32;
 const SIGNATURE_BYTES: usize = 64;
 const MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum Role {
     Reader,
     Writer,
