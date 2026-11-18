@@ -32,17 +32,19 @@ enum SyncCore {
         let filesPublished: UInt64
         let filesPresent: UInt64
         let filesBlocked: UInt64
+        let filesUpdated: UInt64
+        let filesRemoved: UInt64
     }
 
     static func pull(configuration: URL, state: URL, destination: URL) throws -> PullSummary {
-        var summary = p2p_sync_pull_summary()
+        var summary = p2p_sync_pull_summary_v2()
         let config = Array(configuration.path.utf8)
         let storage = Array(state.path.utf8)
         let output = Array(destination.path.utf8)
         let status = config.withUnsafeBufferPointer { configBytes in
             storage.withUnsafeBufferPointer { storageBytes in
                 output.withUnsafeBufferPointer { outputBytes in
-                    p2p_sync_pull(
+                    p2p_sync_pull_v2(
                         configBytes.baseAddress, configBytes.count,
                         storageBytes.baseAddress, storageBytes.count,
                         outputBytes.baseAddress, outputBytes.count,
@@ -54,7 +56,8 @@ enum SyncCore {
         guard status == P2P_SYNC_OK else { throw CoreError.pullFailed(status) }
         return PullSummary(
             eventsAdded: summary.events_added, filesPublished: summary.files_published,
-            filesPresent: summary.files_present, filesBlocked: summary.files_blocked
+            filesPresent: summary.files_present, filesBlocked: summary.files_blocked,
+            filesUpdated: summary.files_updated, filesRemoved: summary.files_removed
         )
     }
 }

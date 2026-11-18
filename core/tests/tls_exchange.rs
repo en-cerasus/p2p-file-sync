@@ -7,8 +7,8 @@ use p2p_sync_core::{
     auth::{PeerSigningKey, Role, Roster},
     blob::{Blob, BlobStore},
     direct,
-    host::PullSummary,
-    p2p_sync_pull,
+    host::{PullSummary, PullSummaryV2},
+    p2p_sync_pull, p2p_sync_pull_v2,
     replica::{Change, Entry, EntryKind, Event, EventId, VersionVector},
     sha256,
     store::Store,
@@ -339,10 +339,25 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
         #[cfg(windows)]
         {
             let existing = path.join("destination-1");
-            let report =
-                pull_from_config(&receiver, &path.join("client-state"), &existing).unwrap();
+            let state = path.join("client-state");
+            let [config_path, state_path, output_path] =
+                [&receiver, &state, &existing].map(|path| path.to_str().unwrap().as_bytes());
+            let mut report = PullSummaryV2::default();
+            let status = unsafe {
+                p2p_sync_pull_v2(
+                    config_path.as_ptr(),
+                    config_path.len(),
+                    state_path.as_ptr(),
+                    state_path.len(),
+                    output_path.as_ptr(),
+                    output_path.len(),
+                    &mut report,
+                )
+            };
+            assert_eq!(status, 0);
             assert_eq!(report.events_added, 2);
             assert_eq!(report.files_blocked, 0);
+            assert_eq!(report.files_removed, 1);
             assert!(!existing.join("譜面/試験譜面.tja").exists());
         }
         session.join().unwrap();

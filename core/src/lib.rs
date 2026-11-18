@@ -124,14 +124,52 @@ pub unsafe extern "C" fn p2p_sync_pull(
     destination_len: usize,
     output: *mut host::PullSummary,
 ) -> i32 {
+    unsafe {
+        pull_to_output(
+            [
+                (config, config_len),
+                (state, state_len),
+                (destination, destination_len),
+            ],
+            output,
+        )
+    }
+}
+
+/// Pull using the extended result layout.
+///
+/// # Safety
+/// Pointer and buffer requirements are identical to p2p_sync_pull.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_pull_v2(
+    config: *const u8,
+    config_len: usize,
+    state: *const u8,
+    state_len: usize,
+    destination: *const u8,
+    destination_len: usize,
+    output: *mut host::PullSummaryV2,
+) -> i32 {
+    unsafe {
+        pull_to_output(
+            [
+                (config, config_len),
+                (state, state_len),
+                (destination, destination_len),
+            ],
+            output,
+        )
+    }
+}
+
+unsafe fn pull_to_output<T: From<host::PullSummaryV2>>(
+    paths: [(*const u8, usize); 3],
+    output: *mut T,
+) -> i32 {
     if output.is_null() {
         return INVALID_ARGUMENT;
     }
-    let paths = [
-        (config, config_len),
-        (state, state_len),
-        (destination, destination_len),
-    ];
+
     if paths
         .iter()
         .any(|(ptr, len)| ptr.is_null() || *len == 0 || *len > 32_768)
@@ -158,7 +196,7 @@ pub unsafe extern "C" fn p2p_sync_pull(
     });
     match run {
         Ok(Ok(summary)) => {
-            unsafe { output.write(summary) };
+            unsafe { output.write(summary.into()) };
             OK
         }
         Ok(Err(code)) => code,

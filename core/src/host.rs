@@ -256,13 +256,35 @@ pub struct PullSummary {
     pub files_blocked: u64,
 }
 
+#[repr(C)]
+#[derive(Default, Debug, Eq, PartialEq)]
+pub struct PullSummaryV2 {
+    pub events_added: u64,
+    pub files_published: u64,
+    pub files_present: u64,
+    pub files_blocked: u64,
+    pub files_updated: u64,
+    pub files_removed: u64,
+}
+
+impl From<PullSummaryV2> for PullSummary {
+    fn from(report: PullSummaryV2) -> Self {
+        Self {
+            events_added: report.events_added,
+            files_published: report.files_published,
+            files_present: report.files_present,
+            files_blocked: report.files_blocked,
+        }
+    }
+}
+
 /// Synchronous host entry point. Run off the UI thread. Config and credential
 /// files must be chosen from a trusted local source.
 pub fn pull_from_config(
     configuration: &Path,
     state_root: &Path,
     destination: &Path,
-) -> Result<PullSummary, HostError> {
+) -> Result<PullSummaryV2, HostError> {
     let config: Config = serde_json::from_slice(&read_bounded(configuration, MAX_CONFIG_BYTES)?)
         .map_err(|_| HostError::Configuration)?;
     let roster = build_roster(&config.share, config.generation, config.members)?;
@@ -314,7 +336,7 @@ pub fn pull_from_config(
         },
     )
     .map_err(HostError::Direct)?;
-    let mut summary = PullSummary {
+    let mut summary = PullSummaryV2 {
         events_added: report.events_added as u64,
         ..Default::default()
     };
@@ -322,7 +344,8 @@ pub fn pull_from_config(
         match result {
             FileResult::Published => summary.files_published += 1,
             FileResult::Present => summary.files_present += 1,
-            FileResult::Removed | FileResult::Updated => {}
+            FileResult::Removed => summary.files_removed += 1,
+            FileResult::Updated => summary.files_updated += 1,
             _ => summary.files_blocked += 1,
         }
     }
