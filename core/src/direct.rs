@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     io,
     net::{SocketAddr, TcpStream},
     time::Duration,
@@ -12,6 +12,7 @@ use crate::{
     blob::BlobStore,
     local_target::{open_root, NewFileTarget},
     materialize::{FileTarget, MaterializeError},
+    replica::{Change, EventId, Replica},
     retention::{Confirmation, PeerState},
     store::Store,
     sync::{sync_new_files, Destination, FileResult, SyncError, SyncReport},
@@ -86,16 +87,22 @@ fn confirm_applied(
         return Err(DirectError::Confirmation(AuthError::InvalidConfirmation));
     }
     let clock = store.replica().clock();
-    let awaiting: BTreeSet<_> = store
-        .protections()
-        .filter(|protection| {
-            protection
-                .peer_states(clock)
-                .any(|(member, state)| member == peer && state == PeerState::AwaitingConfirmation)
-        })
-        .map(|protection| protection.successor())
-        .collect();
+    let mut awaiting = BTreeMap::<_, BTreeSet<_>>::new();
+    for protection in store.protections() {
+        if protection
+            .peer_states(clock)
+            .any(|(member, state)| member == peer && state == PeerState::AwaitingConfirmation)
+        {
+            awaiting
+                .entry(protection.object())
+                .or_default()
+                .insert(protection.successor());
+        }
+    }
     for &(object, ref result) in &report.files {
+        let Some(awaiting) = awaiting.get(&object) else {
+            continue;
+        };
         if !matches!(
             result,
             FileResult::Published | FileResult::Updated | FileResult::Present | FileResult::Removed
@@ -109,12 +116,12 @@ fn confirm_applied(
         else {
             continue;
         };
-        if !awaiting.contains(&applied.event)
-            || !store
-                .replica()
-                .heads(object)
-                .any(|head| head.id == applied.event)
-        {
+        let replica = store.replica();
+        if !replica.heads(object).any(|head| head.id == applied.event) {
+            continue;
+        }
+        let successors = applied_lineage(replica, applied.event, awaiting);
+        if successors.is_empty() {
             continue;
         }
         let Some(path) = applied.path else { continue };
@@ -128,22 +135,49 @@ fn confirm_applied(
         {
             continue;
         }
-        let confirmation = Confirmation {
-            generation: roster.membership().generation,
-            peer,
-            object,
-            successor: applied.event,
-            sent_through: 0,
-        };
-        let signed = roster
-            .sign_confirmation(reader, &confirmation)
-            .map_err(DirectError::Confirmation)?;
-        send_confirmation(connection, &signed).map_err(DirectError::Wire)?;
-        roster
-            .receive_confirmation(store, &signed)
-            .map_err(DirectError::Confirmation)?;
+        for successor in successors {
+            let confirmation = Confirmation {
+                generation: roster.membership().generation,
+                peer,
+                object,
+                successor,
+                sent_through: 0,
+            };
+            let signed = roster
+                .sign_confirmation(reader, &confirmation)
+                .map_err(DirectError::Confirmation)?;
+            send_confirmation(connection, &signed).map_err(DirectError::Wire)?;
+            roster
+                .receive_confirmation(store, &signed)
+                .map_err(DirectError::Confirmation)?;
+        }
     }
     Ok(())
+}
+
+/// Traverse the actual file-version bases. The causal clock also includes
+/// observations of unrelated files and cannot prove they were materialized.
+fn applied_lineage(replica: &Replica, head: EventId, awaiting: &BTreeSet<EventId>) -> Vec<EventId> {
+    let mut pending = vec![head];
+    let mut visited = BTreeSet::new();
+    let mut confirmed = Vec::new();
+    while let Some(id) = pending.pop() {
+        if !visited.insert(id) {
+            continue;
+        }
+        let Some(event) = replica.get(id) else {
+            continue;
+        };
+        if awaiting.contains(&id) {
+            confirmed.push(id);
+        }
+        match &event.change {
+            Change::Create(_) => {}
+            Change::Revise { base, .. } => pending.push(*base),
+            Change::Resolve { bases, .. } => pending.extend(bases.iter().copied()),
+        }
+    }
+    confirmed
 }
 
 /// Serve one accepted socket until the authenticated peer finishes.

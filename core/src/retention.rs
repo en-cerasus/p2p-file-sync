@@ -62,6 +62,10 @@ impl Protection {
         self.successor
     }
 
+    pub(crate) fn object(&self) -> ObjectId {
+        self.object
+    }
+
     pub(crate) fn confirmed_through(&self, peer: PeerId) -> Option<u64> {
         self.members.get(&peer).copied().flatten()
     }

@@ -393,15 +393,12 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
             let reader = PeerSigningKey::from_bytes(seed.as_slice().try_into().unwrap());
             let reader = reader.verifying_key().to_bytes();
             let reader_hex: String = reader.iter().map(|byte| format!("{byte:02x}")).collect();
-            let deleted_revision = originals
-                .iter()
-                .find(|entry| entry["bytes"] == b"TITLE:Revision".len() as u64)
-                .unwrap();
-            assert!(!deleted_revision["waiting"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|entry| entry["peer"] == reader_hex));
+            assert_eq!(originals.len(), 2);
+            for original in &originals {
+                let waiting = original["waiting"].as_array().unwrap();
+                assert!(!waiting.iter().any(|entry| entry["peer"] == reader_hex));
+                assert_eq!(waiting.len(), 2);
+            }
             assert!(!existing.join("譜面/試験譜面.tja").exists());
         }
         session.join().unwrap();
