@@ -199,3 +199,110 @@ fn share_session_refuses_content_without_a_signed_event_even_when_blob_exists() 
         Err(WireError::UnavailableContent)
     ));
 }
+
+#[test]
+fn an_applied_file_gets_a_durable_update_intent_with_verified_old_and_new_content() {
+    use p2p_sync_core::{
+        blob::{Blob, BlobStore},
+        materialize::FileIntent,
+        sha256,
+        sync::{sync_new_files, Destination, FileResult},
+    };
+    let scope = tempfile::tempdir().unwrap();
+    let destination = scope.path().join("dest");
+    std::fs::create_dir(&destination).unwrap();
+    let completed = BlobStore::open(scope.path().join("completed")).unwrap();
+    let chunks = BlobStore::open(scope.path().join("chunks")).unwrap();
+    let old = Blob {
+        hash: sha256(b"old"),
+        length: 3,
+    };
+    let new = Blob {
+        hash: sha256(b"new"),
+        length: 3,
+    };
+    completed.put(old, &b"old"[..]).unwrap();
+
+    let key = PeerSigningKey::from_bytes(&[24; 32]);
+    let peer = key.verifying_key().to_bytes();
+    let roster = roster_for(peer);
+    let mut store =
+        Store::open(scope.path().join("state.db"), roster.membership().clone()).unwrap();
+    let object = [16; 16];
+    let first = Event {
+        id: EventId { peer, sequence: 1 },
+        context: VersionVector::new(),
+        object,
+        change: Change::Create(Entry {
+            parent: None,
+            name: "song.tja".into(),
+            kind: EntryKind::File(old.hash),
+        }),
+    };
+    roster
+        .receive(&mut store, &roster.sign_event(&key, &first).unwrap())
+        .unwrap();
+    store
+        .stage_file(
+            &completed,
+            &FileIntent {
+                object,
+                event: first.id,
+                previous: None,
+                desired: Some(old),
+            },
+        )
+        .unwrap();
+    store
+        .recover_new_file(&completed, &destination, object)
+        .unwrap();
+
+    let revision = Event {
+        id: EventId { peer, sequence: 2 },
+        context: [(peer, 1)].into(),
+        object,
+        change: Change::Revise {
+            base: first.id,
+            entry: Some(Entry {
+                parent: None,
+                name: "song.tja".into(),
+                kind: EntryKind::File(new.hash),
+            }),
+        },
+    };
+    let signed = roster.sign_event(&key, &revision).unwrap();
+    let page = [&[0][..], &(signed.len() as u32).to_be_bytes(), &signed].concat();
+    let manifest = [&3_u64.to_be_bytes()[..], &new.hash].concat();
+    let mut response = Vec::new();
+    for (kind, bytes) in [(2, page.as_slice()), (4, manifest.as_slice()), (6, b"new")] {
+        response.extend_from_slice(b"P2P1");
+        response.push(kind);
+        response.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        response.extend_from_slice(bytes);
+    }
+    let mut stream = Scripted(Cursor::new(response));
+    let report = sync_new_files(
+        &mut stream,
+        &mut store,
+        &roster,
+        Destination {
+            root: &destination,
+            chunks: &chunks,
+            completed: &completed,
+        },
+    )
+    .unwrap();
+    assert_eq!(report.files, [(object, FileResult::PendingRecovery)]);
+    assert_eq!(
+        store.pending_files().unwrap(),
+        [FileIntent {
+            object,
+            event: revision.id,
+            previous: Some(old),
+            desired: Some(new),
+        }]
+    );
+    assert_eq!(store.applied_file(object).unwrap().unwrap().event, first.id);
+    assert_eq!(std::fs::read(destination.join("song.tja")).unwrap(), b"old");
+    assert!(completed.open_verified(new).is_ok());
+}

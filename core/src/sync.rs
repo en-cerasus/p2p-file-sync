@@ -8,7 +8,7 @@ use crate::{
     blob::BlobStore,
     materialize::{FileIntent, MaterializeError, Recovery},
     projection::{PathIssue, Projection},
-    replica::{EntryKind, ObjectId},
+    replica::{EntryKind, EventId, ObjectId},
     store::{Store, StoreError},
     wire::{pull_chunk, pull_manifest, pull_page, WireError},
 };
@@ -80,20 +80,45 @@ fn publish_heads(
     let mut files = Vec::new();
     for object in store.replica().objects() {
         let mut heads = store.replica().heads(object);
-        let Some(head) = heads.find(|head| {
+        let Some(first) = heads.next() else { continue };
+        let file_head = store.replica().heads(object).find(|head| {
             head.change
                 .entry()
                 .is_some_and(|entry| matches!(entry.kind, EntryKind::File(_)))
-        }) else {
-            continue;
-        };
-        match projection.path(object) {
-            Ok(_) => files.push((object, head.id)),
-            Err(issue) => report.files.push((object, FileResult::BlockedPath(issue))),
+        });
+
+        if file_head.is_some() || first.change.entry().is_none() {
+            let applied = store.applied_file(object).map_err(SyncError::Materialize)?;
+            match projection.path(object) {
+                Ok(path) => {
+                    let Some(head) = file_head else { continue };
+                    if applied.as_ref().and_then(|item| item.contents).is_some()
+                        && applied
+                            .as_ref()
+                            .and_then(|item| item.path.as_ref())
+                            .is_none_or(|previous| !previous.iter().map(String::as_str).eq(path))
+                    {
+                        report.files.push((object, FileResult::Superseded));
+                        continue;
+                    }
+                    files.push((
+                        object,
+                        head.id,
+                        applied.and_then(|item| item.contents),
+                        true,
+                    ));
+                }
+                Err(PathIssue::Deleted(_)) => {
+                    if let Some(previous) = applied.and_then(|item| item.contents) {
+                        files.push((object, first.id, Some(previous), false));
+                    }
+                }
+                Err(issue) => report.files.push((object, FileResult::BlockedPath(issue))),
+            }
         }
     }
 
-    for (object, event) in files {
+    for (object, event, previous, live) in files {
         match store.recover_new_file(destination.completed, destination.root, object) {
             Ok(Recovery::NonePending) => {}
             Ok(outcome) => {
@@ -107,41 +132,61 @@ fn publish_heads(
             Err(error) => return Err(SyncError::Materialize(error)),
         }
 
-        let manifest = pull_manifest(stream, store, event).map_err(SyncError::Wire)?;
-        let blob = manifest.file();
-        match destination.completed.open_verified(blob) {
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                for index in manifest
-                    .missing_chunks(destination.chunks)
-                    .map_err(SyncError::Content)?
-                {
-                    pull_chunk(stream, &manifest, destination.chunks, index)
-                        .map_err(SyncError::Wire)?;
-                }
-                manifest
-                    .finish(destination.chunks, destination.completed)
-                    .map_err(SyncError::Content)?;
-            }
-            Err(error) => return Err(SyncError::Content(error)),
-        }
+        let desired = if live {
+            Some(fetch_content(stream, store, &destination, event)?)
+        } else {
+            None
+        };
+        let is_update = previous.is_some() && previous != desired;
         store
             .stage_file(
                 destination.completed,
                 &FileIntent {
                     object,
                     event,
-                    previous: None,
-                    desired: Some(blob),
+                    previous: if is_update { previous } else { None },
+                    desired,
                 },
             )
             .map_err(SyncError::Materialize)?;
+
+        if is_update {
+            report.files.push((object, FileResult::PendingRecovery));
+            continue;
+        }
         let outcome = store
             .recover_new_file(destination.completed, destination.root, object)
             .map_err(SyncError::Materialize)?;
         report.files.push((object, file_result(outcome)));
     }
     Ok(report)
+}
+
+fn fetch_content(
+    stream: &mut (impl Read + Write),
+    store: &Store,
+    destination: &Destination<'_>,
+    event: EventId,
+) -> Result<crate::blob::Blob, SyncError> {
+    let manifest = pull_manifest(stream, store, event).map_err(SyncError::Wire)?;
+    let blob = manifest.file();
+    match destination.completed.open_verified(blob) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            for index in manifest
+                .missing_chunks(destination.chunks)
+                .map_err(SyncError::Content)?
+            {
+                pull_chunk(stream, &manifest, destination.chunks, index)
+                    .map_err(SyncError::Wire)?;
+            }
+            manifest
+                .finish(destination.chunks, destination.completed)
+                .map_err(SyncError::Content)?;
+        }
+        Err(error) => return Err(SyncError::Content(error)),
+    }
+    Ok(blob)
 }
 
 fn file_result(outcome: Recovery) -> FileResult {
