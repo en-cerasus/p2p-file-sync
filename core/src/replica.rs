@@ -1,30 +1,32 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::{Deserialize, Serialize};
+
 pub type PeerId = [u8; 32];
 pub type ObjectId = [u8; 16];
 pub type ContentHash = [u8; 32];
 pub type VersionVector = BTreeMap<PeerId, u64>;
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct EventId {
     pub peer: PeerId,
     pub sequence: u64,
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum EntryKind {
     File(ContentHash),
     Directory,
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct Entry {
     pub parent: Option<ObjectId>,
     pub name: String,
     pub kind: EntryKind,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum Change {
     Create(Entry),
     Revise {
@@ -48,7 +50,7 @@ impl Change {
 
 /// One event in a single share and membership generation. The caller must
 /// authenticate author, share, generation, and payload before handing it over.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Event {
     pub id: EventId,
     pub context: VersionVector,
@@ -111,8 +113,16 @@ impl Replica {
     /// Missing events can be retried without any change to local state.
     /// Each reported ID is the highest required sequence for that peer.
     pub fn apply(&mut self, event: Event) -> Result<Apply, Reject> {
+        let result = self.validate(&event)?;
+        if result == Apply::Added {
+            self.record(event);
+        }
+        Ok(result)
+    }
+
+    pub(crate) fn validate(&self, event: &Event) -> Result<Apply, Reject> {
         if let Some(existing) = self.events.get(&event.id) {
-            return if existing == &event {
+            return if existing == event {
                 Ok(Apply::Duplicate)
             } else {
                 Err(Reject::EventIdReuse)
@@ -159,13 +169,16 @@ impl Replica {
             return Err(Reject::InvalidBasis);
         }
 
+        Ok(Apply::Added)
+    }
+
+    pub(crate) fn record(&mut self, event: Event) {
         let heads = self.heads.entry(event.object).or_default();
         heads.retain(|id| !covers(&event.context, *id));
         heads.insert(event.id);
         self.history.entry(event.object).or_default().push(event.id);
         self.clock.insert(event.id.peer, event.id.sequence);
         self.events.insert(event.id, event);
-        Ok(Apply::Added)
     }
 
     fn heads_at(&self, object: ObjectId, context: &VersionVector) -> BTreeSet<EventId> {

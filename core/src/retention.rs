@@ -1,11 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::{Deserialize, Serialize};
+
 use crate::replica::{ContentHash, EventId, ObjectId, PeerId, VersionVector};
 
 /// An authenticated acknowledgement from one member of the current generation.
 /// The issuing peer must first durably reconcile its local edits and switch
 /// its edit base. Transport receipt alone is not an acknowledgement.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Confirmation {
     pub generation: u64,
     pub peer: PeerId,

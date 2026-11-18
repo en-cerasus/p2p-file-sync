@@ -1,5 +1,6 @@
 pub mod replica;
 pub mod retention;
+pub mod store;
 
 use sha2::{Digest, Sha256};
 
