@@ -61,6 +61,7 @@ internal sealed class SyncWindow : Window
         originals.Content = originalList;
         panel.Children.Add(originals);
         Content = panel;
+        RestorePreferences();
 
         configButton.Click += (_, _) => ChoosePath(() =>
         {
@@ -88,14 +89,30 @@ internal sealed class SyncWindow : Window
             cancelButton.IsEnabled = false;
             result.Text = "同期を中断しています…";
         };
-        autoSync.Checked += async (_, _) => await RunSync();
-        autoSync.Unchecked += (_, _) => syncTimer.Stop();
+        autoSync.Checked += async (_, _) =>
+        {
+            SavePreferences();
+            await RunSync();
+        };
+        autoSync.Unchecked += (_, _) =>
+        {
+            syncTimer.Stop();
+            SavePreferences();
+        };
         syncTimer.Tick += async (_, _) => await RunSync();
         Closed += (_, _) =>
         {
             closing = true;
             syncTimer.Stop();
             cancellation?.Cancel();
+        };
+        Loaded += async (_, _) =>
+        {
+            UpdateControls();
+            if (autoSync.IsChecked == true)
+            {
+                await RunSync();
+            }
         };
     }
 
@@ -111,11 +128,73 @@ internal sealed class SyncWindow : Window
                 result.Text = "";
                 originalList.ItemsSource = null;
                 originals.Visibility = Visibility.Collapsed;
+                SavePreferences();
             }
         }
         finally
         {
             UpdateControls();
+        }
+    }
+
+    private sealed record Preferences(string? Configuration, string? Destination, bool AutomaticSync);
+
+    private static string PreferencesPath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "P2PSync", "preferences.json");
+
+    private void RestorePreferences()
+    {
+        try
+        {
+            if (!File.Exists(PreferencesPath))
+            {
+                return;
+            }
+            var preferences = JsonSerializer.Deserialize<Preferences>(File.ReadAllText(PreferencesPath));
+            if (preferences is null)
+            {
+                return;
+            }
+            configuration = File.Exists(preferences.Configuration) ? preferences.Configuration : null;
+            destination = Directory.Exists(preferences.Destination) ? preferences.Destination : null;
+            configLabel.Text = configuration ?? "接続設定をもう一度選択してください";
+            destinationLabel.Text = destination ?? "保存先をもう一度選択してください";
+            autoSync.IsChecked = preferences.AutomaticSync;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
+        {
+            result.Text = "保存した設定を読み込めませんでした。設定ファイルと保存先を選択してください。";
+        }
+    }
+
+    private void SavePreferences()
+    {
+        string temporary = PreferencesPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(PreferencesPath)!);
+            var preferences = new Preferences(configuration, destination, autoSync.IsChecked == true);
+            using (var file = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                JsonSerializer.Serialize(file, preferences);
+                file.Flush(flushToDisk: true);
+            }
+            File.Move(temporary, PreferencesPath, overwrite: true);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            result.Text = "設定を保存できませんでした。";
+        }
+        finally
+        {
+            try
+            {
+                File.Delete(temporary);
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                // A failed cleanup must not interrupt synchronization.
+            }
         }
     }
 
