@@ -1,0 +1,12 @@
+[package]
+name = "p2p-sync-core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "p2p_sync_core"
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[dependencies]
+sha2 = "0.10.9"

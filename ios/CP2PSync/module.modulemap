@@ -1,0 +1,4 @@
+module CP2PSync {
+    header "p2p_sync_core.h"
+    export *
+}
