@@ -6,6 +6,7 @@ mod local_target;
 pub mod materialize;
 pub mod names;
 pub mod projection;
+pub mod publish;
 pub mod replica;
 pub mod retention;
 pub mod store;

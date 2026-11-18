@@ -60,7 +60,7 @@ impl Roster {
 
     pub fn sign_event(&self, key: &SigningKey, event: &Event) -> Result<Vec<u8>, AuthError> {
         let author = key.verifying_key().to_bytes();
-        self.require_writer(&author)?;
+        self.check_writer(&author)?;
         if event.id.peer != author {
             return Err(AuthError::InvalidEvent);
         }
@@ -93,7 +93,7 @@ impl Roster {
             return Err(AuthError::WrongScope);
         }
         let author: &PeerId = author.try_into().map_err(|_| AuthError::InvalidFrame)?;
-        self.require_writer(author)?;
+        self.check_writer(author)?;
         let key = VerifyingKey::from_bytes(author).map_err(|_| AuthError::BadSignature)?;
         let signature = Signature::from_slice(signature).map_err(|_| AuthError::BadSignature)?;
         key.verify_strict(message, &signature)
@@ -115,7 +115,7 @@ impl Roster {
         Ok(store.apply_signed(event, wire.to_vec())?)
     }
 
-    fn require_writer(&self, author: &PeerId) -> Result<(), AuthError> {
+    pub(crate) fn check_writer(&self, author: &PeerId) -> Result<(), AuthError> {
         match self.roles.get(author) {
             Some(Role::Writer) => Ok(()),
             _ => Err(AuthError::NotWriter),
