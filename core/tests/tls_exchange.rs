@@ -516,13 +516,26 @@ fn generated_writers_use_distinct_credentials_and_share_their_changes() {
     }]);
     peer_settings["address"] = "127.0.0.1:0".into();
     std::fs::write(&peer_config, peer_settings.to_string()).unwrap();
-    std::thread::scope(|threads| {
+    let left_file = root.join("left.tja");
+    let right_file = root.join("right.tja");
+    std::fs::write(&left_file, b"left edit").unwrap();
+    std::fs::write(&right_file, b"right edit").unwrap();
+    let right = std::thread::scope(|threads| {
         let serving = threads.spawn(move || {
+            first.serve(first_listener.accept().unwrap().0).unwrap();
+            first.revise("first.tja", Some(&left_file)).unwrap();
             first.serve(first_listener.accept().unwrap().0).unwrap();
         });
         assert_eq!(second.catch_up(&peer_config).unwrap(), 1);
+        let right = second.revise("first.tja", Some(&right_file)).unwrap();
+        assert_eq!(second.catch_up(&peer_config).unwrap(), 1);
         serving.join().unwrap();
+        right
     });
+    let conflicts = second.conflicts().unwrap();
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0].len(), 2);
+    let reviewed = conflicts[0].iter().map(|event| event.id).collect();
     let second_listener = second.bind().unwrap();
     let receiver = setup.join("receiver/direct.json");
     let mut json: serde_json::Value =
@@ -537,18 +550,23 @@ fn generated_writers_use_distinct_credentials_and_share_their_changes() {
     std::thread::scope(|threads| {
         let serving = threads.spawn(move || {
             second.serve(second_listener.accept().unwrap().0).unwrap();
+            second.resolve_conflict(right, reviewed).unwrap();
+            second.serve(second_listener.accept().unwrap().0).unwrap();
         });
-        assert_eq!(
-            pull_from_config(&receiver, &root.join("receiver"), &destination)
-                .unwrap()
-                .files_published,
-            2
-        );
+        let report = pull_from_config(&receiver, &root.join("receiver"), &destination).unwrap();
+        assert_eq!(report.files_blocked, 1);
+        assert_eq!(report.files_published, 1);
+        assert!(!destination.join("first.tja").exists());
+        let report = pull_from_config(&receiver, &root.join("receiver"), &destination).unwrap();
+        assert_eq!(report.events_added, 1);
+        assert_eq!(report.files_published, 1);
+        assert_eq!(report.files_present, 1);
+        assert_eq!(report.files_blocked, 0);
         serving.join().unwrap();
     });
     assert_eq!(
         std::fs::read(destination.join("first.tja")).unwrap(),
-        b"writer one"
+        b"right edit"
     );
     assert_eq!(
         std::fs::read(destination.join("second.tja")).unwrap(),
