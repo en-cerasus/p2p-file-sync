@@ -165,26 +165,28 @@ fn publish_heads(
         };
         #[cfg(windows)]
         if moving {
-            let Some(previous) = previous.filter(|blob| {
-                store
-                    .replica()
-                    .get(event)
-                    .and_then(|event| event.change.entry())
-                    .is_some_and(|entry| entry.kind == EntryKind::File(blob.hash))
-            }) else {
+            let Some(previous) = previous else {
                 report.files.push((object, FileResult::Superseded));
                 continue;
+            };
+            let desired = match fetch_content(stream, store, destination, event) {
+                Ok(blob) => blob,
+                Err(SyncError::Wire(WireError::UnavailableContent)) => {
+                    report.files.push((object, FileResult::UnavailableContent));
+                    continue;
+                }
+                Err(error) => return Err(error),
             };
             let intent = FileIntent {
                 object,
                 event,
                 previous: Some(previous),
-                desired: Some(previous),
+                desired: Some(desired),
             };
             match store.stage_file(destination.completed, &intent) {
                 Ok(()) => {
                     let outcome = store
-                        .recover_moved_file(destination.root, object)
+                        .recover_moved_file(destination.completed, destination.root, object)
                         .map_err(SyncError::Materialize)?;
                     report.files.push((object, update_result(outcome)));
                 }

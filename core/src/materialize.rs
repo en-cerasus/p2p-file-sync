@@ -262,10 +262,7 @@ impl Store {
             return Ok(false);
         }
         #[cfg(windows)]
-        if let Some(previous) = intent
-            .previous
-            .filter(|previous| Some(*previous) == intent.desired)
-        {
+        if let (Some(previous), Some(desired)) = (intent.previous, intent.desired) {
             if let Some(old_path) = read_applied(&tx, object)?
                 .filter(|applied| applied.contents == Some(previous))
                 .and_then(|applied| applied.path)
@@ -294,11 +291,14 @@ impl Store {
                     if !moved.unwrap_or(false)
                         || !new
                             .inspect(object)
-                            .is_ok_and(|actual| actual == Some(previous))
+                            .is_ok_and(|actual| actual == Some(desired))
                     {
                         return Ok(false);
                     }
-                    blobs.open_verified(previous)?;
+                    blobs.open_verified(desired)?;
+                    if desired != previous {
+                        new.finish_update(&intent)?;
+                    }
                     record_applied(&tx, &intent, Some(path))?;
                 }
                 remove_intent(&tx, object)?;
@@ -360,6 +360,7 @@ impl Store {
     #[cfg(windows)]
     pub fn recover_moved_file(
         &mut self,
+        blobs: &BlobStore,
         root: &Path,
         object: ObjectId,
     ) -> Result<Recovery, MaterializeError> {
@@ -367,10 +368,7 @@ impl Store {
         let Some((intent, Some(path))) = load_intent(&tx, object)? else {
             return Ok(Recovery::NonePending);
         };
-        let Some(previous) = intent
-            .previous
-            .filter(|previous| Some(*previous) == intent.desired)
-        else {
+        let (Some(previous), Some(desired)) = (intent.previous, intent.desired) else {
             return Err(MaterializeError::InvalidIntent);
         };
         let Some(applied) = read_applied(&tx, object)? else {
@@ -404,21 +402,34 @@ impl Store {
         let source = NewFileTarget::existing(&root, &source_components)?;
         let mut target = NewFileTarget::existing(&root, &target_components)?;
         let already_renamed = if same_slot {
-            target.is_only_spelling()?
+            target.is_only_spelling()? || source.name_is_vacant()?
         } else {
             source.name_is_vacant()?
         };
-        let result = if already_renamed
-            && target
+        let content_ready = if !already_renamed {
+            false
+        } else if desired == previous {
+            target
                 .inspect(object)
                 .is_ok_and(|blob| blob == Some(previous))
-        {
+        } else {
+            let status = target.update_status(&intent)?;
+            status == Some(previous) || status == Some(desired)
+        };
+        let result = if content_ready {
             Recovery::AlreadyApplied
         } else if source.move_verified(&target, previous, same_slot)? {
             Recovery::Applied
         } else {
             return Ok(Recovery::Diverged);
         };
+        if desired != previous {
+            let mut target = UpdateTarget {
+                target,
+                intent: &intent,
+            };
+            return reconcile(tx, blobs, &mut target, &intent, Some(path), true);
+        }
         record_applied(&tx, &intent, Some(path))?;
         remove_intent(&tx, object)?;
         tx.commit()?;

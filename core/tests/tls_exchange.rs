@@ -549,6 +549,12 @@ fn running_sender_refreshes_its_source_and_serves_new_files() {
                     .unwrap();
                 let (socket, _) = listener.accept().unwrap();
                 sender.serve(socket).unwrap();
+                sender.relocate("folder/Final.TJA", "edited.tja").unwrap();
+                let replacement = source.join("replacement.tja");
+                std::fs::write(&replacement, b"new contents").unwrap();
+                sender.revise("edited.tja", Some(&replacement)).unwrap();
+                let (socket, _) = listener.accept().unwrap();
+                sender.serve(socket).unwrap();
             });
             let report = pull_from_config(&receiver, &client_state, &destination).unwrap();
             assert_eq!(report.files_blocked, 1);
@@ -570,6 +576,14 @@ fn running_sender_refreshes_its_source_and_serves_new_files() {
                 .collect();
             assert!(exact_names.iter().any(|name| name == "Final.TJA"));
             assert!(!exact_names.iter().any(|name| name == "final.tja"));
+            let report = pull_from_config(&receiver, &client_state, &destination).unwrap();
+            assert_eq!(report.events_added, 2);
+            assert_eq!(report.files_updated, 1);
+            assert!(!destination.join("folder/Final.TJA").exists());
+            assert_eq!(
+                std::fs::read(destination.join("edited.tja")).unwrap(),
+                b"new contents"
+            );
             server.join().unwrap();
         });
     }
