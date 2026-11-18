@@ -433,6 +433,10 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
             &std::fs::read(setup.join("receiver-1/certificate.der")).unwrap(),
         ))
     );
+    assert_eq!(
+        second_direct["fallback_peers"][0]["connect_timeout_ms"],
+        1500
+    );
 
     let server_config = setup.join("sender/server.json");
     let server_state = path.join("server-state");

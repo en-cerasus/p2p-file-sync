@@ -97,6 +97,7 @@ pub fn create(
         address.set_port(endpoint.port() + index);
         endpoints.push(json!({
             "address": address.to_string(), "server_name": host, "server_pin": pin,
+            "connect_timeout_ms": 1500,
         }));
         let mut listen = bind;
         listen.set_port(bind.port() + index);
@@ -142,6 +143,7 @@ pub fn create(
         address.set_port(endpoint.port() + writers + index as u16 - 1);
         reader_endpoints.push(json!({
             "address": address.to_string(), "server_name": host, "server_pin": pin,
+            "connect_timeout_ms": 1500,
         }));
         clients.push((receiver, listen, pin));
     }

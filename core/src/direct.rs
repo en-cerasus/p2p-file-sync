@@ -40,6 +40,7 @@ pub struct PeerEndpoint {
     pub address: SocketAddr,
     pub server_name: ServerName<'static>,
     pub certificate: CertificatePin,
+    pub connect_timeout: Option<Duration>,
 }
 
 /// Run one bounded-I/O pull connection against a manually configured peer.
@@ -156,7 +157,8 @@ fn connect(
     peer: &PeerEndpoint,
     timeout: Duration,
 ) -> Result<impl io::Read + io::Write + use<>, DirectError> {
-    let socket = TcpStream::connect_timeout(&peer.address, timeout).map_err(DirectError::Socket)?;
+    let socket = TcpStream::connect_timeout(&peer.address, peer.connect_timeout.unwrap_or(timeout))
+        .map_err(DirectError::Socket)?;
     configure(&socket, timeout).map_err(DirectError::Socket)?;
     client
         .connect(socket, peer.server_name.clone(), peer.certificate)

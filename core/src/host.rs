@@ -62,6 +62,7 @@ struct EndpointConfig {
     address: SocketAddr,
     server_name: String,
     server_pin: String,
+    connect_timeout_ms: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -81,6 +82,7 @@ impl Config {
             self.address,
             self.server_name.as_str(),
             self.server_pin.as_str(),
+            None,
         );
         std::iter::once(primary)
             .chain(self.fallback_peers.iter().map(|peer| {
@@ -88,14 +90,24 @@ impl Config {
                     peer.address,
                     peer.server_name.as_str(),
                     peer.server_pin.as_str(),
+                    peer.connect_timeout_ms,
                 )
             }))
-            .map(|(address, server_name, certificate)| {
+            .map(|(address, server_name, certificate, connect_timeout_ms)| {
+                let connect_timeout = connect_timeout_ms
+                    .map(|value| {
+                        (100..=15_000)
+                            .contains(&value)
+                            .then(|| Duration::from_millis(value))
+                            .ok_or(HostError::Configuration)
+                    })
+                    .transpose()?;
                 Ok(PeerEndpoint {
                     address,
                     server_name: ServerName::try_from(server_name.to_owned())
                         .map_err(|_| HostError::Configuration)?,
                     certificate: hex(certificate)?,
+                    connect_timeout,
                 })
             })
             .collect()
