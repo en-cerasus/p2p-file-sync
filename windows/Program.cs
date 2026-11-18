@@ -30,6 +30,8 @@ internal sealed class SyncWindow : Window
     private CancellationTokenSource? cancellation;
     private readonly ListBox originalList = new() { MaxHeight = 240 };
     private readonly Expander originals = new() { Header = "保護原本の一覧", Visibility = Visibility.Collapsed };
+    private readonly ListBox conflictList = new() { MaxHeight = 240 };
+    private readonly Expander conflicts = new() { Header = "未解決の競合", Visibility = Visibility.Collapsed };
     private readonly CheckBox autoSync = new()
     {
         Content = "10 秒ごとに自動同期",
@@ -62,6 +64,8 @@ internal sealed class SyncWindow : Window
         panel.Children.Add(result);
         originals.Content = originalList;
         panel.Children.Add(originals);
+        conflicts.Content = conflictList;
+        panel.Children.Add(conflicts);
         Content = panel;
         RestorePreferences();
         var trayMenu = new System.Windows.Forms.ContextMenuStrip();
@@ -158,6 +162,8 @@ internal sealed class SyncWindow : Window
                 result.Text = "";
                 originalList.ItemsSource = null;
                 originals.Visibility = Visibility.Collapsed;
+                conflictList.ItemsSource = null;
+                conflicts.Visibility = Visibility.Collapsed;
                 SavePreferences();
             }
         }
@@ -282,6 +288,12 @@ internal sealed class SyncWindow : Window
             {
                 originalList.ItemsSource = pull.Originals.Select(original => original.DisplayText()).ToArray();
                 originals.Visibility = pull.Originals.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+                conflictList.ItemsSource = pull.Conflicts.Select(conflict => string.Join("\n\n", conflict.Versions.Select(version =>
+                    $"{version.Name ?? "削除"} · {version.Peer[..12]} / {version.Sequence}\n" +
+                    (version.Kind == "deleted" ? "削除候補" :
+                     version.Kind == "directory" ? "フォルダー" :
+                     version.Bytes is ulong bytes ? $"{bytes:N0} バイト" : "本体未取得")))).ToArray();
+                conflicts.Visibility = pull.Conflicts.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
             }
         }
         catch (JsonException)
@@ -342,7 +354,22 @@ internal static class SyncCore
         }
     }
 
-    internal static (int Status, PullSummary Summary, ProtectedOriginal[] Originals) Pull(
+    internal sealed record ConflictVersion(
+        [property: JsonPropertyName("peer")] string Peer,
+        [property: JsonPropertyName("sequence")] ulong Sequence,
+        [property: JsonPropertyName("name")] string? Name,
+        [property: JsonPropertyName("kind")] string Kind,
+        [property: JsonPropertyName("bytes")] ulong? Bytes);
+
+    internal sealed record FileConflict(
+        [property: JsonPropertyName("object")] string Object,
+        [property: JsonPropertyName("versions")] ConflictVersion[] Versions);
+
+    private sealed record SyncDetails(
+        [property: JsonPropertyName("originals")] ProtectedOriginal[] Originals,
+        [property: JsonPropertyName("conflicts")] FileConflict[] Conflicts);
+
+    internal static (int Status, PullSummary Summary, ProtectedOriginal[] Originals, FileConflict[] Conflicts) Pull(
         string config, string state, string destination, CancellationToken cancellation)
     {
         byte[] configBytes = Encoding.UTF8.GetBytes(config);
@@ -362,10 +389,10 @@ internal static class SyncCore
             }, IntPtr.Zero, _ => cancellation.IsCancellationRequested ? (byte)1 : (byte)0);
         if (status != 0)
         {
-            return (status, summary, []);
+            return (status, summary, [], []);
         }
-        var entries = json is null ? null : JsonSerializer.Deserialize<ProtectedOriginal[]>(json);
-        return entries is null ? (6, summary, []) : (status, summary, entries);
+        var details = json is null ? null : JsonSerializer.Deserialize<SyncDetails>(json);
+        return details is null ? (6, summary, [], []) : (status, summary, details.Originals, details.Conflicts);
     }
 
     internal static string ErrorMessage(int status) => status switch
@@ -384,7 +411,7 @@ internal static class SyncCore
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate byte CancellationCallback(IntPtr context);
 
-    [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_pull_v5", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_pull_v6", CallingConvention = CallingConvention.Cdecl)]
     private static extern int PullNative(
         byte[] config, nuint configLength, byte[] state, nuint stateLength,
         byte[] destination, nuint destinationLength, out PullSummary summary,

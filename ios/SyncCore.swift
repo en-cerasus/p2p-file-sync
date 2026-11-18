@@ -77,6 +77,26 @@ enum SyncCore {
         let protectedBytes: UInt64
         let protectedMissing: UInt64
         let originals: [ProtectedOriginal]
+        let conflicts: [FileConflict]
+    }
+
+    struct FileConflict: Decodable, Identifiable, Sendable {
+        struct Version: Decodable, Identifiable, Sendable {
+            let peer: String
+            let sequence: UInt64
+            let name: String?
+            let kind: String
+            let bytes: UInt64?
+            var id: String { "\(peer):\(sequence)" }
+        }
+        let object: String
+        let versions: [Version]
+        var id: String { object }
+    }
+
+    private struct SyncDetails: Decodable {
+        let originals: [ProtectedOriginal]
+        let conflicts: [FileConflict]
     }
 
     private struct PullContext {
@@ -95,7 +115,7 @@ enum SyncCore {
             config.withUnsafeBufferPointer { configBytes in
                 storage.withUnsafeBufferPointer { storageBytes in
                     output.withUnsafeBufferPointer { outputBytes in
-                        p2p_sync_pull_v5(
+                        p2p_sync_pull_v6(
                             configBytes.baseAddress, configBytes.count,
                             storageBytes.baseAddress, storageBytes.count,
                             outputBytes.baseAddress, outputBytes.count,
@@ -118,13 +138,15 @@ enum SyncCore {
         }
         guard status == P2P_SYNC_OK else { throw CoreError.pullFailed(status) }
         guard let json = callbacks.json else { throw CoreError.missingOriginalsReport }
+        let details = try JSONDecoder().decode(SyncDetails.self, from: json)
         return PullSummary(
             eventsAdded: summary.sync.events_added, filesPublished: summary.sync.files_published,
             filesPresent: summary.sync.files_present, filesBlocked: summary.sync.files_blocked,
             filesUpdated: summary.sync.files_updated, filesRemoved: summary.sync.files_removed,
             protectedFiles: summary.protected_files, protectedBytes: summary.protected_bytes,
             protectedMissing: summary.protected_missing,
-            originals: try JSONDecoder().decode([ProtectedOriginal].self, from: json)
+            originals: details.originals,
+            conflicts: details.conflicts
         )
     }
 }

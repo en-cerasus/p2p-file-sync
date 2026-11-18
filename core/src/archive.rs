@@ -17,6 +17,76 @@ use crate::{
 
 pub const RETENTION_SECONDS: i64 = 48 * 60 * 60;
 
+#[derive(Debug, Serialize)]
+pub struct SyncDetails {
+    pub originals: Vec<ProtectedOriginal>,
+    pub conflicts: Vec<FileConflict>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FileConflict {
+    pub object: String,
+    pub versions: Vec<ConflictVersion>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConflictVersion {
+    pub peer: String,
+    pub sequence: u64,
+    pub name: Option<String>,
+    pub kind: &'static str,
+    pub bytes: Option<u64>,
+}
+
+impl Store {
+    pub fn file_conflicts(&self, blobs: &BlobStore) -> io::Result<Vec<FileConflict>> {
+        let replica = self.replica();
+        replica
+            .objects()
+            .filter(|&object| replica.has_conflict(object))
+            .map(|object| {
+                let versions = replica
+                    .heads(object)
+                    .map(|event| {
+                        let entry = event.change.entry();
+                        let (kind, bytes) = match entry.map(|entry| &entry.kind) {
+                            Some(EntryKind::File(hash)) => {
+                                let bytes = match blobs.open_candidate(*hash) {
+                                    Ok(file) => {
+                                        let metadata = file.metadata()?;
+                                        metadata.is_file().then_some(metadata.len())
+                                    }
+                                    Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                                    Err(error) => return Err(error),
+                                };
+                                ("file", bytes)
+                            }
+                            Some(EntryKind::Directory) => ("directory", None),
+                            None => ("deleted", None),
+                        };
+                        Ok(ConflictVersion {
+                            peer: event
+                                .id
+                                .peer
+                                .iter()
+                                .map(|byte| format!("{byte:02x}"))
+                                .collect(),
+                            sequence: event.id.sequence,
+                            name: entry.map(|entry| entry.name.clone()),
+                            kind,
+                            bytes,
+                        })
+                    })
+                    .collect::<io::Result<_>>()?;
+                Ok(FileConflict {
+                    object: object.iter().map(|byte| format!("{byte:02x}")).collect(),
+                    versions,
+                })
+            })
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ArchivedFile {
     pub object: ObjectId,

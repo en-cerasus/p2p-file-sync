@@ -826,7 +826,7 @@ pub(crate) fn pull_with_originals(
     state_root: &Path,
     destination: &Path,
     cancelled: &dyn Fn() -> bool,
-) -> Result<(PullSummaryV3, Vec<crate::archive::ProtectedOriginal>), HostError> {
+) -> Result<(PullSummaryV3, crate::archive::SyncDetails), HostError> {
     if cancelled() {
         return Err(HostError::Direct(DirectError::Cancelled));
     }
@@ -960,6 +960,7 @@ pub(crate) fn pull_with_originals(
         .protected_originals(&completed)
         .map_err(HostError::Io)?;
     let protected = crate::archive::ProtectedStorage::from_originals(&originals);
+    let conflicts = store.file_conflicts(&completed).map_err(HostError::Io)?;
     Ok((
         PullSummaryV3 {
             sync: summary,
@@ -967,7 +968,10 @@ pub(crate) fn pull_with_originals(
             protected_bytes: protected.bytes,
             protected_missing: protected.missing,
         },
-        originals,
+        crate::archive::SyncDetails {
+            originals,
+            conflicts,
+        },
     ))
 }
 

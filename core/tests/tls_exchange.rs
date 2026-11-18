@@ -193,9 +193,19 @@ fn exchanges_signed_events_only_after_mutual_tls_and_pin_validation() {
         assert_eq!(status, 7);
         assert_eq!(extended.sync.events_added, 999);
         assert_eq!(std::fs::read_dir(&destination).unwrap().count(), 0);
-        stop = 0;
+        extern "C" fn copy_details(
+            context: *mut std::ffi::c_void,
+            bytes: *const u8,
+            length: usize,
+        ) {
+            unsafe {
+                (*context.cast::<Vec<u8>>())
+                    .extend_from_slice(std::slice::from_raw_parts(bytes, length));
+            }
+        }
+        let mut json = Vec::<u8>::new();
         let status = unsafe {
-            p2p_sync_core::p2p_sync_pull_v5(
+            p2p_sync_core::p2p_sync_pull_v6(
                 config.as_ptr(),
                 config.len(),
                 state.as_ptr(),
@@ -203,15 +213,18 @@ fn exchanges_signed_events_only_after_mutual_tls_and_pin_validation() {
                 destination_path.as_ptr(),
                 destination_path.len(),
                 &mut extended,
+                Some(copy_details),
+                (&mut json as *mut Vec<u8>).cast(),
                 None,
-                (&mut stop as *mut u8).cast(),
-                Some(cancelled),
             )
         };
         report.events_added = extended.sync.events_added;
         report.files_published = extended.sync.files_published;
         report.files_blocked = extended.sync.files_blocked;
         assert_eq!(status, 0);
+        let details: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        assert_eq!(details["originals"], serde_json::json!([]));
+        assert_eq!(details["conflicts"], serde_json::json!([]));
         assert_eq!(report.events_added, 2);
         assert_eq!(report.files_published, 1);
         assert_eq!(report.files_blocked, 0);

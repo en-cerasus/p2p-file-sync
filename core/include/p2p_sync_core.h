@@ -82,6 +82,17 @@ int32_t p2p_sync_pull_v5(const uint8_t *config, size_t config_len,
                          p2p_sync_originals_callback originals, void *context,
                          p2p_sync_cancel_callback cancellation);
 
+/* Same call contract as v5. The callback JSON is an object with originals
+   and conflicts arrays. A conflict has object (hex ID) and versions. Each
+   version has peer (hex ID), sequence, nullable name, kind (file, directory,
+   deleted) and nullable bytes (missing local file contents when null). */
+int32_t p2p_sync_pull_v6(const uint8_t *config, size_t config_len,
+                         const uint8_t *state, size_t state_len,
+                         const uint8_t *destination, size_t destination_len,
+                         p2p_sync_pull_summary_v3 *output,
+                         p2p_sync_originals_callback details, void *context,
+                         p2p_sync_cancel_callback cancellation);
+
 #ifdef __cplusplus
 }
 #endif

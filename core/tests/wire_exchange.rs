@@ -367,6 +367,19 @@ fn a_fresh_peer_caches_all_conflicting_versions_without_publishing_a_winner() {
         );
     });
     assert!(!destination.join("song.tja").exists());
+    let conflicts = receiver.file_conflicts(&completed).unwrap();
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0].versions.len(), 2);
+    for version in &conflicts[0].versions {
+        assert_eq!(version.name.as_deref(), Some("song.tja"));
+        assert_eq!(version.kind, "file");
+        assert!(version.bytes.is_some());
+    }
+    let empty = BlobStore::open(folder.path().join("empty")).unwrap();
+    assert!(receiver.file_conflicts(&empty).unwrap()[0]
+        .versions
+        .iter()
+        .all(|version| version.bytes.is_none()));
     let checkpoint = receiver
         .generation_checkpoint(std::time::SystemTime::now())
         .unwrap();
