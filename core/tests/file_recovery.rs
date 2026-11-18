@@ -153,6 +153,7 @@ fn resumes_after_filesystem_write_when_sql_completion_failed() {
     };
 
     assert!(store.recover_file(&f.blobs, &mut target, OBJECT).is_err());
+    assert!(store.applied_file(OBJECT).unwrap().is_none());
     assert_eq!(target.content.as_deref(), Some(&b"new"[..]));
     assert_eq!(store.pending_files().unwrap(), [f.intent.clone()]);
     drop(store);
@@ -168,6 +169,10 @@ fn resumes_after_filesystem_write_when_sql_completion_failed() {
         Recovery::AlreadyApplied
     );
     assert_eq!(target.writes, 1);
+    let applied = reopened.applied_file(OBJECT).unwrap().unwrap();
+    assert_eq!(applied.event, f.intent.event);
+    assert_eq!(applied.contents, f.intent.desired);
+    assert_eq!(applied.path.unwrap(), ["song.tja"]);
     assert!(reopened.pending_files().unwrap().is_empty());
     assert!(f.blobs.open_verified(f.intent.previous.unwrap()).is_ok());
 }
@@ -206,7 +211,7 @@ fn stages_only_verified_versions_and_migrates_the_initial_schema() {
     let db = f.folder.path().join("sync.db");
     let connection = Connection::open(db).unwrap();
     connection
-        .execute_batch("DROP TABLE file_intent; PRAGMA user_version = 1;")
+        .execute_batch("DROP TABLE applied_file; DROP TABLE file_intent; PRAGMA user_version = 1;")
         .unwrap();
     drop(connection);
     let mut store = f.open();
@@ -288,4 +293,82 @@ fn creates_nested_file_in_selected_root_and_preserves_a_collision() {
     assert_eq!(std::fs::read(&destination).unwrap(), b"new");
     assert_eq!(std::fs::read_dir(root.join("譜面")).unwrap().count(), 1);
     assert!(store.pending_files().unwrap().is_empty());
+}
+
+#[test]
+fn pending_file_does_not_follow_a_parent_renamed_after_staging() {
+    let f = Fixture::new();
+    let root = f.folder.path().join("destination");
+    std::fs::create_dir(&root).unwrap();
+    let mut store = f.open();
+    let directory = [8; 16];
+    let object = [9; 16];
+    let directory_event = EventId {
+        peer: PEER,
+        sequence: 3,
+    };
+    store
+        .apply_verified(Event {
+            id: directory_event,
+            context: [(PEER, 2)].into(),
+            object: directory,
+            change: Change::Create(Entry {
+                parent: None,
+                name: "before".into(),
+                kind: EntryKind::Directory,
+            }),
+        })
+        .unwrap();
+    let file_event = EventId {
+        peer: PEER,
+        sequence: 4,
+    };
+    let blob = metadata(b"new");
+    store
+        .apply_verified(Event {
+            id: file_event,
+            context: [(PEER, 3)].into(),
+            object,
+            change: Change::Create(Entry {
+                parent: Some(directory),
+                ..content_entry(blob.hash)
+            }),
+        })
+        .unwrap();
+    let intent = FileIntent {
+        object,
+        event: file_event,
+        previous: None,
+        desired: Some(blob),
+    };
+    store.stage_file(&f.blobs, &intent).unwrap();
+
+    store
+        .apply_verified(Event {
+            id: EventId {
+                peer: PEER,
+                sequence: 5,
+            },
+            context: [(PEER, 4)].into(),
+            object: directory,
+            change: Change::Revise {
+                base: directory_event,
+                entry: Some(Entry {
+                    parent: None,
+                    name: "after".into(),
+                    kind: EntryKind::Directory,
+                }),
+            },
+        })
+        .unwrap();
+
+    drop(store);
+    let mut store = f.open();
+    assert_eq!(
+        store.recover_new_file(&f.blobs, &root, object).unwrap(),
+        Recovery::Superseded
+    );
+    assert_eq!(std::fs::read_dir(root).unwrap().count(), 0);
+    assert_eq!(store.pending_files().unwrap(), [intent]);
+    assert!(store.applied_file(object).unwrap().is_none());
 }

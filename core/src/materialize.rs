@@ -19,6 +19,13 @@ pub struct FileIntent {
     pub desired: Option<Blob>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AppliedFile {
+    pub event: EventId,
+    pub contents: Option<Blob>,
+    pub path: Option<Vec<String>>,
+}
+
 #[derive(Debug)]
 pub enum MaterializeError {
     Store(StoreError),
@@ -84,19 +91,41 @@ impl Store {
         if !matches_head(replica, intent) {
             return Err(MaterializeError::InvalidIntent);
         }
-        if let Some(existing) = load_intent(&tx, intent.object)? {
-            return if existing == *intent {
+        let path = if intent.desired.is_some() {
+            let projection = Projection::new(replica);
+            Some(
+                projection
+                    .path(intent.object)
+                    .map_err(|_| MaterializeError::InvalidIntent)?
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            read_applied(&tx, intent.object)?.and_then(|entry| entry.path)
+        };
+        if let Some((existing, existing_path)) = load_intent(&tx, intent.object)? {
+            return if existing == *intent && existing_path == path {
                 Ok(())
             } else {
                 Err(MaterializeError::AlreadyPending)
             };
         }
         tx.execute(
-            "INSERT INTO file_intent (object, payload) VALUES (?1, ?2)",
-            params![intent.object.as_slice(), encode(intent)?],
+            "INSERT INTO file_intent (object, payload, path) VALUES (?1, ?2, ?3)",
+            params![
+                intent.object.as_slice(),
+                encode(intent)?,
+                path.as_ref().map(encode).transpose()?
+            ],
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Snapshot of the last successfully reconciled filesystem version.
+    pub fn applied_file(&self, object: ObjectId) -> Result<Option<AppliedFile>, MaterializeError> {
+        read_applied(&self.connection, object)
     }
 
     pub fn pending_files(&self) -> Result<Vec<FileIntent>, MaterializeError> {
@@ -126,12 +155,12 @@ impl Store {
         object: ObjectId,
     ) -> Result<Recovery, MaterializeError> {
         let (tx, replica) = self.begin_indexed_write()?;
-        let Some(intent) = load_intent(&tx, object)? else {
+        let Some((intent, path)) = load_intent(&tx, object)? else {
             return Ok(Recovery::NonePending);
         };
 
         let allow_write = matches_head(replica, &intent);
-        reconcile(tx, blobs, target, &intent, allow_write)
+        reconcile(tx, blobs, target, &intent, path, allow_write)
     }
 
     /// Publish a new file under a user-selected local root. This backend
@@ -143,7 +172,7 @@ impl Store {
         object: ObjectId,
     ) -> Result<Recovery, MaterializeError> {
         let (tx, replica) = self.begin_indexed_write()?;
-        let Some(intent) = load_intent(&tx, object)? else {
+        let Some((intent, path)) = load_intent(&tx, object)? else {
             return Ok(Recovery::NonePending);
         };
         if intent.previous.is_some() || intent.desired.is_none() {
@@ -153,11 +182,22 @@ impl Store {
             return Ok(Recovery::Superseded);
         }
         let projection = Projection::new(replica);
-        let path = projection
+        let current_path = projection
             .path(object)
             .map_err(|_| MaterializeError::InvalidIntent)?;
-        let mut target = NewFileTarget::open(&open_root(root)?, &path)?;
-        reconcile(tx, blobs, &mut target, &intent, true)
+        let Some(path) = path else {
+            // An intent from schema v2 has no recorded destination.
+            return Ok(Recovery::Superseded);
+        };
+        if !path
+            .iter()
+            .map(String::as_str)
+            .eq(current_path.iter().copied())
+        {
+            return Ok(Recovery::Superseded);
+        }
+        let mut target = NewFileTarget::open(&open_root(root)?, &current_path)?;
+        reconcile(tx, blobs, &mut target, &intent, Some(path), true)
     }
 }
 
@@ -166,6 +206,7 @@ fn reconcile(
     blobs: &BlobStore,
     target: &mut impl FileTarget,
     intent: &FileIntent,
+    path: Option<Vec<String>>,
     allow_write: bool,
 ) -> Result<Recovery, MaterializeError> {
     let object = intent.object;
@@ -189,6 +230,16 @@ fn reconcile(
         return Ok(Recovery::Diverged);
     };
 
+    let applied = AppliedFile {
+        event: intent.event,
+        contents: intent.desired,
+        path,
+    };
+    tx.execute(
+        "INSERT INTO applied_file (object, payload) VALUES (?1, ?2)
+         ON CONFLICT(object) DO UPDATE SET payload = excluded.payload",
+        params![object.as_slice(), encode(&applied)?],
+    )?;
     tx.execute(
         "DELETE FROM file_intent WHERE object = ?1",
         [object.as_slice()],
@@ -200,22 +251,37 @@ fn reconcile(
 fn load_intent(
     connection: &rusqlite::Connection,
     object: ObjectId,
-) -> Result<Option<FileIntent>, MaterializeError> {
+) -> Result<Option<(FileIntent, Option<Vec<String>>)>, MaterializeError> {
     let bytes = connection
         .query_row(
-            "SELECT payload FROM file_intent WHERE object = ?1",
+            "SELECT payload, path FROM file_intent WHERE object = ?1",
             [object.as_slice()],
-            |row| decode_column(row, 0),
+            |row| Ok((decode_column(row, 0)?, row.get::<_, Option<Vec<u8>>>(1)?)),
         )
         .optional()?;
-    let Some(bytes) = bytes else {
+    let Some((bytes, path)) = bytes else {
         return Ok(None);
     };
     let intent: FileIntent = decode(&bytes)?;
     if intent.object != object {
         return Err(MaterializeError::InvalidIntent);
     }
-    Ok(Some(intent))
+    let path = path.as_deref().map(decode).transpose()?;
+    Ok(Some((intent, path)))
+}
+
+fn read_applied(
+    connection: &rusqlite::Connection,
+    object: ObjectId,
+) -> Result<Option<AppliedFile>, MaterializeError> {
+    let bytes = connection
+        .query_row(
+            "SELECT payload FROM applied_file WHERE object = ?1",
+            [object.as_slice()],
+            |row| decode_column(row, 0),
+        )
+        .optional()?;
+    Ok(bytes.as_deref().map(decode).transpose()?)
 }
 
 fn matches_head(replica: &Replica, intent: &FileIntent) -> bool {

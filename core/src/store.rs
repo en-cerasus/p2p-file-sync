@@ -11,7 +11,7 @@ use crate::{
     retention::{Confirmation, Protection},
 };
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 const MAX_RECORD_BYTES: usize = 2 * 1024 * 1024 + 256;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -85,7 +85,7 @@ impl Store {
                     [encode(&membership)?],
                 )?;
             }
-            1 | SCHEMA_VERSION => {
+            1..=SCHEMA_VERSION => {
                 let stored =
                     tx.query_row("SELECT value FROM membership WHERE id = 1", [], |row| {
                         decode_column(row, 0)
@@ -97,12 +97,21 @@ impl Store {
             _ => return Err(StoreError::UnsupportedSchema(version)),
         }
 
-        if version < SCHEMA_VERSION {
+        if version < 2 {
             tx.execute_batch(
                 "CREATE TABLE file_intent (
                     object BLOB PRIMARY KEY,
                     payload BLOB NOT NULL
                 );",
+            )?;
+        }
+        if version < 3 {
+            tx.execute_batch(
+                "ALTER TABLE file_intent ADD COLUMN path BLOB;
+                 CREATE TABLE applied_file (
+                    object BLOB PRIMARY KEY,
+                    payload BLOB NOT NULL
+                 );",
             )?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
