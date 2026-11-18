@@ -211,7 +211,7 @@ fn stages_only_verified_versions_and_migrates_the_initial_schema() {
     let db = f.folder.path().join("sync.db");
     let connection = Connection::open(db).unwrap();
     connection
-        .execute_batch("DROP TABLE applied_file; DROP TABLE file_intent; PRAGMA user_version = 1;")
+        .execute_batch("DROP TABLE file_archive; DROP TABLE applied_file; DROP TABLE file_intent; PRAGMA user_version = 1;")
         .unwrap();
     drop(connection);
     let mut store = f.open();
@@ -624,4 +624,64 @@ fn superseded_update_restores_known_backup_and_then_applies_newest_version() {
         Recovery::Applied
     );
     assert_eq!(std::fs::read(path).unwrap(), b"latest");
+}
+
+#[test]
+fn archives_expire_without_dropping_a_protected_old_blob() {
+    use p2p_sync_core::archive::RETENTION_SECONDS;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    let f = Fixture::new();
+    let mut store = f.open();
+    let first = FileIntent {
+        previous: None,
+        ..f.intent.clone()
+    };
+    store.stage_file(&f.blobs, &first).unwrap();
+    let mut target = Target::default();
+    assert_eq!(
+        store.recover_file(&f.blobs, &mut target, OBJECT).unwrap(),
+        Recovery::Applied
+    );
+    assert!(store.archives(SystemTime::now()).unwrap().is_empty());
+
+    let latest = metadata(b"latest");
+    f.blobs.put(latest, &b"latest"[..]).unwrap();
+    let event = event(3, content_entry(latest.hash));
+    store.apply_verified(event.clone()).unwrap();
+    store
+        .stage_file(
+            &f.blobs,
+            &FileIntent {
+                object: OBJECT,
+                event: event.id,
+                previous: first.desired,
+                desired: Some(latest),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        store.recover_file(&f.blobs, &mut target, OBJECT).unwrap(),
+        Recovery::Applied
+    );
+    let history = store.archives(SystemTime::now()).unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].event, first.event);
+    assert_eq!(history[0].content, first.desired.unwrap());
+    let expires =
+        UNIX_EPOCH + Duration::from_secs((history[0].archived_at + RETENTION_SECONDS) as u64);
+    drop(store);
+
+    let store = f.open();
+    assert_eq!(
+        store.archives(expires - Duration::from_secs(1)).unwrap(),
+        history
+    );
+    assert!(store.archives(expires).unwrap().is_empty());
+    assert_eq!(store.prune_archives(expires).unwrap(), 1);
+    assert_eq!(store.prune_archives(expires).unwrap(), 0);
+    assert!(store
+        .protections()
+        .any(|protection| protection.original() == first.event));
+    assert!(f.blobs.open_verified(first.desired.unwrap()).is_ok());
 }

@@ -11,7 +11,7 @@ use crate::{
     retention::{Confirmation, Protection},
 };
 
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 const MAX_RECORD_BYTES: usize = 2 * 1024 * 1024 + 256;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -112,6 +112,17 @@ impl Store {
                     object BLOB PRIMARY KEY,
                     payload BLOB NOT NULL
                  );",
+            )?;
+        }
+        if version < 4 {
+            tx.execute_batch(
+                "CREATE TABLE file_archive (
+                    id INTEGER PRIMARY KEY,
+                    object BLOB NOT NULL,
+                    recorded_at INTEGER NOT NULL,
+                    payload BLOB NOT NULL
+                );
+                CREATE INDEX file_archive_expiry ON file_archive(recorded_at);",
             )?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }

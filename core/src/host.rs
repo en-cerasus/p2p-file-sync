@@ -360,6 +360,9 @@ pub fn pull_from_config(
     let mut store = Store::open(state_root.join("sync.db"), roster.membership().clone())
         .map_err(HostError::Store)?;
 
+    store
+        .prune_archives(std::time::SystemTime::now())
+        .map_err(HostError::Store)?;
     let report = direct::pull(
         &client,
         &peer,
