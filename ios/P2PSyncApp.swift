@@ -117,6 +117,8 @@ struct DirectSyncView: View {
     @State private var configFolder: URL?
     @State private var pickingFolder = false
     @State private var syncing = false
+    @State private var syncCancellation: SyncCore.Cancellation?
+    @State private var stopping = false
     @State private var result = ""
     @State private var originals: [SyncCore.ProtectedOriginal] = []
 
@@ -138,10 +140,16 @@ struct DirectSyncView: View {
             .disabled(syncing)
 
             Toggle("自動同期", isOn: $automaticSync)
-                .disabled(configFolder == nil)
+                .disabled(configFolder == nil || stopping)
 
             if syncing {
-                ProgressView("同期中…")
+                ProgressView(stopping ? "同期を中断しています…" : "同期中…")
+                Button("同期を中断", role: .cancel) {
+                    automaticSync = false
+                    stopping = true
+                    syncCancellation?.cancel()
+                }
+                .disabled(stopping)
             }
             if !result.isEmpty {
                 Text(result)
@@ -240,10 +248,14 @@ struct DirectSyncView: View {
         syncing = true
         result = ""
         let cancellation = SyncCore.Cancellation()
+        syncCancellation = cancellation
+        stopping = false
         let executionTime = SyncExecutionTime(cancellation: cancellation)
         defer {
             executionTime.end()
             syncing = false
+            syncCancellation = nil
+            stopping = false
         }
         do {
             // Leaving the foreground stops polling, while UIKit may still
