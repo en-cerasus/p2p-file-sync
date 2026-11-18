@@ -9,6 +9,7 @@ pub mod projection;
 pub mod replica;
 pub mod retention;
 pub mod store;
+pub mod wire;
 
 use sha2::{Digest, Sha256};
 
