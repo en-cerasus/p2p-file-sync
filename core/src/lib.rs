@@ -1,3 +1,5 @@
+pub mod replica;
+
 use sha2::{Digest, Sha256};
 
 const ABI_VERSION: u32 = 1;
