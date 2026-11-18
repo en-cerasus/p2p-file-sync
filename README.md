@@ -98,9 +98,9 @@ cargo run --locked --release -p p2p-sync-core --bin p2p-send -- serve .\trial-se
 
 `p2p-send catch-up <server.json> <state-dir> <direct.json>` は、同じ共有・世代で登録された別の配信先から、署名付きイベントと取得可能なファイル本体を配信用キャッシュへ取り込みます。取り込んだデータは `serve` で再配信でき、作業フォルダーには書き込みません。接続には `direct.json` の主接続先と追加の接続先を設定順に使います。
 
-同じ端末の受信状態にある署名付き確認を配信キャッシュへ取り込むには、`p2p-send import-confirmations <server.json> <server-state-dir> <direct.json> <receiver-state-dir> <destination>` を使います。`destination` は受信アプリが同期したフォルダーです。共有・世代と署名を検証し、配信キャッシュがまだ持たない変更イベントへの確認は次回の取り込みまで保留します。この操作は同一端末内の別状態を手動でつなぐ暫定手段です。
+同じ端末の受信状態にある署名付き確認を配信キャッシュへ取り込むには、`p2p-send import-confirmations <server.json> <server-state-dir> <direct.json> <receiver-state-dir> <destination>` を使います。`destination` は受信アプリが同期したフォルダーです。共有・世代と署名を検証し、配信キャッシュがまだ持たない変更イベントへの確認は次回の取り込みまで保留します。
 
-`p2p-send serve-peer <server.json> <state-dir> <direct.json> <間隔秒>` は、配信しながら取り込みを繰り返します。間隔は1〜86400秒で、接続に失敗した場合も次の周期で再試行します。
+`p2p-send serve-peer <server.json> <state-dir> <direct.json> <間隔秒> [receiver-state-dir destination]` は、配信しながら取り込みを繰り返します。末尾の2項目を指定すると、毎周期、同じ端末の受信状態から確認通知も取り込みます。接続に失敗した周期でもローカル通知の取り込みは試みます。間隔は1〜86400秒で、接続に失敗した場合も次の周期で再試行します。
 
 配信側は、更新・削除から48時間を過ぎた旧版を、全登録ピアの確認がそろい、現行版・未解決の競合・期限内の履歴からも参照されなくなった時点で整理します。削除イベントは同期に必要なため保持します。同期接続では署名付きの反映確認を双方で交換し、中継ピア経由で元の配信元にも届けます。確認対象の変更イベントがまだ届いていないピアは確認を適用せず、次回接続で再送します。アプリの受信状態とCLIの配信キャッシュは現在別の保存領域なので、同じ端末内の両状態を自動統合する処理は未実装です。
 
