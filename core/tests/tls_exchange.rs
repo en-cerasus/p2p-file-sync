@@ -263,6 +263,14 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
             let mut settings: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(&receive_config).unwrap()).unwrap();
             settings["address"] = address.to_string().into();
+            if index == 2 {
+                settings["fallback_peers"] = serde_json::json!([{
+                    "address": settings["address"],
+                    "server_name": settings["server_name"],
+                    "server_pin": settings["server_pin"],
+                }]);
+                settings["address"] = "127.0.0.1:0".into();
+            }
             std::fs::write(&receive_config, settings.to_string()).unwrap();
             let destination = path.join(format!("destination-{index}"));
             std::fs::create_dir(&destination).unwrap();

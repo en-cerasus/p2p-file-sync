@@ -39,10 +39,31 @@ struct Config {
     address: SocketAddr,
     server_name: String,
     server_pin: String,
+    #[serde(default)]
+    fallback_peers: Vec<EndpointConfig>,
     ca_der: PathBuf,
     certificate_der: PathBuf,
     private_key_der: PathBuf,
     event_key: Option<PathBuf>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EndpointConfig {
+    address: SocketAddr,
+    server_name: String,
+    server_pin: String,
+}
+
+impl EndpointConfig {
+    fn validate(self) -> Result<PeerEndpoint, HostError> {
+        Ok(PeerEndpoint {
+            address: self.address,
+            server_name: ServerName::try_from(self.server_name)
+                .map_err(|_| HostError::Configuration)?,
+            certificate: hex(&self.server_pin)?,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -411,9 +432,18 @@ pub(crate) fn pull_with_originals(
             Ok(key)
         })
         .transpose()?;
-    let server_pin = hex(&config.server_pin)?;
-    let server_name =
-        ServerName::try_from(config.server_name).map_err(|_| HostError::Configuration)?;
+    if config.fallback_peers.len() > 8 {
+        return Err(HostError::Configuration);
+    }
+    let primary = EndpointConfig {
+        address: config.address,
+        server_name: config.server_name,
+        server_pin: config.server_pin,
+    };
+    let peers = std::iter::once(primary)
+        .chain(config.fallback_peers)
+        .map(EndpointConfig::validate)
+        .collect::<Result<Vec<_>, _>>()?;
     let (roots, credentials) = read_credentials(
         configuration,
         &config.ca_der,
@@ -421,11 +451,6 @@ pub(crate) fn pull_with_originals(
         &config.private_key_der,
     )?;
     let client = Client::new(roots, credentials).map_err(HostError::Tls)?;
-    let peer = PeerEndpoint {
-        address: config.address,
-        server_name,
-        certificate: server_pin,
-    };
 
     if !destination.is_dir() {
         return Err(HostError::Configuration);
@@ -449,25 +474,54 @@ pub(crate) fn pull_with_originals(
     store
         .prune_archives(std::time::SystemTime::now())
         .map_err(HostError::Store)?;
-    let report = direct::pull_with_reader(
-        &client,
-        &peer,
-        Duration::from_secs(15),
-        &mut store,
-        &roster,
-        Destination {
-            root: &destination,
-            chunks: &chunks,
-            completed: &completed,
-        },
-        reader.as_ref(),
-    )
-    .map_err(HostError::Direct)?;
-    let mut summary = PullSummaryV2 {
-        events_added: report.events_added as u64,
-        ..Default::default()
-    };
-    for (_, result) in report.files {
+    let mut summary = PullSummaryV2::default();
+    let mut files = BTreeMap::new();
+    let mut first_error = None;
+    let mut succeeded = false;
+    for (index, peer) in peers.iter().enumerate() {
+        let report = direct::pull_with_reader(
+            &client,
+            peer,
+            Duration::from_secs(15),
+            &mut store,
+            &roster,
+            Destination {
+                root: &destination,
+                chunks: &chunks,
+                completed: &completed,
+            },
+            // Confirmations are currently exchanged with the primary only.
+            reader.as_ref().filter(|_| index == 0),
+        );
+        match report {
+            Ok(report) => {
+                succeeded = true;
+                summary.events_added = summary
+                    .events_added
+                    .saturating_add(report.events_added as u64);
+                for (object, result) in report.files {
+                    if result == FileResult::Present
+                        && matches!(
+                            files.get(&object),
+                            Some(FileResult::Published | FileResult::Updated)
+                        )
+                    {
+                        continue;
+                    }
+                    files.insert(object, result);
+                }
+            }
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    if !succeeded {
+        return Err(HostError::Direct(
+            first_error.expect("at least one configured peer"),
+        ));
+    }
+    for result in files.into_values() {
         match result {
             FileResult::Published => summary.files_published += 1,
             FileResult::Present => summary.files_present += 1,
