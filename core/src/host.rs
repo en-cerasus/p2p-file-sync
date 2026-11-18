@@ -67,6 +67,7 @@ pub struct Sender {
     signer: PeerSigningKey,
     store: Store,
     completed: BlobStore,
+    private_paths: Vec<PathBuf>,
 }
 
 impl Sender {
@@ -98,7 +99,7 @@ impl Sender {
             &configuration
                 .parent()
                 .ok_or(HostError::Configuration)?
-                .join(config.event_key),
+                .join(&config.event_key),
             32,
         )?;
         let seed: &[u8; 32] = material
@@ -117,6 +118,16 @@ impl Sender {
         let completed = BlobStore::open(root.join("files")).map_err(HostError::Io)?;
         let store = Store::open(root.join("sync.db"), roster.membership().clone())
             .map_err(HostError::Store)?;
+        let config_directory = configuration.parent().ok_or(HostError::Configuration)?;
+        let private_paths = [
+            configuration.to_owned(),
+            root,
+            config_directory.join(config.private_key_der),
+            config_directory.join(&config.event_key),
+        ]
+        .into_iter()
+        .map(|path| fs::canonicalize(path).map_err(HostError::Io))
+        .collect::<Result<_, _>>()?;
         Ok(Self {
             address: config.bind,
             client_pins,
@@ -125,6 +136,7 @@ impl Sender {
             signer,
             store,
             completed,
+            private_paths,
         })
     }
 
@@ -154,6 +166,20 @@ impl Sender {
             &self.completed,
         )
         .map_err(HostError::Publish)
+    }
+
+    /// Keep application state and private credential material outside an
+    /// automatically republished source tree.
+    pub fn validate_source_root(&self, root: &Path) -> Result<PathBuf, HostError> {
+        let root = fs::canonicalize(root).map_err(HostError::Io)?;
+        if !root.is_dir()
+            || self.private_paths.iter().any(|private| {
+                private.starts_with(&root) || (private.is_dir() && root.starts_with(private))
+            })
+        {
+            return Err(HostError::Configuration);
+        }
+        Ok(root)
     }
 
     pub fn refresh_tree(&mut self, root: &Path) -> Result<TreeSummary, HostError> {

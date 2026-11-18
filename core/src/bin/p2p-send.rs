@@ -1,4 +1,4 @@
-use std::{env, path::Path, process::ExitCode};
+use std::{env, path::Path, process::ExitCode, thread, time::Duration};
 
 use p2p_sync_core::host::Sender;
 
@@ -39,15 +39,24 @@ fn run() -> Result<(), String> {
     }
     if !matches!(
         mode,
-        Some("publish" | "publish-tree" | "refresh-tree" | "update" | "delete" | "serve")
+        Some(
+            "publish"
+                | "publish-tree"
+                | "refresh-tree"
+                | "update"
+                | "delete"
+                | "serve"
+                | "serve-tree"
+        )
     ) || (mode == Some("publish") && args.len() < 4)
         || (matches!(mode, Some("publish-tree" | "refresh-tree")) && args.len() != 4)
         || (mode == Some("update") && args.len() != 5)
         || (mode == Some("delete") && args.len() != 4)
+        || (mode == Some("serve-tree") && args.len() != 5)
         || (mode == Some("serve") && args.len() != 3)
     {
         return Err(
-            "Usage: p2p-send setup <new-dir> <bind-ip:port> <peer-ip:port> [receivers]\n       p2p-send publish <server.json> <state-dir> <file> [file ...]\n       p2p-send publish-tree <server.json> <state-dir> <folder>\n       p2p-send refresh-tree <server.json> <state-dir> <folder>\n       p2p-send update <server.json> <state-dir> <shared/path> <source>\n       p2p-send delete <server.json> <state-dir> <shared/path>\n       p2p-send serve <server.json> <state-dir>"
+            "Usage: p2p-send setup <new-dir> <bind-ip:port> <peer-ip:port> [receivers]\n       p2p-send publish <server.json> <state-dir> <file> [file ...]\n       p2p-send publish-tree <server.json> <state-dir> <folder>\n       p2p-send refresh-tree <server.json> <state-dir> <folder>\n       p2p-send update <server.json> <state-dir> <shared/path> <source>\n       p2p-send delete <server.json> <state-dir> <shared/path>\n       p2p-send serve <server.json> <state-dir>\n       p2p-send serve-tree <server.json> <state-dir> <folder> <interval-seconds>"
                 .to_string(),
         );
     }
@@ -94,9 +103,42 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
 
+    let polling = if mode == Some("serve-tree") {
+        let seconds = args[4]
+            .to_str()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|seconds| (1..=86_400).contains(seconds))
+            .ok_or("Use a scan interval from 1 to 86400 seconds.")?;
+        let root = sender
+            .validate_source_root(Path::new(&args[3]))
+            .map_err(|error| format!("Invalid source directory: {error:?}"))?;
+        sender
+            .refresh_tree(&root)
+            .map_err(|error| format!("Initial scan failed: {error:?}"))?;
+        let worker = Sender::open(Path::new(&args[1]), Path::new(&args[2]))
+            .map_err(|error| format!("Could not open scan worker: {error:?}"))?;
+        Some((worker, root, Duration::from_secs(seconds)))
+    } else {
+        None
+    };
+
     let listener = sender
         .bind()
         .map_err(|error| format!("Could not bind listener: {error:?}"))?;
+    if let Some((mut worker, root, interval)) = polling {
+        thread::Builder::new()
+            .name("source-scan".into())
+            .spawn(move || loop {
+                thread::sleep(interval);
+                let scan = worker
+                    .validate_source_root(&root)
+                    .and_then(|root| worker.refresh_tree(&root));
+                if let Err(error) = scan {
+                    eprintln!("Source scan failed: {error:?}");
+                }
+            })
+            .map_err(|error| error.to_string())?;
+    }
     println!(
         "Serving on {}",
         listener.local_addr().map_err(|error| error.to_string())?

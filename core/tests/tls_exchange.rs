@@ -363,3 +363,88 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
         session.join().unwrap();
     });
 }
+
+#[test]
+fn running_sender_refreshes_its_source_and_serves_new_files() {
+    use p2p_sync_core::host::{pull_from_config, Sender};
+    use std::{
+        io::{BufRead, BufReader},
+        process::{Child, Command, Stdio},
+        time::Instant,
+    };
+
+    struct ChildGuard(Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    let configuration = root.join("setup");
+    let state = root.join("sender-state");
+    let binary = env!("CARGO_BIN_EXE_p2p-send");
+    let output = Command::new(binary)
+        .arg("setup")
+        .arg(&configuration)
+        .args(["127.0.0.1:8765", "127.0.0.1:8765"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let sender_config = configuration.join("sender/server.json");
+    let mut settings: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&sender_config).unwrap()).unwrap();
+    settings["bind"] = "127.0.0.1:0".into();
+    std::fs::write(&sender_config, settings.to_string()).unwrap();
+
+    let source = root.join("shared");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::write(source.join("existing.tja"), b"initial").unwrap();
+    let sender = Sender::open(&sender_config, &state).unwrap();
+    assert!(sender.validate_source_root(root).is_err());
+    drop(sender);
+
+    let mut child = ChildGuard(
+        Command::new(binary)
+            .arg("serve-tree")
+            .arg(&sender_config)
+            .arg(&state)
+            .arg(&source)
+            .arg("1")
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut debug_output = BufReader::new(child.0.stdout.take().unwrap());
+    let mut ready = String::new();
+    debug_output.read_line(&mut ready).unwrap();
+    let address = ready.trim().strip_prefix("Serving on ").unwrap();
+
+    let receiver = configuration.join("receiver/direct.json");
+    let mut settings: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&receiver).unwrap()).unwrap();
+    settings["address"] = address.into();
+    std::fs::write(&receiver, settings.to_string()).unwrap();
+    let destination = root.join("destination");
+    let client_state = root.join("receiver-state");
+    std::fs::create_dir(&destination).unwrap();
+    let report = pull_from_config(&receiver, &client_state, &destination).unwrap();
+    assert_eq!(report.files_published, 1);
+
+    std::fs::write(source.join("追加.tja"), b"added while serving").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let report = pull_from_config(&receiver, &client_state, &destination).unwrap();
+        if report.files_published == 1 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "running sender did not refresh");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(
+        std::fs::read(destination.join("追加.tja")).unwrap(),
+        b"added while serving"
+    );
+}
