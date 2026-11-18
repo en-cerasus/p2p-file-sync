@@ -1,7 +1,10 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -22,6 +25,8 @@ internal sealed class SyncWindow : Window
     private readonly Button configButton = new() { Content = "設定ファイルを選択" };
     private readonly Button destinationButton = new() { Content = "保存先を選択" };
     private readonly Button syncButton = new() { Content = "同期を開始", IsEnabled = false };
+    private readonly ListBox originalList = new() { MaxHeight = 240 };
+    private readonly Expander originals = new() { Header = "保護原本の一覧", Visibility = Visibility.Collapsed };
     private readonly CheckBox autoSync = new()
     {
         Content = "10 秒ごとに自動同期",
@@ -49,6 +54,8 @@ internal sealed class SyncWindow : Window
         panel.Children.Add(syncButton);
         panel.Children.Add(autoSync);
         panel.Children.Add(result);
+        originals.Content = originalList;
+        panel.Children.Add(originals);
         Content = panel;
 
         configButton.Click += (_, _) => ChoosePath(() =>
@@ -85,7 +92,14 @@ internal sealed class SyncWindow : Window
         syncTimer.Stop();
         try
         {
+            var previous = (configuration, destination);
             choose();
+            if (previous != (configuration, destination))
+            {
+                result.Text = "";
+                originalList.ItemsSource = null;
+                originals.Visibility = Visibility.Collapsed;
+            }
         }
         finally
         {
@@ -138,6 +152,17 @@ internal sealed class SyncWindow : Window
             result.Text = pull.Status == 0
                 ? $"イベント {pull.Summary.EventsAdded} 件、新規 {pull.Summary.FilesPublished} 件、更新 {pull.Summary.FilesUpdated} 件、削除 {pull.Summary.FilesRemoved} 件、変更なし {pull.Summary.FilesPresent} 件、保留 {pull.Summary.FilesBlocked} 件\n保護原本 {pull.Summary.ProtectedFiles} 件 ({pull.Summary.ProtectedBytes:N0} バイト)、未取得 {pull.Summary.ProtectedMissing} 件"
                 : SyncCore.ErrorMessage(pull.Status);
+            if (pull.Status == 0)
+            {
+                originalList.ItemsSource = pull.Originals.Select(original =>
+                    $"{(original.Names.Length == 0 ? "名称不明" : string.Join("、", original.Names))} · " +
+                    (original.Bytes is ulong bytes ? $"{bytes:N0} バイト" : "本体未取得")).ToArray();
+                originals.Visibility = pull.Originals.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+            }
+        }
+        catch (JsonException)
+        {
+            result.Text = "保護原本の一覧を読み込めませんでした。";
         }
         catch (Exception error) when (error is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
         {
@@ -167,15 +192,33 @@ internal static class SyncCore
         public ulong ProtectedMissing;
     }
 
-    internal static (int Status, PullSummary Summary) Pull(string config, string state, string destination)
+    internal sealed record ProtectedOriginal(
+        [property: JsonPropertyName("names")] string[] Names,
+        [property: JsonPropertyName("bytes")] ulong? Bytes);
+
+    internal static (int Status, PullSummary Summary, ProtectedOriginal[] Originals) Pull(string config, string state, string destination)
     {
         byte[] configBytes = Encoding.UTF8.GetBytes(config);
         byte[] stateBytes = Encoding.UTF8.GetBytes(state);
         byte[] destinationBytes = Encoding.UTF8.GetBytes(destination);
+        byte[]? json = null;
         int status = PullNative(configBytes, (nuint)configBytes.Length,
             stateBytes, (nuint)stateBytes.Length, destinationBytes, (nuint)destinationBytes.Length,
-            out PullSummary summary);
-        return (status, summary);
+            out PullSummary summary, (_, data, length) =>
+            {
+                if (length > int.MaxValue)
+                {
+                    return;
+                }
+                json = new byte[(int)length];
+                Marshal.Copy(data, json, 0, json.Length);
+            }, IntPtr.Zero);
+        if (status != 0)
+        {
+            return (status, summary, []);
+        }
+        var entries = json is null ? null : JsonSerializer.Deserialize<ProtectedOriginal[]>(json);
+        return entries is null ? (6, summary, []) : (status, summary, entries);
     }
 
     internal static string ErrorMessage(int status) => status switch
@@ -187,8 +230,12 @@ internal static class SyncCore
         _ => "同期中に内部エラーが発生しました。",
     };
 
-    [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_pull_v3", CallingConvention = CallingConvention.Cdecl)]
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void OriginalsCallback(IntPtr context, IntPtr data, nuint length);
+
+    [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_pull_v4", CallingConvention = CallingConvention.Cdecl)]
     private static extern int PullNative(
         byte[] config, nuint configLength, byte[] state, nuint stateLength,
-        byte[] destination, nuint destinationLength, out PullSummary summary);
+        byte[] destination, nuint destinationLength, out PullSummary summary,
+        OriginalsCallback originals, IntPtr context);
 }

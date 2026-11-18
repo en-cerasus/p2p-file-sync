@@ -67,8 +67,16 @@ impl Store {
     }
 
     pub fn protected_storage(&self, blobs: &BlobStore) -> io::Result<ProtectedStorage> {
-        let mut result = ProtectedStorage::default();
-        for original in self.protected_originals(blobs)? {
+        Ok(ProtectedStorage::from_originals(
+            &self.protected_originals(blobs)?,
+        ))
+    }
+}
+
+impl ProtectedStorage {
+    pub(crate) fn from_originals(originals: &[ProtectedOriginal]) -> Self {
+        let mut result = Self::default();
+        for original in originals {
             if let Some(bytes) = original.bytes {
                 result.files += 1;
                 result.bytes = result.bytes.saturating_add(bytes);
@@ -76,9 +84,11 @@ impl Store {
                 result.missing += 1;
             }
         }
-        Ok(result)
+        result
     }
+}
 
+impl Store {
     /// Return only entries within the normal history window. Blob ownership
     /// is separate: a file may still be needed for conflict recovery.
     pub fn archives(&self, now: SystemTime) -> Result<Vec<ArchivedFile>, StoreError> {

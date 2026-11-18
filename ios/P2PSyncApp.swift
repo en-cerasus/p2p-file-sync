@@ -19,6 +19,7 @@ struct DirectSyncView: View {
     @State private var syncing = false
     @State private var automaticSync = false
     @State private var result = ""
+    @State private var originals: [SyncCore.ProtectedOriginal] = []
 
     private var shouldPoll: Bool {
         automaticSync && configFolder != nil && phase == .active && !pickingFolder
@@ -46,6 +47,16 @@ struct DirectSyncView: View {
             if !result.isEmpty {
                 Text(result)
             }
+            if !originals.isEmpty {
+                DisclosureGroup("保護原本の一覧") {
+                    ForEach(originals) { original in
+                        LabeledContent(
+                            original.names.isEmpty ? "名称不明" : original.names.joined(separator: "、"),
+                            value: original.bytes.map { "\($0.formatted()) バイト" } ?? "本体未取得"
+                        )
+                    }
+                }
+            }
         }
         .navigationTitle("直接同期")
         .task(id: shouldPoll) {
@@ -61,7 +72,10 @@ struct DirectSyncView: View {
         }
         .fileImporter(isPresented: $pickingFolder, allowedContentTypes: [.folder]) { selection in
             switch selection {
-            case .success(let url): configFolder = url
+            case .success(let url):
+                configFolder = url
+                originals = []
+                result = ""
             case .failure: result = "接続設定フォルダーを開けませんでした。"
             }
         }
@@ -92,6 +106,7 @@ struct DirectSyncView: View {
                     state: state, destination: destination
                 )
             }.value
+            originals = summary.originals
             result = "イベント \(summary.eventsAdded) 件、新規 \(summary.filesPublished) 件、更新 \(summary.filesUpdated) 件、削除 \(summary.filesRemoved) 件、変更なし \(summary.filesPresent) 件、保留 \(summary.filesBlocked) 件\n保護原本 \(summary.protectedFiles) 件 (\(summary.protectedBytes.formatted()) バイト)、未取得 \(summary.protectedMissing) 件"
         } catch SyncCore.CoreError.pullFailed(let status) {
             switch status {
@@ -100,6 +115,10 @@ struct DirectSyncView: View {
             case 4: result = "TLS 証明書または秘密鍵を読み込めませんでした。"
             default: result = "同期に失敗しました。接続先、証明書、同期先を確認してください。"
             }
+        } catch is DecodingError {
+            result = "保護原本の一覧を読み込めませんでした。"
+        } catch SyncCore.CoreError.missingOriginalsReport {
+            result = "保護原本の一覧を読み込めませんでした。"
         } catch {
             result = "同期先を開けませんでした。"
         }

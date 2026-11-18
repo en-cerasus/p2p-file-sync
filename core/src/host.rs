@@ -351,6 +351,14 @@ pub fn pull_detailed(
     state_root: &Path,
     destination: &Path,
 ) -> Result<PullSummaryV3, HostError> {
+    pull_with_originals(configuration, state_root, destination).map(|(summary, _)| summary)
+}
+
+pub(crate) fn pull_with_originals(
+    configuration: &Path,
+    state_root: &Path,
+    destination: &Path,
+) -> Result<(PullSummaryV3, Vec<crate::archive::ProtectedOriginal>), HostError> {
     let config: Config = serde_json::from_slice(&read_bounded(configuration, MAX_CONFIG_BYTES)?)
         .map_err(|_| HostError::Configuration)?;
     let roster = build_roster(&config.share, config.generation, config.members)?;
@@ -419,13 +427,19 @@ pub fn pull_detailed(
         }
     }
     store.refresh().map_err(HostError::Store)?;
-    let protected = store.protected_storage(&completed).map_err(HostError::Io)?;
-    Ok(PullSummaryV3 {
-        sync: summary,
-        protected_files: protected.files,
-        protected_bytes: protected.bytes,
-        protected_missing: protected.missing,
-    })
+    let originals = store
+        .protected_originals(&completed)
+        .map_err(HostError::Io)?;
+    let protected = crate::archive::ProtectedStorage::from_originals(&originals);
+    Ok((
+        PullSummaryV3 {
+            sync: summary,
+            protected_files: protected.files,
+            protected_bytes: protected.bytes,
+            protected_missing: protected.missing,
+        },
+        originals,
+    ))
 }
 
 fn build_roster(

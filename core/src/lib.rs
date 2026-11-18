@@ -133,6 +133,8 @@ pub unsafe extern "C" fn p2p_sync_pull(
                 (destination, destination_len),
             ],
             output,
+            None,
+            std::ptr::null_mut(),
         )
     }
 }
@@ -159,6 +161,8 @@ pub unsafe extern "C" fn p2p_sync_pull_v2(
                 (destination, destination_len),
             ],
             output,
+            None,
+            std::ptr::null_mut(),
         )
     }
 }
@@ -185,6 +189,41 @@ pub unsafe extern "C" fn p2p_sync_pull_v3(
                 (destination, destination_len),
             ],
             output,
+            None,
+            std::ptr::null_mut(),
+        )
+    }
+}
+
+type OriginalsCallback = extern "C" fn(*mut std::ffi::c_void, *const u8, usize);
+
+/// Pull and optionally deliver the protected-original list as UTF-8 JSON.
+///
+/// # Safety
+/// Paths and output follow p2p_sync_pull. The callback must not unwind or
+/// retain the borrowed JSON buffer. Its context is passed through unchanged.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_pull_v4(
+    config: *const u8,
+    config_len: usize,
+    state: *const u8,
+    state_len: usize,
+    destination: *const u8,
+    destination_len: usize,
+    output: *mut host::PullSummaryV3,
+    originals: Option<OriginalsCallback>,
+    context: *mut std::ffi::c_void,
+) -> i32 {
+    unsafe {
+        pull_to_output(
+            [
+                (config, config_len),
+                (state, state_len),
+                (destination, destination_len),
+            ],
+            output,
+            originals,
+            context,
         )
     }
 }
@@ -192,6 +231,8 @@ pub unsafe extern "C" fn p2p_sync_pull_v3(
 unsafe fn pull_to_output<T: From<host::PullSummaryV3>>(
     paths: [(*const u8, usize); 3],
     output: *mut T,
+    originals: Option<OriginalsCallback>,
+    context: *mut std::ffi::c_void,
 ) -> i32 {
     if output.is_null() {
         return INVALID_ARGUMENT;
@@ -214,15 +255,24 @@ unsafe fn pull_to_output<T: From<host::PullSummaryV3>>(
         let (Some(config), Some(state), Some(destination)) = (config, state, destination) else {
             return Err(INVALID_ARGUMENT);
         };
-        host::pull_detailed(config, state, destination).map_err(|error| match error {
-            host::HostError::Configuration => 2,
-            host::HostError::Io(_) | host::HostError::Store(_) => 3,
-            host::HostError::Tls(_) => 4,
-            host::HostError::Direct(_) | host::HostError::Publish(_) => 5,
-        })
+        let (summary, entries) =
+            host::pull_with_originals(config, state, destination).map_err(|error| match error {
+                host::HostError::Configuration => 2,
+                host::HostError::Io(_) | host::HostError::Store(_) => 3,
+                host::HostError::Tls(_) => 4,
+                host::HostError::Direct(_) | host::HostError::Publish(_) => 5,
+            })?;
+        let json = originals
+            .map(|_| serde_json::to_vec(&entries))
+            .transpose()
+            .map_err(|_| 6)?;
+        Ok((summary, json))
     });
     match run {
-        Ok(Ok(summary)) => {
+        Ok(Ok((summary, json))) => {
+            if let (Some(callback), Some(json)) = (originals, json) {
+                callback(context, json.as_ptr(), json.len());
+            }
             unsafe { output.write(summary.into()) };
             OK
         }

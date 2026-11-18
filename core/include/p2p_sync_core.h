@@ -58,6 +58,16 @@ int32_t p2p_sync_pull_v3(const uint8_t *config, size_t config_len,
                          const uint8_t *destination, size_t destination_len,
                          p2p_sync_pull_summary_v3 *output);
 
+/* On success the optional callback receives one UTF-8 JSON array on
+   the calling thread. Copy the bytes before returning from the callback.
+   Entries have hash (32 bytes), names (strings) and bytes (integer or null). */
+typedef void (*p2p_sync_originals_callback)(void *context, const uint8_t *json, size_t len);
+int32_t p2p_sync_pull_v4(const uint8_t *config, size_t config_len,
+                         const uint8_t *state, size_t state_len,
+                         const uint8_t *destination, size_t destination_len,
+                         p2p_sync_pull_summary_v3 *output,
+                         p2p_sync_originals_callback originals, void *context);
+
 #ifdef __cplusplus
 }
 #endif

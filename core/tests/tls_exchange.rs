@@ -7,8 +7,8 @@ use p2p_sync_core::{
     auth::{PeerSigningKey, Role, Roster},
     blob::{Blob, BlobStore},
     direct,
-    host::{PullSummary, PullSummaryV2},
-    p2p_sync_pull, p2p_sync_pull_v2,
+    host::{PullSummary, PullSummaryV3},
+    p2p_sync_pull, p2p_sync_pull_v4,
     replica::{Change, Entry, EntryKind, Event, EventId, VersionVector},
     sha256,
     store::Store,
@@ -342,9 +342,20 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
             let state = path.join("client-state");
             let [config_path, state_path, output_path] =
                 [&receiver, &state, &existing].map(|path| path.to_str().unwrap().as_bytes());
-            let mut report = PullSummaryV2::default();
+            extern "C" fn copy_originals(
+                context: *mut std::ffi::c_void,
+                data: *const u8,
+                length: usize,
+            ) {
+                unsafe {
+                    (*context.cast::<Vec<u8>>())
+                        .extend_from_slice(std::slice::from_raw_parts(data, length));
+                }
+            }
+            let mut json = Vec::<u8>::new();
+            let mut report = PullSummaryV3::default();
             let status = unsafe {
-                p2p_sync_pull_v2(
+                p2p_sync_pull_v4(
                     config_path.as_ptr(),
                     config_path.len(),
                     state_path.as_ptr(),
@@ -352,12 +363,22 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
                     output_path.as_ptr(),
                     output_path.len(),
                     &mut report,
+                    Some(copy_originals),
+                    (&mut json as *mut Vec<u8>).cast(),
                 )
             };
             assert_eq!(status, 0);
-            assert_eq!(report.events_added, 2);
-            assert_eq!(report.files_blocked, 0);
-            assert_eq!(report.files_removed, 1);
+            assert_eq!(report.sync.events_added, 2);
+            assert_eq!(report.sync.files_blocked, 0);
+            assert_eq!(report.sync.files_removed, 1);
+            let originals: Vec<serde_json::Value> = serde_json::from_slice(&json).unwrap();
+            assert_eq!(
+                originals.len() as u64,
+                report.protected_files + report.protected_missing
+            );
+            assert!(originals.iter().any(|entry| {
+                entry["names"][0] == "試験譜面.tja" && entry["bytes"] == contents.len() as u64
+            }));
             assert!(!existing.join("譜面/試験譜面.tja").exists());
         }
         session.join().unwrap();
