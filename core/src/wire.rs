@@ -23,7 +23,11 @@ const CONFIRMED: u8 = 8;
 const FINISH: u8 = 9;
 const FINISHED: u8 = 10;
 const CONTENT_UNAVAILABLE: u8 = 11;
+const GET_CONFIRMATIONS: u8 = 12;
+const CONFIRMATIONS: u8 = 13;
 const MAX_CONFIRMATION_FRAME: usize = 320;
+const CONFIRMATION_PAGE: usize = 128;
+const MAX_CONFIRMATIONS_FRAME: usize = 8 + CONFIRMATION_PAGE * (4 + MAX_CONFIRMATION_FRAME);
 const MAX_MANIFEST_BYTES: usize = 8 + MAX_CHUNKS * 32;
 const MAX_FRONTIER_PEERS: usize = 1024;
 const FRONTIER_ENTRY_BYTES: usize = 40;
@@ -279,10 +283,44 @@ impl ShareSession {
             }
             CONFIRM => {
                 let body = read_body(stream, length, MAX_CONFIRMATION_FRAME)?;
-                roster
-                    .receive_confirmation(store, &body)
-                    .map_err(CatchupError::Authentication)?;
+                match roster.receive_confirmation(store, &body) {
+                    Ok(()) => {}
+                    // A valid signer may have seen a successor this server
+                    // has not imported yet. It can be retried next session.
+                    Err(crate::auth::AuthError::Store(
+                        crate::store::StoreError::InvalidConfirmation,
+                    )) if roster.verify_confirmation(&body).is_ok_and(|confirmation| {
+                        store.replica().get(confirmation.successor).is_none()
+                    }) => {}
+                    Err(error) => return Err(CatchupError::Authentication(error).into()),
+                }
                 write_frame(stream, CONFIRMED, &[])?;
+            }
+            GET_CONFIRMATIONS => {
+                let body = read_body(stream, length, 8)?;
+                let cursor =
+                    i64::from_be_bytes(body.try_into().map_err(|_| WireError::InvalidFrame)?);
+                if cursor < 0 {
+                    return Err(WireError::InvalidFrame);
+                }
+                store.refresh().map_err(CatchupError::Store)?;
+                let page = store
+                    .signed_confirmations_page(cursor, CONFIRMATION_PAGE)
+                    .map_err(CatchupError::Store)?;
+                let mut response = Vec::new();
+                response
+                    .extend_from_slice(&page.last().map_or(cursor, |(id, _)| *id).to_be_bytes());
+                for (_, wire) in page {
+                    if wire.is_empty()
+                        || wire.len() > MAX_CONFIRMATION_FRAME
+                        || roster.verify_confirmation(&wire).is_err()
+                    {
+                        return Err(WireError::InvalidFrame);
+                    }
+                    response.extend_from_slice(&(wire.len() as u32).to_be_bytes());
+                    response.extend_from_slice(&wire);
+                }
+                write_frame(stream, CONFIRMATIONS, &response)?;
             }
             FINISH if length == 0 => {
                 write_frame(stream, FINISHED, &[])?;
@@ -301,6 +339,79 @@ pub fn send_confirmation(stream: &mut (impl Read + Write), wire: &[u8]) -> Resul
     }
     write_frame(stream, CONFIRM, wire)?;
     read_frame(stream, CONFIRMED, 0)?;
+    Ok(())
+}
+
+/// Exchange all currently stored signed acknowledgements after event catch-up.
+/// Repeated delivery is safe; the store keeps only the highest signed frontier.
+pub fn exchange_confirmations(
+    stream: &mut (impl Read + Write),
+    store: &mut Store,
+    roster: &Roster,
+) -> Result<(), WireError> {
+    let mut cursor = 0_i64;
+    let mut complete = false;
+    for _ in 0..256 {
+        write_frame(stream, GET_CONFIRMATIONS, &cursor.to_be_bytes())?;
+        let body = read_frame(stream, CONFIRMATIONS, MAX_CONFIRMATIONS_FRAME)?;
+        let Some((next, mut rest)) = body.split_first_chunk::<8>() else {
+            return Err(WireError::InvalidFrame);
+        };
+        let next = i64::from_be_bytes(*next);
+        if next < cursor {
+            return Err(WireError::InvalidFrame);
+        }
+        let mut count = 0;
+        while !rest.is_empty() {
+            let Some((header, payload)) = rest.split_first_chunk::<4>() else {
+                return Err(WireError::InvalidFrame);
+            };
+            let length = u32::from_be_bytes(*header) as usize;
+            let Some((wire, remaining)) = payload.split_at_checked(length) else {
+                return Err(WireError::InvalidFrame);
+            };
+            if length == 0 || length > MAX_CONFIRMATION_FRAME || count == CONFIRMATION_PAGE {
+                return Err(WireError::InvalidFrame);
+            }
+            roster
+                .receive_confirmation(store, wire)
+                .map_err(CatchupError::Authentication)?;
+            rest = remaining;
+            count += 1;
+        }
+        if (count > 0 && next <= cursor) || (count == 0 && next != cursor) {
+            return Err(WireError::InvalidFrame);
+        }
+        cursor = next;
+        if count < CONFIRMATION_PAGE {
+            complete = true;
+            break;
+        }
+    }
+    if !complete {
+        return Err(WireError::InvalidFrame);
+    }
+    let mut cursor = 0_i64;
+    let mut complete = false;
+    for _ in 0..256 {
+        let page = store
+            .signed_confirmations_page(cursor, CONFIRMATION_PAGE)
+            .map_err(CatchupError::Store)?;
+        if page.is_empty() {
+            complete = true;
+            break;
+        }
+        for (id, wire) in page {
+            roster
+                .verify_confirmation(&wire)
+                .map_err(CatchupError::Authentication)?;
+            send_confirmation(stream, &wire)?;
+            cursor = id;
+        }
+    }
+    if !complete {
+        return Err(WireError::InvalidFrame);
+    }
     Ok(())
 }
 

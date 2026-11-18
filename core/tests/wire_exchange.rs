@@ -7,6 +7,116 @@ use std::{
 use p2p_sync_core::{auth::*, replica::*, store::Store, wire::*};
 
 #[test]
+fn signed_reader_confirmation_reaches_original_peer_through_a_relay() {
+    use p2p_sync_core::{
+        blob::BlobStore,
+        retention::{Confirmation, PeerState},
+    };
+    let writer = PeerSigningKey::from_bytes(&[61; 32]);
+    let reader = PeerSigningKey::from_bytes(&[62; 32]);
+    let writer_id = writer.verifying_key().to_bytes();
+    let reader_id = reader.verifying_key().to_bytes();
+    let roster = || {
+        Roster::new(
+            [7; 16],
+            1,
+            [(writer_id, Role::Writer), (reader_id, Role::Reader)].into(),
+        )
+    };
+    let object = [8; 16];
+    let first = Event {
+        id: EventId {
+            peer: writer_id,
+            sequence: 1,
+        },
+        context: VersionVector::new(),
+        object,
+        change: Change::Create(Entry {
+            parent: None,
+            name: "song.tja".into(),
+            kind: EntryKind::File([3; 32]),
+        }),
+    };
+    let next = Event {
+        id: EventId {
+            peer: writer_id,
+            sequence: 2,
+        },
+        context: [(writer_id, 1)].into(),
+        object,
+        change: Change::Revise {
+            base: first.id,
+            entry: Some(Entry {
+                parent: None,
+                name: "song.tja".into(),
+                kind: EntryKind::File([4; 32]),
+            }),
+        },
+    };
+    let make_store = || {
+        let mut store = Store::open(":memory:", roster().membership().clone()).unwrap();
+        for event in [&first, &next] {
+            roster()
+                .receive(&mut store, &roster().sign_event(&writer, event).unwrap())
+                .unwrap();
+        }
+        store
+    };
+    let mut original = make_store();
+    let mut source = make_store();
+    let mut relay = make_store();
+    let signed = roster()
+        .sign_confirmation(
+            &reader,
+            &Confirmation {
+                generation: 1,
+                peer: reader_id,
+                object,
+                successor: next.id,
+                sent_through: 0,
+            },
+        )
+        .unwrap();
+    roster().receive_confirmation(&mut source, &signed).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let completed = BlobStore::open(directory.path().join("files")).unwrap();
+    let exchange = |server_store: &mut Store, client_store: &mut Store| {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::scope(|threads| {
+            let server = threads.spawn(|| {
+                let (mut stream, _) = listener.accept().unwrap();
+                configure(&stream);
+                let mut session = ShareSession::default();
+                while session
+                    .serve_next(&mut stream, server_store, &completed, &roster())
+                    .unwrap()
+                    == SessionProgress::Continue
+                {}
+            });
+            let mut stream = TcpStream::connect(address).unwrap();
+            configure(&stream);
+            exchange_confirmations(&mut stream, client_store, &roster()).unwrap();
+            finish_session(&mut stream).unwrap();
+            server.join().unwrap();
+        });
+    };
+    exchange(&mut source, &mut relay);
+    assert_eq!(relay.signed_confirmations_page(0, 128).unwrap().len(), 1);
+    exchange(&mut relay, &mut original);
+    assert_eq!(original.signed_confirmations_page(0, 128).unwrap().len(), 1);
+    let protection = original.protections().next().unwrap();
+    assert_eq!(
+        protection
+            .peer_states(original.replica().clock())
+            .find(|(peer, _)| *peer == reader_id)
+            .unwrap()
+            .1,
+        PeerState::Applied
+    );
+}
+
+#[test]
 fn two_stores_exchange_events_over_loopback_and_send_no_duplicate_page() {
     let key = PeerSigningKey::from_bytes(&[19; 32]);
     let peer = key.verifying_key().to_bytes();

@@ -18,7 +18,10 @@ use crate::{
     store::Store,
     sync::{sync_cancellable, sync_serving_cache, Destination, FileResult, SyncError, SyncReport},
     tls::{CertificatePin, Client, Server, TlsError},
-    wire::{finish_session, send_confirmation, SessionProgress, ShareSession, WireError},
+    wire::{
+        exchange_confirmations, finish_session, send_confirmation, SessionProgress, ShareSession,
+        WireError,
+    },
 };
 
 #[derive(Debug)]
@@ -81,6 +84,7 @@ pub(crate) fn pull_with_reader(
         let root = destination.root;
         let report = sync_cancellable(&mut connection, store, roster, destination, cancelled)
             .map_err(DirectError::Sync)?;
+        exchange_confirmations(&mut connection, store, roster).map_err(DirectError::Wire)?;
         if let Some(reader) = reader {
             confirm_applied(&mut connection, store, roster, reader, root, &report)?;
         }
@@ -142,6 +146,7 @@ pub(crate) fn pull_serving_cache(
     let mut connection = connect(client, peer, timeout)?;
     let added = sync_serving_cache(&mut connection, store, roster, chunks, completed)
         .map_err(DirectError::Sync)?;
+    exchange_confirmations(&mut connection, store, roster).map_err(DirectError::Wire)?;
     finish_session(&mut connection).map_err(DirectError::Wire)?;
     Ok(added)
 }
