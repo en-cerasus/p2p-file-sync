@@ -537,20 +537,26 @@ fn running_sender_refreshes_its_source_and_serves_new_files() {
         std::fs::write(&new, b"local file").unwrap();
         std::thread::scope(|threads| {
             let server = threads.spawn(move || {
-                for _ in 0..2 {
-                    let (socket, _) = listener.accept().unwrap();
-                    sender.serve(socket).unwrap();
-                }
+                let (socket, _) = listener.accept().unwrap();
+                sender.serve(socket).unwrap();
+                sender
+                    .relocate("folder/moved.tja", "folder/final.tja")
+                    .unwrap();
+                let (socket, _) = listener.accept().unwrap();
+                sender.serve(socket).unwrap();
             });
             let report = pull_from_config(&receiver, &client_state, &destination).unwrap();
             assert_eq!(report.files_blocked, 1);
             assert_eq!(std::fs::read(&old).unwrap(), b"initial");
             assert_eq!(std::fs::read(&new).unwrap(), b"local file");
-            std::fs::remove_file(&new).unwrap();
             let report = pull_from_config(&receiver, &client_state, &destination).unwrap();
             assert_eq!(report.files_updated, 1);
             assert!(!old.exists());
-            assert_eq!(std::fs::read(&new).unwrap(), b"initial");
+            assert_eq!(std::fs::read(&new).unwrap(), b"local file");
+            assert_eq!(
+                std::fs::read(destination.join("folder/final.tja")).unwrap(),
+                b"initial"
+            );
             server.join().unwrap();
         });
     }

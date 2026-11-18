@@ -261,6 +261,44 @@ impl Store {
         if heads.any(|other| other.change.entry() != head.change.entry()) {
             return Ok(false);
         }
+        #[cfg(windows)]
+        if let Some(previous) = intent
+            .previous
+            .filter(|previous| Some(*previous) == intent.desired)
+        {
+            if let Some(old_path) = read_applied(&tx, object)?
+                .filter(|applied| applied.contents == Some(previous))
+                .and_then(|applied| applied.path)
+                .filter(|old_path| *old_path != path)
+            {
+                let root = open_root(root)?;
+                let old_components: Vec<_> = old_path.iter().map(String::as_str).collect();
+                let new_components: Vec<_> = path.iter().map(String::as_str).collect();
+                let Ok(mut old) = NewFileTarget::existing(&root, &old_components) else {
+                    return Ok(false);
+                };
+                if !old
+                    .inspect(object)
+                    .is_ok_and(|actual| actual == Some(previous))
+                {
+                    let Ok(mut new) = NewFileTarget::existing(&root, &new_components) else {
+                        return Ok(false);
+                    };
+                    if !old.name_is_vacant().unwrap_or(false)
+                        || !new
+                            .inspect(object)
+                            .is_ok_and(|actual| actual == Some(previous))
+                    {
+                        return Ok(false);
+                    }
+                    blobs.open_verified(previous)?;
+                    record_applied(&tx, &intent, Some(path))?;
+                }
+                remove_intent(&tx, object)?;
+                tx.commit()?;
+                return Ok(true);
+            }
+        }
         if head.change.entry().is_some()
             && !Projection::new(replica)
                 .path(object)

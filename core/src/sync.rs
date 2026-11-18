@@ -144,6 +144,25 @@ fn publish_heads(
     }
 
     for (object, event, previous, live, moving) in files {
+        let (previous, moving) = if store
+            .retire_superseded_file(destination.completed, destination.root, object)
+            .map_err(SyncError::Materialize)?
+        {
+            let applied = store.applied_file(object).map_err(SyncError::Materialize)?;
+            let previous = applied.as_ref().and_then(|file| file.contents);
+            let moving = live
+                && previous.is_some()
+                && applied.and_then(|file| file.path).is_some_and(|path| {
+                    Projection::new(store.replica())
+                        .path(object)
+                        .is_ok_and(|current| {
+                            !current.into_iter().eq(path.iter().map(String::as_str))
+                        })
+                });
+            (previous, moving)
+        } else {
+            (previous, moving)
+        };
         #[cfg(windows)]
         if moving {
             let Some(previous) = previous.filter(|blob| {
@@ -178,17 +197,6 @@ fn publish_heads(
         }
         #[cfg(not(windows))]
         debug_assert!(!moving);
-        let previous = if store
-            .retire_superseded_file(destination.completed, destination.root, object)
-            .map_err(SyncError::Materialize)?
-        {
-            store
-                .applied_file(object)
-                .map_err(SyncError::Materialize)?
-                .and_then(|applied| applied.contents)
-        } else {
-            previous
-        };
         if !live && previous.is_none() {
             report.files.push((object, FileResult::Removed));
             continue;
