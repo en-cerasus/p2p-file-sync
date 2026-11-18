@@ -21,7 +21,6 @@ pub(crate) struct NewFileTarget {
 }
 
 impl NewFileTarget {
-    #[cfg(windows)]
     pub(crate) fn existing(root: &Dir, components: &[&str]) -> io::Result<Self> {
         let (name, ancestors) = components.split_last().ok_or_else(invalid_name)?;
         let mut parent = root.try_clone()?;

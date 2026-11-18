@@ -139,6 +139,21 @@ fn publish_heads(
     }
 
     for (object, event, previous, live) in files {
+        let previous = if store
+            .retire_superseded_file(destination.completed, destination.root, object)
+            .map_err(SyncError::Materialize)?
+        {
+            store
+                .applied_file(object)
+                .map_err(SyncError::Materialize)?
+                .and_then(|applied| applied.contents)
+        } else {
+            previous
+        };
+        if !live && previous.is_none() {
+            report.files.push((object, FileResult::Removed));
+            continue;
+        }
         #[cfg(windows)]
         if !live {
             match store.recover_deleted_file(destination.completed, destination.root, object) {

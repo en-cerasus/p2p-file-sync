@@ -238,6 +238,62 @@ impl Store {
         reconcile(tx, blobs, &mut target, &intent, Some(path), true)
     }
 
+    /// Retire an out-of-date intent only when its original path still
+    /// matches the verified pre- or post-operation contents.
+    pub fn retire_superseded_file(
+        &mut self,
+        blobs: &BlobStore,
+        root: &Path,
+        object: ObjectId,
+    ) -> Result<bool, MaterializeError> {
+        let (tx, replica) = self.begin_indexed_write()?;
+        let Some((intent, Some(path))) = load_intent(&tx, object)? else {
+            return Ok(false);
+        };
+        if matches_head(replica, &intent) {
+            return Ok(false);
+        }
+        let mut heads = replica.heads(object);
+        let Some(head) = heads.next() else {
+            return Ok(false);
+        };
+        if heads.any(|other| other.change.entry() != head.change.entry()) {
+            return Ok(false);
+        }
+        if head.change.entry().is_some()
+            && !Projection::new(replica)
+                .path(object)
+                .is_ok_and(|current| current.into_iter().eq(path.iter().map(String::as_str)))
+        {
+            return Ok(false);
+        }
+
+        let components: Vec<_> = path.iter().map(String::as_str).collect();
+        let mut target = match NewFileTarget::existing(&open_root(root)?, &components) {
+            Ok(target) => target,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        let current = target.inspect(object)?;
+        if current != intent.previous && current != intent.desired {
+            return Ok(false);
+        }
+
+        for blob in [intent.previous, intent.desired].into_iter().flatten() {
+            blobs.open_verified(blob)?;
+        }
+        #[cfg(windows)]
+        if current.is_some() && intent.previous.is_some() && intent.desired.is_some() {
+            target.finish_update(&intent)?;
+        }
+        if current == intent.desired {
+            record_applied(&tx, &intent, Some(path))?;
+        }
+        remove_intent(&tx, object)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// Apply a tombstone only to the recorded local version at its original
     /// path. Windows locks and removes the exact verified file by handle.
     #[cfg(windows)]
@@ -342,6 +398,17 @@ fn reconcile(
         return Ok(Recovery::Diverged);
     };
 
+    record_applied(&tx, intent, path)?;
+    remove_intent(&tx, object)?;
+    tx.commit()?;
+    Ok(result)
+}
+
+fn record_applied(
+    tx: &rusqlite::Transaction<'_>,
+    intent: &FileIntent,
+    path: Option<Vec<String>>,
+) -> Result<(), MaterializeError> {
     let applied = AppliedFile {
         event: intent.event,
         contents: intent.desired,
@@ -350,14 +417,17 @@ fn reconcile(
     tx.execute(
         "INSERT INTO applied_file (object, payload) VALUES (?1, ?2)
          ON CONFLICT(object) DO UPDATE SET payload = excluded.payload",
-        params![object.as_slice(), encode(&applied)?],
+        params![intent.object.as_slice(), encode(&applied)?],
     )?;
+    Ok(())
+}
+
+fn remove_intent(tx: &rusqlite::Transaction<'_>, object: ObjectId) -> Result<(), MaterializeError> {
     tx.execute(
         "DELETE FROM file_intent WHERE object = ?1",
         [object.as_slice()],
     )?;
-    tx.commit()?;
-    Ok(result)
+    Ok(())
 }
 
 fn load_intent(

@@ -497,3 +497,57 @@ fn update_recovers_after_old_path_was_moved_and_does_not_clobber_a_new_occupant(
     assert!(!backup.exists());
     assert!(f.blobs.open_verified(old).is_ok());
 }
+
+#[test]
+fn obsolete_pending_update_is_retired_only_for_a_known_disk_version() {
+    for (bytes, expected_version) in [
+        (b"new".as_slice(), 2),
+        (b"pending".as_slice(), 3),
+        (b"local edit".as_slice(), 0),
+    ] {
+        let f = Fixture::new();
+        let root = f.folder.path().join("destination");
+        std::fs::create_dir(&root).unwrap();
+        let mut store = f.open();
+        let first = FileIntent {
+            previous: None,
+            ..f.intent.clone()
+        };
+        store.stage_file(&f.blobs, &first).unwrap();
+        store.recover_new_file(&f.blobs, &root, OBJECT).unwrap();
+        let file = root.join("song.tja");
+
+        let pending_blob = metadata(b"pending");
+        f.blobs.put(pending_blob, &b"pending"[..]).unwrap();
+        let pending_event = event(3, content_entry(pending_blob.hash));
+        store.apply_verified(pending_event.clone()).unwrap();
+        let pending = FileIntent {
+            object: OBJECT,
+            event: pending_event.id,
+            previous: first.desired,
+            desired: Some(pending_blob),
+        };
+        store.stage_file(&f.blobs, &pending).unwrap();
+        let newest = event(4, content_entry(metadata(b"newest").hash));
+        store.apply_verified(newest).unwrap();
+        std::fs::write(&file, bytes).unwrap();
+
+        assert_eq!(
+            store
+                .retire_superseded_file(&f.blobs, &root, OBJECT)
+                .unwrap(),
+            expected_version != 0
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), bytes);
+        if expected_version == 0 {
+            assert_eq!(store.pending_files().unwrap(), [pending]);
+        } else {
+            assert!(store.pending_files().unwrap().is_empty());
+            assert_eq!(
+                store.applied_file(OBJECT).unwrap().unwrap().event.sequence,
+                expected_version
+            );
+            assert!(f.blobs.open_verified(pending_blob).is_ok());
+        }
+    }
+}
