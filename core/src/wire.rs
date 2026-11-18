@@ -246,7 +246,7 @@ impl ShareSession {
                 let body = read_body(stream, length, 32)?;
                 let hash: ContentHash = body.try_into().map_err(|_| WireError::InvalidFrame)?;
                 store.refresh().map_err(CatchupError::Store)?;
-                if !has_signed_content(store, hash) {
+                if !store.has_signed_content(hash) {
                     write_frame(stream, CONTENT_UNAVAILABLE, &[])?;
                     return Ok(SessionProgress::Continue);
                 }
@@ -308,17 +308,6 @@ pub fn finish_session(stream: &mut (impl Read + Write)) -> Result<(), WireError>
     write_frame(stream, FINISH, &[])?;
     read_frame(stream, FINISHED, 0)?;
     Ok(())
-}
-
-fn has_signed_content(store: &Store, hash: ContentHash) -> bool {
-    store.event_order().iter().copied().any(|id| {
-        store.signed_event(id).is_some()
-            && store
-                .replica()
-                .get(id)
-                .and_then(|event| event.change.entry())
-                .is_some_and(|entry| entry.kind == EntryKind::File(hash))
-    })
 }
 
 fn read_header(stream: &mut impl Read) -> Result<(u8, usize), WireError> {

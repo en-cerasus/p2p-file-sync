@@ -265,6 +265,7 @@ unsafe fn pull_to_output<T: From<host::PullSummaryV3>>(
                 | host::HostError::Publish(_)
                 | host::HostError::Transition(_)
                 | host::HostError::CheckpointData(_)
+                | host::HostError::Baseline(_)
                 | host::HostError::CheckpointTooLarge => 5,
             })?;
         let json = originals

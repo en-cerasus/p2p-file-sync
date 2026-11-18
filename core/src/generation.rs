@@ -247,6 +247,13 @@ pub enum BaselineError {
 }
 
 impl GenerationBaseline {
+    pub(crate) fn transition_digest(&self) -> ContentHash {
+        self.transition_digest
+    }
+
+    pub(crate) fn matches_roster(&self, roster: &Roster) -> bool {
+        self.roster.membership() == roster.membership() && self.roster.roles() == roster.roles()
+    }
     pub(crate) fn into_store_parts(self) -> (Roster, GenerationCheckpoint, Replica, ContentHash) {
         (
             self.roster,
@@ -267,6 +274,11 @@ impl GenerationBaseline {
         let transition =
             GenerationTransition::verify(transition, administrator, old.share, old.generation)
                 .map_err(BaselineError::Transition)?;
+        if old.members.contains(administrator.as_bytes())
+            || transition.members.contains_key(administrator.as_bytes())
+        {
+            return Err(BaselineError::Transition(TransitionError::Invalid));
+        }
         let (checkpoint, replica) = transition
             .reconstruct(bytes, previous)
             .map_err(BaselineError::Transition)?;

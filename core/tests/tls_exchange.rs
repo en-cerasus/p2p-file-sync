@@ -438,6 +438,7 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
     let wrong = PeerSigningKey::from_bytes(&[48; 32]);
     std::fs::write(&admin_public, wrong.verifying_key().as_bytes()).unwrap();
     assert!(!verify().status.success());
+    std::fs::write(&admin_public, admin_key.verifying_key().as_bytes()).unwrap();
     assert_eq!(
         std::fs::read(bundle.join("files").join(encode_hex(&sha256(contents)))).unwrap(),
         contents
@@ -551,6 +552,52 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
         }
         session.join().unwrap();
     });
+    let migration = serde_json::json!({
+        "previous_server": server_config,
+        "administrator_public_key": admin_public,
+        "bundle": bundle,
+    });
+    legacy["migration"] = migration.clone();
+    std::fs::write(&next_config, legacy.to_string()).unwrap();
+    let mut upgraded = Sender::open(&next_config, &server_state).unwrap();
+    let new_file = path.join("after-migration.tja");
+    std::fs::write(&new_file, b"new generation").unwrap();
+    upgraded.publish(&new_file).unwrap();
+    let listener = upgraded.bind().unwrap();
+    config["address"] = listener.local_addr().unwrap().to_string().into();
+    config["generation"] = 2.into();
+    let unseeded = receiver.with_file_name("unseeded.json");
+    std::fs::write(&unseeded, config.to_string()).unwrap();
+    config["migration"] = migration;
+    std::fs::write(&receiver, config.to_string()).unwrap();
+    let destination = path.join("new-generation-destination");
+    std::fs::create_dir(&destination).unwrap();
+    std::thread::scope(|threads| {
+        let session = threads.spawn(move || {
+            assert!(matches!(
+                upgraded.serve(listener.accept().unwrap().0),
+                Err(p2p_sync_core::host::HostError::Direct(
+                    direct::DirectError::Tls(_)
+                ))
+            ));
+            upgraded.serve(listener.accept().unwrap().0).unwrap();
+        });
+        assert!(matches!(
+            pull_from_config(&unseeded, &path.join("unseeded-state"), &destination),
+            Err(p2p_sync_core::host::HostError::Direct(
+                direct::DirectError::Tls(_)
+            ))
+        ));
+        let report = pull_from_config(&receiver, &path.join("client-state"), &destination).unwrap();
+        assert_eq!(report.events_added, 1);
+        assert_eq!(report.files_published, 1);
+        session.join().unwrap();
+    });
+    assert!(!destination.join("譜面/試験譜面.tja").exists());
+    assert_eq!(
+        std::fs::read(destination.join("after-migration.tja")).unwrap(),
+        b"new generation"
+    );
 }
 
 #[test]

@@ -230,6 +230,16 @@ impl Store {
         &self.index.event_order
     }
 
+    pub(crate) fn has_signed_content(&self, hash: ContentHash) -> bool {
+        self.index.signed_events.keys().any(|&id| {
+            self.index
+                .replica
+                .get(id)
+                .and_then(|event| event.change.entry())
+                .is_some_and(|entry| entry.kind == EntryKind::File(hash))
+        })
+    }
+
     /// Original signed event for forwarding to another peer.
     pub fn signed_event(&self, id: EventId) -> Option<&[u8]> {
         self.index.signed_events.get(&id).map(Vec::as_slice)

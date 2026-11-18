@@ -14,8 +14,11 @@ use rustls::{
 
 const ALPN: &[u8] = b"p2p-file-sync/2";
 
-fn scoped_protocol(share: [u8; 16], generation: u64) -> Vec<u8> {
-    let scope = [ALPN, &share, &generation.to_be_bytes()].concat();
+fn scoped_protocol(share: [u8; 16], generation: u64, baseline: Option<[u8; 32]>) -> Vec<u8> {
+    let baseline = baseline
+        .as_ref()
+        .map_or(&[][..], |digest| digest.as_slice());
+    let scope = [ALPN, &share, &generation.to_be_bytes(), baseline].concat();
     [ALPN, &crate::sha256(&scope)].concat()
 }
 
@@ -57,11 +60,21 @@ impl Client {
         share: [u8; 16],
         generation: u64,
     ) -> Result<Self, TlsError> {
+        Self::with_baseline(roots, credentials, share, generation, None)
+    }
+
+    pub(crate) fn with_baseline(
+        roots: RootCertStore,
+        credentials: Credentials,
+        share: [u8; 16],
+        generation: u64,
+        baseline: Option<[u8; 32]>,
+    ) -> Result<Self, TlsError> {
         let mut config = ClientConfig::builder_with_provider(Arc::new(default_provider()))
             .with_protocol_versions(&[&TLS13])?
             .with_root_certificates(roots)
             .with_client_auth_cert(credentials.chain, credentials.key)?;
-        config.alpn_protocols = vec![scoped_protocol(share, generation)];
+        config.alpn_protocols = vec![scoped_protocol(share, generation, baseline)];
         config.resumption = Resumption::disabled();
         Ok(Self {
             config: Arc::new(config),
@@ -103,6 +116,16 @@ impl Server {
         share: [u8; 16],
         generation: u64,
     ) -> Result<Self, TlsError> {
+        Self::with_baseline(roots, credentials, share, generation, None)
+    }
+
+    pub(crate) fn with_baseline(
+        roots: RootCertStore,
+        credentials: Credentials,
+        share: [u8; 16],
+        generation: u64,
+        baseline: Option<[u8; 32]>,
+    ) -> Result<Self, TlsError> {
         let provider = Arc::new(default_provider());
         let verifier =
             WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider.clone())
@@ -112,7 +135,7 @@ impl Server {
             .with_protocol_versions(&[&TLS13])?
             .with_client_cert_verifier(verifier)
             .with_single_cert(credentials.chain, credentials.key)?;
-        config.alpn_protocols = vec![scoped_protocol(share, generation)];
+        config.alpn_protocols = vec![scoped_protocol(share, generation, baseline)];
         config.send_tls13_tickets = 0;
         Ok(Self {
             config: Arc::new(config),

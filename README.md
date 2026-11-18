@@ -88,6 +88,8 @@ cargo run --locked --release -p p2p-sync-core --bin p2p-send -- serve .\trial-se
 
 `p2p-send verify-generation <previous-server.json> <next-server.json> <administrator-public-key> <bundle-dir>` は、信頼済みの管理公開鍵（Ed25519の生32バイト）を使って、署名、世代、ピア一覧、履歴、ファイル本体を検証します。検証は読み取り専用です。現段階のチェックポイント上限は128 MiBで、ファイル本体はこの上限に含みません。
 
+新世代の配信・受信設定には `migration` を追加し、`previous_server`、`administrator_public_key`、`bundle` にそれぞれ旧世代のピア構成、信頼済みの管理公開鍵、検証済みの移行データのパスを指定します。パスは各設定ファイルからの相対パスを使えます。移行データは配信元・同期先・アプリのキャッシュ外に置き、再起動後も保持します。新世代へ移った端末同士は同じ署名済み移行データを使います。旧世代の配信プロセスは手動で停止してください。
+
 `p2p-send catch-up <server.json> <state-dir> <direct.json>` は、同じ共有・世代で登録された別の配信先から、署名付きイベントと取得可能なファイル本体を配信用キャッシュへ取り込みます。取り込んだデータは `serve` で再配信でき、作業フォルダーには書き込みません。接続には `direct.json` の主接続先と追加の接続先を設定順に使います。
 
 `p2p-send serve-peer <server.json> <state-dir> <direct.json> <間隔秒>` は、配信しながら取り込みを繰り返します。間隔は1〜86400秒で、接続に失敗した場合も次の周期で再試行します。

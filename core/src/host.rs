@@ -18,7 +18,8 @@ use crate::{
     blob::BlobStore,
     direct::{self, DirectError, PeerEndpoint},
     generation::{
-        CheckpointDataError, GenerationTransition, TransitionError, MAX_TRANSITION_BYTES,
+        BaselineError, CheckpointDataError, GenerationBaseline, GenerationTransition,
+        TransitionError, MAX_TRANSITION_BYTES,
     },
     names::collision_key,
     projection::Projection,
@@ -52,6 +53,7 @@ struct Config {
     certificate_der: PathBuf,
     private_key_der: PathBuf,
     event_key: Option<PathBuf>,
+    migration: Option<MigrationConfig>,
 }
 
 #[derive(Deserialize)]
@@ -60,6 +62,14 @@ struct EndpointConfig {
     address: SocketAddr,
     server_name: String,
     server_pin: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MigrationConfig {
+    previous_server: PathBuf,
+    administrator_public_key: PathBuf,
+    bundle: PathBuf,
 }
 
 impl Config {
@@ -105,6 +115,7 @@ struct SenderConfig {
     certificate_der: PathBuf,
     private_key_der: PathBuf,
     event_key: PathBuf,
+    migration: Option<MigrationConfig>,
 }
 
 pub struct Sender {
@@ -117,6 +128,7 @@ pub struct Sender {
     completed: BlobStore,
     write_lock: PathBuf,
     private_paths: Vec<PathBuf>,
+    baseline_digest: Option<[u8; 32]>,
 }
 
 impl Sender {
@@ -159,21 +171,27 @@ impl Sender {
         roster
             .check_writer(&signer.verifying_key().to_bytes())
             .map_err(|_| HostError::Configuration)?;
-        let server = Server::new(
-            roots,
-            credentials,
-            roster.membership().share,
-            roster.membership().generation,
-        )
-        .map_err(HostError::Tls)?;
         let root = state_root
             .join(config.share.to_ascii_lowercase())
             .join(config.generation.to_string());
         fs::create_dir_all(&root).map_err(HostError::Io)?;
         let completed = BlobStore::open(root.join("files")).map_err(HostError::Io)?;
-        let store = Store::open(root.join("sync.db"), roster.membership().clone())
-            .map_err(HostError::Store)?;
         let config_directory = configuration.parent().ok_or(HostError::Configuration)?;
+        let (store, baseline_digest) = open_host_store(
+            &root,
+            &completed,
+            &roster,
+            config_directory,
+            config.migration.as_ref(),
+        )?;
+        let server = Server::with_baseline(
+            roots,
+            credentials,
+            roster.membership().share,
+            roster.membership().generation,
+            baseline_digest,
+        )
+        .map_err(HostError::Tls)?;
         let private_paths = [
             configuration.to_owned(),
             root.clone(),
@@ -181,6 +199,13 @@ impl Sender {
             config_directory.join(&config.event_key),
         ]
         .into_iter()
+        .chain(
+            config
+                .migration
+                .as_ref()
+                .into_iter()
+                .map(|migration| config_directory.join(&migration.bundle)),
+        )
         .map(|path| fs::canonicalize(path).map_err(HostError::Io))
         .collect::<Result<_, _>>()?;
         let mut sender = Self {
@@ -193,6 +218,7 @@ impl Sender {
             completed,
             write_lock: root.join("write.lock"),
             private_paths,
+            baseline_digest,
         };
         let _lock = sender.lock_state()?;
         sender.sweep_archives()?;
@@ -411,11 +437,12 @@ impl Sender {
             &config.certificate_der,
             &config.private_key_der,
         )?;
-        let client = Client::new(
+        let client = Client::with_baseline(
             roots,
             credentials,
             self.roster.membership().share,
             self.roster.membership().generation,
+            self.baseline_digest,
         )
         .map_err(HostError::Tls)?;
         let _lock = self.lock_state()?;
@@ -548,6 +575,49 @@ pub enum HostError {
     Transition(TransitionError),
     CheckpointData(CheckpointDataError),
     CheckpointTooLarge,
+    Baseline(BaselineError),
+}
+
+fn open_host_store(
+    state: &Path,
+    completed: &BlobStore,
+    roster: &Roster,
+    configuration_directory: &Path,
+    migration: Option<&MigrationConfig>,
+) -> Result<(Store, Option<[u8; 32]>), HostError> {
+    let database = state.join("sync.db");
+    let Some(migration) = migration else {
+        let store = Store::open(database, roster.membership().clone()).map_err(HostError::Store)?;
+        return Ok((store, None));
+    };
+    let previous = read_sender_roster(&configuration_directory.join(&migration.previous_server))?;
+    let material = read_bounded(
+        &configuration_directory.join(&migration.administrator_public_key),
+        32,
+    )?;
+    let admin = ed25519_dalek::VerifyingKey::from_bytes(
+        material
+            .as_slice()
+            .try_into()
+            .map_err(|_| HostError::Configuration)?,
+    )
+    .map_err(|_| HostError::Configuration)?;
+    let bundle = configuration_directory.join(&migration.bundle);
+    let source = BlobStore::open_existing(bundle.join("files")).map_err(HostError::Io)?;
+    let wire = read_bounded(&bundle.join("transition.bin"), MAX_TRANSITION_BYTES as u64)?;
+    let bytes = read_bounded(&bundle.join("checkpoint.bin"), MAX_CHECKPOINT_BYTES)?;
+    let baseline = GenerationBaseline::load(&wire, &bytes, &admin, &previous, &source)
+        .map_err(HostError::Baseline)?;
+    if !baseline.matches_roster(roster) {
+        return Err(HostError::Configuration);
+    }
+    baseline
+        .checkpoint()
+        .stage_contents(&source, completed)
+        .map_err(HostError::CheckpointData)?;
+    let digest = baseline.transition_digest();
+    let store = Store::open_with_baseline(database, baseline).map_err(HostError::Store)?;
+    Ok((store, Some(digest)))
 }
 
 /// Check an incoming generation bundle against trusted configuration and a
@@ -708,14 +778,6 @@ pub(crate) fn pull_with_originals(
         &config.certificate_der,
         &config.private_key_der,
     )?;
-    let client = Client::new(
-        roots,
-        credentials,
-        roster.membership().share,
-        roster.membership().generation,
-    )
-    .map_err(HostError::Tls)?;
-
     if !destination.is_dir() {
         return Err(HostError::Configuration);
     }
@@ -732,8 +794,22 @@ pub(crate) fn pull_with_originals(
     fs::create_dir_all(&state_root).map_err(HostError::Io)?;
     let chunks = BlobStore::open(state_root.join("chunks")).map_err(HostError::Io)?;
     let completed = BlobStore::open(state_root.join("files")).map_err(HostError::Io)?;
-    let mut store = Store::open(state_root.join("sync.db"), roster.membership().clone())
-        .map_err(HostError::Store)?;
+    let configuration_directory = configuration.parent().ok_or(HostError::Configuration)?;
+    let (mut store, baseline_digest) = open_host_store(
+        &state_root,
+        &completed,
+        &roster,
+        configuration_directory,
+        config.migration.as_ref(),
+    )?;
+    let client = Client::with_baseline(
+        roots,
+        credentials,
+        roster.membership().share,
+        roster.membership().generation,
+        baseline_digest,
+    )
+    .map_err(HostError::Tls)?;
 
     store
         .prune_archives(std::time::SystemTime::now())
