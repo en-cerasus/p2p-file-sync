@@ -33,7 +33,7 @@ GitHub Actionsの「Build unsigned iOS IPA」も手動で実行できます。�
 
 ## 直接接続の試験設定
 
-試験用の証明書・秘密鍵と接続設定は配信コマンドの `setup` で生成できます。WindowsはJSONを選択します。iOSはJSONと証明書類を入れたフォルダーを選択します。iOSのJSON名は `direct.json`、同期先はアプリのDocuments内の `P2PSync` です。
+試験用の証明書・秘密鍵と接続設定は配信コマンドの `setup` で生成できます。WindowsはJSONを選択します。iOSはJSONと証明書類を入れたフォルダーを選択します。iOSのJSON名は `direct.json`、同期先はアプリのDocuments内の `P2PSync` です。「10 秒ごとに自動同期」はアプリの画面を開いている間に実行し、画面へ戻ると再開します。
 
 |JSON項目|内容|
 |---|---|
