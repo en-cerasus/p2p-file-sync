@@ -15,7 +15,7 @@ use crate::{
 
 const DOMAIN: &[u8] = b"p2p-file-sync/generation-transition/v1\0";
 const MAX_MEMBERS: usize = 1024;
-const MAX_MESSAGE: usize = 48 * 1024;
+pub(crate) const MAX_TRANSITION_BYTES: usize = 48 * 1024;
 const CHECKPOINT_VERSION: u8 = 2;
 
 /// Metadata captured from one consistent view of the old generation.
@@ -45,6 +45,19 @@ impl GenerationCheckpoint {
 
     pub fn encode(&self) -> Result<Vec<u8>, postcard::Error> {
         postcard::to_allocvec(self)
+    }
+
+    /// Validate all required blobs without modifying the bundle.
+    pub fn verify_contents(&self, store: &BlobStore) -> Result<usize, CheckpointDataError> {
+        let contents = self.required_contents()?;
+        for (&hash, &length) in &contents {
+            let error = |source| CheckpointDataError::Content { hash, source };
+            let file = store.open_candidate(hash).map_err(error)?;
+            let blob = content_metadata(&file, hash, length).map_err(error)?;
+            drop(file);
+            store.open_verified(blob).map_err(error)?;
+        }
+        Ok(contents.len())
     }
 
     fn verify_history(&self, roster: &Roster) -> Result<(), TransitionError> {
@@ -258,7 +271,7 @@ impl GenerationTransition {
         share: [u8; 16],
         current: u64,
     ) -> Result<Self, TransitionError> {
-        if wire.len() > MAX_MESSAGE {
+        if wire.len() > MAX_TRANSITION_BYTES {
             return Err(TransitionError::Invalid);
         }
         let (signature, payload) = wire

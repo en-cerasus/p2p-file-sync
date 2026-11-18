@@ -412,6 +412,32 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
     assert!(!prepare().status.success());
     assert!(bundle.join("checkpoint.bin").is_file());
     assert!(bundle.join("transition.bin").is_file());
+    let admin_public = path.join("admin-public.bin");
+    let admin_key = PeerSigningKey::from_bytes(&[47; 32]);
+    std::fs::write(&admin_public, admin_key.verifying_key().as_bytes()).unwrap();
+    let verify = || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
+            .arg("verify-generation")
+            .arg(&server_config)
+            .arg(&next_config)
+            .arg(&admin_public)
+            .arg(&bundle)
+            .output()
+            .unwrap()
+    };
+    let output = verify();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let obsolete = bundle.join("files").join(encode_hex(&sha256(contents)));
+    std::fs::write(&obsolete, vec![0; contents.len()]).unwrap();
+    assert!(!verify().status.success());
+    std::fs::write(&obsolete, contents).unwrap();
+    let wrong = PeerSigningKey::from_bytes(&[48; 32]);
+    std::fs::write(&admin_public, wrong.verifying_key().as_bytes()).unwrap();
+    assert!(!verify().status.success());
     assert_eq!(
         std::fs::read(bundle.join("files").join(encode_hex(&sha256(contents)))).unwrap(),
         contents

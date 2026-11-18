@@ -17,7 +17,9 @@ use crate::{
     auth::{PeerSigningKey, Role, Roster},
     blob::BlobStore,
     direct::{self, DirectError, PeerEndpoint},
-    generation::{CheckpointDataError, GenerationTransition, TransitionError},
+    generation::{
+        CheckpointDataError, GenerationTransition, TransitionError, MAX_TRANSITION_BYTES,
+    },
     names::collision_key,
     projection::Projection,
     publish::{
@@ -33,6 +35,7 @@ use crate::{
 const MAX_CONFIG_BYTES: u64 = 256 * 1024;
 const MAX_CREDENTIAL_BYTES: u64 = 64 * 1024;
 const MAX_MEMBERS: usize = 1024;
+const MAX_CHECKPOINT_BYTES: u64 = 128 * 1024 * 1024;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -452,14 +455,10 @@ impl Sender {
         administrator_key: &Path,
         output: &Path,
     ) -> Result<usize, HostError> {
-        let next: SenderConfig =
-            serde_json::from_slice(&read_bounded(next_configuration, MAX_CONFIG_BYTES)?)
-                .map_err(|_| HostError::Configuration)?;
         let old = self.roster.membership();
-        let roster = build_roster(&next.share, next.generation, next.members)?;
-        if roster.membership().share != old.share
-            || old.generation.checked_add(1) != Some(next.generation)
-        {
+        let roster = read_sender_roster(next_configuration)?;
+        let next = roster.membership().generation;
+        if roster.membership().share != old.share || old.generation.checked_add(1) != Some(next) {
             return Err(HostError::Configuration);
         }
         let material = read_bounded(administrator_key, 32)?;
@@ -481,10 +480,13 @@ impl Sender {
             .encode()
             .map_err(StoreError::from)
             .map_err(HostError::Store)?;
+        if bytes.len() as u64 > MAX_CHECKPOINT_BYTES {
+            return Err(HostError::CheckpointTooLarge);
+        }
         let transition = GenerationTransition {
             share: old.share,
             previous: old.generation,
-            next: next.generation,
+            next,
             checkpoint: crate::sha256(&bytes),
             members: roster.roles().clone(),
         };
@@ -545,6 +547,54 @@ pub enum HostError {
     Publish(PublishError),
     Transition(TransitionError),
     CheckpointData(CheckpointDataError),
+    CheckpointTooLarge,
+}
+
+/// Check an incoming generation bundle against trusted configuration and a
+/// separately supplied administrative public key. No state is activated.
+pub fn verify_generation_bundle(
+    previous_configuration: &Path,
+    next_configuration: &Path,
+    administrator_public_key: &Path,
+    bundle: &Path,
+) -> Result<usize, HostError> {
+    let previous = read_sender_roster(previous_configuration)?;
+    let next = read_sender_roster(next_configuration)?;
+    let material = read_bounded(administrator_public_key, 32)?;
+    let public_key = material
+        .as_slice()
+        .try_into()
+        .map_err(|_| HostError::Configuration)?;
+    let admin = ed25519_dalek::VerifyingKey::from_bytes(public_key)
+        .map_err(|_| HostError::Configuration)?;
+    let scope = previous.membership();
+    if scope.members.contains(public_key) || next.membership().members.contains(public_key) {
+        return Err(HostError::Configuration);
+    }
+    let wire = read_bounded(&bundle.join("transition.bin"), MAX_TRANSITION_BYTES as u64)?;
+    let transition = GenerationTransition::verify(&wire, &admin, scope.share, scope.generation)
+        .map_err(HostError::Transition)?;
+    if next.membership().share != transition.share
+        || next.membership().generation != transition.next
+        || next.roles() != &transition.members
+    {
+        return Err(HostError::Configuration);
+    }
+    let bytes = read_bounded(&bundle.join("checkpoint.bin"), MAX_CHECKPOINT_BYTES)?;
+    let checkpoint = transition
+        .verify_checkpoint(&bytes, &previous)
+        .map_err(HostError::Transition)?;
+    let blobs = BlobStore::open_existing(bundle.join("files")).map_err(HostError::Io)?;
+    checkpoint
+        .verify_contents(&blobs)
+        .map_err(HostError::CheckpointData)
+}
+
+fn read_sender_roster(configuration: &Path) -> Result<Roster, HostError> {
+    let config: SenderConfig =
+        serde_json::from_slice(&read_bounded(configuration, MAX_CONFIG_BYTES)?)
+            .map_err(|_| HostError::Configuration)?;
+    build_roster(&config.share, config.generation, config.members)
 }
 
 fn write_bundle_file(output: &Path, name: &str, bytes: &[u8]) -> Result<(), HostError> {

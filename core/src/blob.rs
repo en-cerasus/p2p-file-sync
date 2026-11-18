@@ -24,6 +24,13 @@ pub struct BlobStore {
 impl BlobStore {
     pub fn open(root: impl AsRef<Path>) -> io::Result<Self> {
         fs::create_dir_all(root.as_ref())?;
+        Self::open_existing(root)
+    }
+
+    pub(crate) fn open_existing(root: impl AsRef<Path>) -> io::Result<Self> {
+        if !fs::metadata(root.as_ref())?.is_dir() {
+            return Err(invalid("blob store must be a directory"));
+        }
         Ok(Self {
             root: root.as_ref().canonicalize()?,
         })

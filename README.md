@@ -86,6 +86,8 @@ cargo run --locked --release -p p2p-sync-core --bin p2p-send -- serve .\trial-se
 
 `p2p-send prepare-generation <server.json> <state-dir> <next-server.json> <administrator-seed-file> <new-dir>` で移行用データを作成できます。次の設定には同じ共有IDと1つ進んだ世代、新しいピア一覧を指定します。管理鍵には、同期ピアの署名鍵と別の32バイトのEd25519シードを使います。出力には署名済みの `transition.bin`、`checkpoint.bin`、検証済みの `files` が含まれます。出力フォルダーには共有ファイル本体が含まれるため、共有先と同様に管理してください。作成だけでは世代は切り替わりません。
 
+`p2p-send verify-generation <previous-server.json> <next-server.json> <administrator-public-key> <bundle-dir>` は、信頼済みの管理公開鍵（Ed25519の生32バイト）を使って、署名、世代、ピア一覧、履歴、ファイル本体を検証します。検証は読み取り専用です。現段階のチェックポイント上限は128 MiBで、ファイル本体はこの上限に含みません。
+
 `p2p-send catch-up <server.json> <state-dir> <direct.json>` は、同じ共有・世代で登録された別の配信先から、署名付きイベントと取得可能なファイル本体を配信用キャッシュへ取り込みます。取り込んだデータは `serve` で再配信でき、作業フォルダーには書き込みません。接続には `direct.json` の主接続先と追加の接続先を設定順に使います。
 
 `p2p-send serve-peer <server.json> <state-dir> <direct.json> <間隔秒>` は、配信しながら取り込みを繰り返します。間隔は1〜86400秒で、接続に失敗した場合も次の周期で再試行します。
