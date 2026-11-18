@@ -25,7 +25,7 @@ use crate::{
     projection::Projection,
     publish::{
         publish_file, publish_tree, refresh_tree, relocate_file, resolve_file_conflict,
-        revise_file, PublishError, TreeSummary,
+        restore_archived_file, revise_file, PublishError, TreeSummary,
     },
     replica::{EntryKind, Event, EventId, PeerId},
     store::{Store, StoreError},
@@ -375,6 +375,55 @@ impl Sender {
             .filter(|&object| replica.has_conflict(object))
             .map(|object| replica.heads(object).cloned().collect())
             .collect())
+    }
+
+    pub fn history(&mut self) -> Result<serde_json::Value, HostError> {
+        self.store.refresh().map_err(HostError::Store)?;
+        let history = self
+            .store
+            .archives(std::time::SystemTime::now())
+            .map_err(HostError::Store)?;
+        let format_id = |id: EventId| {
+            let peer: String = id.peer.iter().map(|byte| format!("{byte:02x}")).collect();
+            format!("{peer}:{}", id.sequence)
+        };
+        Ok(serde_json::Value::Array(
+            history
+                .into_iter()
+                .map(|archive| {
+                    let current: Vec<_> = self
+                        .store
+                        .replica()
+                        .heads(archive.object)
+                        .map(|head| format_id(head.id))
+                        .collect();
+                    serde_json::json!({
+                        "archive": format_id(archive.event),
+                        "current_heads": current,
+                        "path": archive.path,
+                        "bytes": archive.content.length,
+                        "archived_at": archive.archived_at,
+                    })
+                })
+                .collect(),
+        ))
+    }
+
+    pub fn restore_archive(
+        &mut self,
+        archived: EventId,
+        reviewed: EventId,
+    ) -> Result<EventId, HostError> {
+        let _lock = self.lock_state()?;
+        restore_archived_file(
+            &mut self.store,
+            &self.roster,
+            &self.signer,
+            &self.completed,
+            archived,
+            reviewed,
+        )
+        .map_err(HostError::Publish)
     }
 
     pub fn resolve_conflict(

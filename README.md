@@ -102,6 +102,8 @@ cargo run --locked --release -p p2p-sync-core --bin p2p-send -- serve .\trial-se
 
 配信側の状態に競合がある場合は、`p2p-send conflicts <server.json> <state-dir>` で候補IDを確認できます。`p2p-send resolve <server.json> <state-dir> <採用する候補ID> <ほかの候補ID> ...` では、確認した候補をすべて指定します。候補が増減した場合は再確認が必要です。削除候補を採用すると共有上の削除を維持します。
 
+`p2p-send history <server.json> <state-dir>` は48時間以内の履歴と、同じファイルの現在の版IDを表示します。`p2p-send restore <server.json> <state-dir> <archive-id> <reviewed-current-id>` は、選んだ履歴を新しい署名付き変更として復元します。確認した現在の版が変わった場合、競合中の場合、復元先に別の共有項目がある場合は保留します。ファイルIDを維持し、置き換える現在の内容も履歴へ保存します。フォルダー自体の復元とGUIからの復元は今後の対応です。
+
 譜面集をまとめて登録する場合は、`publish` の代わりに `publish-tree` を使います。
 
 ```powershell

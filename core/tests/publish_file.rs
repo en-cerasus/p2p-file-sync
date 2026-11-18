@@ -188,6 +188,56 @@ fn updates_and_tombstones_share_the_same_object_and_retain_previous_versions() {
 }
 
 #[test]
+fn archived_file_restoration_reuses_identity_and_rejects_a_stale_review() {
+    use p2p_sync_core::publish::restore_archived_file;
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("song.tja");
+    std::fs::write(&source, b"first").unwrap();
+    let key = PeerSigningKey::from_bytes(&[19; 32]);
+    let peer = key.verifying_key().to_bytes();
+    let roster = Roster::new([4; 16], 1, [(peer, Role::Writer)].into());
+    let blobs = BlobStore::open(directory.path().join("files")).unwrap();
+    let mut store = Store::open(":memory:", roster.membership().clone()).unwrap();
+    let first = publish_file(&source, &mut store, &roster, &key, &blobs, None, "song.tja").unwrap();
+    let object = store.replica().get(first).unwrap().object;
+    std::fs::write(&source, b"second").unwrap();
+    let second = revise_file(Some(&source), &mut store, &roster, &key, &blobs, first).unwrap();
+    let deletion = revise_file(None, &mut store, &roster, &key, &blobs, second).unwrap();
+    assert!(matches!(
+        restore_archived_file(&mut store, &roster, &key, &blobs, first, second),
+        Err(PublishError::StaleBase)
+    ));
+    let restored =
+        restore_archived_file(&mut store, &roster, &key, &blobs, first, deletion).unwrap();
+    let event = roster
+        .verify_event(store.signed_event(restored).unwrap())
+        .unwrap();
+    assert_eq!(event.object, object);
+    assert_eq!(
+        event.change.entry().unwrap().kind,
+        p2p_sync_core::replica::EntryKind::File(sha256(b"first"))
+    );
+    assert!(store
+        .replica()
+        .get(deletion)
+        .unwrap()
+        .change
+        .entry()
+        .is_none());
+    assert_eq!(
+        store.archives(std::time::SystemTime::now()).unwrap().len(),
+        2
+    );
+    let reverted =
+        restore_archived_file(&mut store, &roster, &key, &blobs, second, restored).unwrap();
+    assert_eq!(store.replica().get(reverted).unwrap().object, object);
+    assert_eq!(
+        store.archives(std::time::SystemTime::now()).unwrap().len(),
+        3
+    );
+}
+
+#[test]
 fn migration_baseline_rejects_old_events_and_preserves_deleted_identity() {
     use p2p_sync_core::{
         generation::{BaselineError, GenerationBaseline, GenerationTransition},

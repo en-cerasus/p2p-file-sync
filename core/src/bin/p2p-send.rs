@@ -60,6 +60,8 @@ fn run() -> Result<(), String> {
                 | "move"
                 | "conflicts"
                 | "resolve"
+                | "history"
+                | "restore"
                 | "catch-up"
                 | "prepare-generation"
                 | "verify-generation"
@@ -75,12 +77,14 @@ fn run() -> Result<(), String> {
         || (mode == Some("serve") && args.len() != 3)
         || (mode == Some("conflicts") && args.len() != 3)
         || (mode == Some("resolve") && args.len() < 5)
+        || (mode == Some("history") && args.len() != 3)
+        || (mode == Some("restore") && args.len() != 5)
         || (mode == Some("catch-up") && args.len() != 4)
         || (mode == Some("prepare-generation") && args.len() != 6)
         || (mode == Some("verify-generation") && args.len() != 5)
     {
         return Err(
-            "Usage: p2p-send setup <new-dir> <bind-ip:port> <peer-ip:port> [receivers] [writers]\n       p2p-send publish <server.json> <state-dir> <file> [file ...]\n       p2p-send publish-tree <server.json> <state-dir> <folder>\n       p2p-send refresh-tree <server.json> <state-dir> <folder>\n       p2p-send update <server.json> <state-dir> <shared/path> <source>\n       p2p-send delete <server.json> <state-dir> <shared/path>\n       p2p-send move <server.json> <state-dir> <old/path> <new/path>\n       p2p-send conflicts <server.json> <state-dir>\n       p2p-send catch-up <server.json> <state-dir> <direct.json>\n       p2p-send prepare-generation <server.json> <state-dir> <next-server.json> <administrator-seed-file> <new-dir>\n       p2p-send verify-generation <previous-server.json> <next-server.json> <administrator-public-key> <bundle-dir>\n       p2p-send resolve <server.json> <state-dir> <chosen-id> <other-id> [other-id ...]\n       p2p-send serve <server.json> <state-dir>\n       p2p-send serve-peer <server.json> <state-dir> <direct.json> <interval-seconds>\n       p2p-send serve-tree <server.json> <state-dir> <folder> <interval-seconds>"
+            "Usage: p2p-send setup <new-dir> <bind-ip:port> <peer-ip:port> [receivers] [writers]\n       p2p-send publish <server.json> <state-dir> <file> [file ...]\n       p2p-send publish-tree <server.json> <state-dir> <folder>\n       p2p-send refresh-tree <server.json> <state-dir> <folder>\n       p2p-send update <server.json> <state-dir> <shared/path> <source>\n       p2p-send delete <server.json> <state-dir> <shared/path>\n       p2p-send move <server.json> <state-dir> <old/path> <new/path>\n       p2p-send conflicts <server.json> <state-dir>\n       p2p-send history <server.json> <state-dir>\n       p2p-send restore <server.json> <state-dir> <archive-id> <reviewed-current-id>\n       p2p-send catch-up <server.json> <state-dir> <direct.json>\n       p2p-send prepare-generation <server.json> <state-dir> <next-server.json> <administrator-seed-file> <new-dir>\n       p2p-send verify-generation <previous-server.json> <next-server.json> <administrator-public-key> <bundle-dir>\n       p2p-send resolve <server.json> <state-dir> <chosen-id> <other-id> [other-id ...]\n       p2p-send serve <server.json> <state-dir>\n       p2p-send serve-peer <server.json> <state-dir> <direct.json> <interval-seconds>\n       p2p-send serve-tree <server.json> <state-dir> <folder> <interval-seconds>"
                 .to_string(),
         );
     }
@@ -98,6 +102,23 @@ fn run() -> Result<(), String> {
     }
     let mut sender = Sender::open(Path::new(&args[1]), Path::new(&args[2]))
         .map_err(|error| format!("Could not open sender configuration: {error:?}"))?;
+    if mode == Some("history") {
+        let history = sender
+            .history()
+            .map_err(|error| format!("Could not read history: {error:?}"))?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&history).map_err(|error| error.to_string())?
+        );
+        return Ok(());
+    }
+    if mode == Some("restore") {
+        let event = sender
+            .restore_archive(parse_event_id(&args[3])?, parse_event_id(&args[4])?)
+            .map_err(|error| format!("Could not restore archive: {error:?}"))?;
+        println!("Recorded restoration (event {})", event.sequence);
+        return Ok(());
+    }
     if mode == Some("prepare-generation") {
         let count = sender
             .prepare_generation(

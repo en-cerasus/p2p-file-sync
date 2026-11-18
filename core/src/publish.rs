@@ -518,6 +518,89 @@ fn verified_content(
     Ok(blob)
 }
 
+/// Restore an unexpired archived file as a revision of the reviewed current
+/// head. History is retained and the restored object keeps its identity.
+pub fn restore_archived_file(
+    store: &mut Store,
+    roster: &Roster,
+    key: &PeerSigningKey,
+    completed: &BlobStore,
+    archived: EventId,
+    reviewed: EventId,
+) -> Result<EventId, PublishError> {
+    let peer = authorize(store, roster, key)?;
+    store.refresh().map_err(PublishError::Store)?;
+    let archive = store
+        .archives(std::time::SystemTime::now())
+        .map_err(PublishError::Store)?
+        .into_iter()
+        .find(|archive| archive.event == archived)
+        .ok_or(PublishError::StaleBase)?;
+    let replica = store.replica();
+    let mut heads = replica.heads(archive.object);
+    let current = heads.next().ok_or(PublishError::StaleBase)?;
+    if current.id != reviewed || heads.next().is_some() {
+        return Err(PublishError::StaleBase);
+    }
+    drop(heads);
+    let entry = replica
+        .get(archived)
+        .and_then(|event| event.change.entry())
+        .filter(|entry| entry.kind == EntryKind::File(archive.content.hash))
+        .cloned()
+        .ok_or(PublishError::StaleBase)?;
+    completed
+        .open_verified(archive.content)
+        .map_err(PublishError::Io)?;
+    let projection = Projection::new(replica);
+    if !projection.available_to(archive.object, &entry) {
+        return Err(PublishError::NameConflict);
+    }
+    if let Some(parent) = entry.parent {
+        if projection.path(parent).is_err()
+            || !replica.heads(parent).any(|head| {
+                head.change
+                    .entry()
+                    .is_some_and(|entry| entry.kind == EntryKind::Directory)
+            })
+        {
+            return Err(PublishError::InvalidParent);
+        }
+    }
+    if current.change.entry() == Some(&entry) {
+        return Ok(reviewed);
+    }
+    // Save the replaced current version, just like an ordinary publication.
+    let previous = match current.change.entry().map(|entry| &entry.kind) {
+        Some(EntryKind::File(hash)) => Some(AppliedFile {
+            event: reviewed,
+            contents: Some(verified_content(completed, *hash)?),
+            path: Some(
+                projection
+                    .path(archive.object)
+                    .map_err(|_| PublishError::StaleBase)?
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            ),
+        }),
+        None => None,
+        Some(EntryKind::Directory) => return Err(PublishError::StaleBase),
+    };
+    append_change(
+        store,
+        roster,
+        key,
+        peer,
+        archive.object,
+        Change::Revise {
+            base: reviewed,
+            entry: Some(entry),
+        },
+        previous,
+    )
+}
+
 fn append_change(
     store: &mut Store,
     roster: &Roster,
