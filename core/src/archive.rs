@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     io,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -34,34 +34,46 @@ pub struct ProtectedStorage {
 }
 
 impl Store {
-    /// Count unique contents required by unconfirmed peers or a live
-    /// conflict. Missing content is reported independently of disk usage.
-    pub fn protected_storage(&self, blobs: &BlobStore) -> io::Result<ProtectedStorage> {
+    /// List unique contents required by unconfirmed peers or a live conflict.
+    pub fn protected_originals(&self, blobs: &BlobStore) -> io::Result<Vec<ProtectedOriginal>> {
         let replica = self.replica();
-        let hashes: BTreeSet<_> = self
-            .protections()
-            .filter(|protection| {
-                !protection.can_release(replica.clock())
-                    || replica
-                        .get(protection.original())
-                        .is_some_and(|event| replica.has_conflict(event.object))
-            })
-            .map(|protection| protection.content())
-            .collect();
-        let mut result = ProtectedStorage::default();
-        for hash in hashes {
-            match blobs.open_candidate(hash) {
-                Ok(file) => {
-                    let metadata = file.metadata()?;
-                    if !metadata.is_file() {
-                        result.missing += 1;
-                        continue;
+        let mut originals = BTreeMap::<_, BTreeSet<String>>::new();
+        for protection in self.protections() {
+            let event = replica.get(protection.original());
+            if protection.can_release(replica.clock())
+                && !event.is_some_and(|event| replica.has_conflict(event.object))
+            {
+                continue;
+            }
+            let names = originals.entry(protection.content()).or_default();
+            if let Some(entry) = event.and_then(|event| event.change.entry()) {
+                names.insert(entry.name.clone());
+            }
+        }
+        originals
+            .into_iter()
+            .map(|(hash, names)| {
+                let bytes = match blobs.open_candidate(hash) {
+                    Ok(file) => {
+                        let metadata = file.metadata()?;
+                        metadata.is_file().then_some(metadata.len())
                     }
-                    result.files += 1;
-                    result.bytes = result.bytes.saturating_add(metadata.len());
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => result.missing += 1,
-                Err(error) => return Err(error),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                    Err(error) => return Err(error),
+                };
+                Ok(ProtectedOriginal { hash, names, bytes })
+            })
+            .collect()
+    }
+
+    pub fn protected_storage(&self, blobs: &BlobStore) -> io::Result<ProtectedStorage> {
+        let mut result = ProtectedStorage::default();
+        for original in self.protected_originals(blobs)? {
+            if let Some(bytes) = original.bytes {
+                result.files += 1;
+                result.bytes = result.bytes.saturating_add(bytes);
+            } else {
+                result.missing += 1;
             }
         }
         Ok(result)
@@ -97,6 +109,14 @@ impl Store {
             [threshold],
         )?)
     }
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize)]
+pub struct ProtectedOriginal {
+    pub hash: crate::replica::ContentHash,
+    pub names: BTreeSet<String>,
+    /// None when the local store lacks the original contents.
+    pub bytes: Option<u64>,
 }
 
 pub(crate) fn record_archive(

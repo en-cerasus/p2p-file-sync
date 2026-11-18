@@ -713,7 +713,13 @@ fn protected_storage_counts_unique_content_and_reports_missing_blobs() {
 
     let report = store.protected_storage(&f.blobs).unwrap();
     assert_eq!((report.files, report.bytes, report.missing), (1, 3, 0));
+    let originals = store.protected_originals(&f.blobs).unwrap();
+    assert_eq!(originals.len(), 1);
+    assert_eq!(originals[0].hash, old.hash);
+    assert_eq!(originals[0].bytes, Some(3));
+    assert!(originals[0].names.contains(&content_entry(old.hash).name));
     let empty = BlobStore::open(f.folder.path().join("empty-blobs")).unwrap();
     let report = store.protected_storage(&empty).unwrap();
     assert_eq!((report.files, report.bytes, report.missing), (0, 0, 1));
+    assert_eq!(store.protected_originals(&empty).unwrap()[0].bytes, None);
 }
