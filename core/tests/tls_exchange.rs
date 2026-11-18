@@ -388,6 +388,15 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
 
     let next_config = setup.join("sender/next.json");
     legacy["generation"] = 2.into();
+    let revoked = setup.join("receiver-2/direct.json");
+    let revoked_seed = std::fs::read(revoked.with_file_name("event-key.bin")).unwrap();
+    let revoked_key = PeerSigningKey::from_bytes(revoked_seed.as_slice().try_into().unwrap());
+    let revoked_peer = encode_hex(revoked_key.verifying_key().as_bytes());
+    assert!(legacy["members"]
+        .as_object_mut()
+        .unwrap()
+        .remove(&revoked_peer)
+        .is_some());
     std::fs::write(&next_config, legacy.to_string()).unwrap();
     let admin = path.join("admin-test.bin");
     std::fs::write(&admin, [47; 32]).unwrap();
@@ -577,10 +586,16 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
     let listener = upgraded.bind().unwrap();
     config["address"] = listener.local_addr().unwrap().to_string().into();
     config["generation"] = 2.into();
+    config["members"] = legacy["members"].clone();
     let unseeded = receiver.with_file_name("unseeded.json");
     std::fs::write(&unseeded, config.to_string()).unwrap();
     config["migration"] = migration;
     std::fs::write(&receiver, config.to_string()).unwrap();
+    // The removed peer may know the new roster and checkpoint. Keep its
+    // original certificate and attempt the new TLS scope anyway.
+    let mut revoked_config = config.clone();
+    revoked_config.as_object_mut().unwrap().remove("event_key");
+    std::fs::write(&revoked, revoked_config.to_string()).unwrap();
     let destination = path.join("new-generation-destination");
     std::fs::create_dir(&destination).unwrap();
     std::thread::scope(|threads| {
@@ -591,6 +606,12 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
                     direct::DirectError::Tls(_)
                 ))
             ));
+            assert!(matches!(
+                upgraded.serve(listener.accept().unwrap().0),
+                Err(p2p_sync_core::host::HostError::Direct(
+                    direct::DirectError::Tls(TlsError::UnexpectedCertificate)
+                ))
+            ));
             upgraded.serve(listener.accept().unwrap().0).unwrap();
         });
         assert!(matches!(
@@ -599,6 +620,8 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
                 direct::DirectError::Tls(_)
             ))
         ));
+        assert!(pull_from_config(&revoked, &path.join("revoked-state"), &destination).is_err());
+        assert_eq!(std::fs::read_dir(&destination).unwrap().count(), 0);
         let report = pull_from_config(&receiver, &path.join("client-state"), &destination).unwrap();
         assert_eq!(report.events_added, 1);
         assert_eq!(report.files_published, 1);
