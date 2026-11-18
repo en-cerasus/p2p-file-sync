@@ -63,6 +63,7 @@ fn run() -> Result<(), String> {
                 | "history"
                 | "restore"
                 | "catch-up"
+                | "import-confirmations"
                 | "prepare-generation"
                 | "verify-generation"
                 | "serve"
@@ -80,11 +81,12 @@ fn run() -> Result<(), String> {
         || (mode == Some("history") && args.len() != 3)
         || (mode == Some("restore") && args.len() != 5)
         || (mode == Some("catch-up") && args.len() != 4)
+        || (mode == Some("import-confirmations") && args.len() != 6)
         || (mode == Some("prepare-generation") && args.len() != 6)
         || (mode == Some("verify-generation") && args.len() != 5)
     {
         return Err(
-            "Usage: p2p-send setup <new-dir> <bind-ip:port> <peer-ip:port> [receivers] [writers]\n       p2p-send publish <server.json> <state-dir> <file> [file ...]\n       p2p-send publish-tree <server.json> <state-dir> <folder>\n       p2p-send refresh-tree <server.json> <state-dir> <folder>\n       p2p-send update <server.json> <state-dir> <shared/path> <source>\n       p2p-send delete <server.json> <state-dir> <shared/path>\n       p2p-send move <server.json> <state-dir> <old/path> <new/path>\n       p2p-send conflicts <server.json> <state-dir>\n       p2p-send history <server.json> <state-dir>\n       p2p-send restore <server.json> <state-dir> <archive-id> <reviewed-current-id>\n       p2p-send catch-up <server.json> <state-dir> <direct.json>\n       p2p-send prepare-generation <server.json> <state-dir> <next-server.json> <administrator-seed-file> <new-dir>\n       p2p-send verify-generation <previous-server.json> <next-server.json> <administrator-public-key> <bundle-dir>\n       p2p-send resolve <server.json> <state-dir> <chosen-id> <other-id> [other-id ...]\n       p2p-send serve <server.json> <state-dir>\n       p2p-send serve-peer <server.json> <state-dir> <direct.json> <interval-seconds>\n       p2p-send serve-tree <server.json> <state-dir> <folder> <interval-seconds>"
+            "Usage: p2p-send setup <new-dir> <bind-ip:port> <peer-ip:port> [receivers] [writers]\n       p2p-send publish <server.json> <state-dir> <file> [file ...]\n       p2p-send publish-tree <server.json> <state-dir> <folder>\n       p2p-send refresh-tree <server.json> <state-dir> <folder>\n       p2p-send update <server.json> <state-dir> <shared/path> <source>\n       p2p-send delete <server.json> <state-dir> <shared/path>\n       p2p-send move <server.json> <state-dir> <old/path> <new/path>\n       p2p-send conflicts <server.json> <state-dir>\n       p2p-send history <server.json> <state-dir>\n       p2p-send restore <server.json> <state-dir> <archive-id> <reviewed-current-id>\n       p2p-send catch-up <server.json> <state-dir> <direct.json>\n       p2p-send import-confirmations <server.json> <server-state-dir> <direct.json> <receiver-state-dir> <destination>\n       p2p-send prepare-generation <server.json> <state-dir> <next-server.json> <administrator-seed-file> <new-dir>\n       p2p-send verify-generation <previous-server.json> <next-server.json> <administrator-public-key> <bundle-dir>\n       p2p-send resolve <server.json> <state-dir> <chosen-id> <other-id> [other-id ...]\n       p2p-send serve <server.json> <state-dir>\n       p2p-send serve-peer <server.json> <state-dir> <direct.json> <interval-seconds>\n       p2p-send serve-tree <server.json> <state-dir> <folder> <interval-seconds>"
                 .to_string(),
         );
     }
@@ -135,6 +137,17 @@ fn run() -> Result<(), String> {
             .catch_up(Path::new(&args[3]))
             .map_err(|error| format!("Could not synchronize serving cache: {error:?}"))?;
         println!("Imported {added} event(s).");
+        return Ok(());
+    }
+    if mode == Some("import-confirmations") {
+        let count = sender
+            .import_local_confirmations(
+                Path::new(&args[3]),
+                Path::new(&args[4]),
+                Path::new(&args[5]),
+            )
+            .map_err(|error| format!("Could not import confirmations: {error:?}"))?;
+        println!("Processed {count} signed confirmation(s).");
         return Ok(());
     }
     if mode == Some("conflicts") {

@@ -14,7 +14,7 @@ use rustls::{
 use serde::Deserialize;
 
 use crate::{
-    auth::{PeerSigningKey, Role, Roster},
+    auth::{AuthError, PeerSigningKey, Role, Roster},
     blob::BlobStore,
     direct::{self, DirectError, PeerEndpoint},
     generation::{
@@ -543,6 +543,75 @@ impl Sender {
         Ok(self.store.event_order().len().saturating_sub(before))
     }
 
+    /// Merge signed confirmations from this device's receiving state into
+    /// its serving state. Both states must have the same trusted roster and
+    /// generation; missing successor events are retried on a later import.
+    pub fn import_local_confirmations(
+        &mut self,
+        configuration: &Path,
+        receiver_state_root: &Path,
+        destination: &Path,
+    ) -> Result<usize, HostError> {
+        let config: Config =
+            serde_json::from_slice(&read_bounded(configuration, MAX_CONFIG_BYTES)?)
+                .map_err(|_| HostError::Configuration)?;
+        let roster = build_roster(&config.share, config.generation, config.members)?;
+        if roster.membership() != self.roster.membership() || !destination.is_dir() {
+            return Err(HostError::Configuration);
+        }
+        let destination = destination.canonicalize().map_err(HostError::Io)?;
+        let destination_id = crate::sha256(destination.as_os_str().as_encoded_bytes());
+        let destination_id: String = destination_id
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let source_root = receiver_state_root
+            .join(config.share.to_ascii_lowercase())
+            .join(config.generation.to_string())
+            .join(destination_id);
+        if !source_root.join("sync.db").is_file() {
+            return Err(HostError::Configuration);
+        }
+        let source_completed = BlobStore::open(source_root.join("files")).map_err(HostError::Io)?;
+        let config_directory = configuration.parent().ok_or(HostError::Configuration)?;
+        let (source, baseline_digest) = open_host_store(
+            &source_root,
+            &source_completed,
+            &roster,
+            config_directory,
+            config.migration.as_ref(),
+        )?;
+        if baseline_digest != self.baseline_digest {
+            return Err(HostError::Configuration);
+        }
+        let _lock = self.lock_state()?;
+        self.store.refresh().map_err(HostError::Store)?;
+        let mut cursor = 0_i64;
+        let mut imported = 0;
+        loop {
+            let page = source
+                .signed_confirmations_page(cursor, 128)
+                .map_err(HostError::Store)?;
+            if page.is_empty() {
+                break;
+            }
+            for (id, wire) in page {
+                let confirmation = self
+                    .roster
+                    .verify_confirmation(&wire)
+                    .map_err(HostError::Authentication)?;
+                if self.store.replica().get(confirmation.successor).is_some() {
+                    self.roster
+                        .receive_confirmation(&mut self.store, &wire)
+                        .map_err(HostError::Authentication)?;
+                    imported += 1;
+                }
+                cursor = id;
+            }
+        }
+        Ok(imported)
+    }
+
     /// Export migration data. Write the signed transition last so an
     /// interrupted export cannot be mistaken for a completed bundle.
     pub fn prepare_generation(
@@ -637,6 +706,7 @@ enum ConfigRole {
 #[derive(Debug)]
 pub enum HostError {
     Configuration,
+    Authentication(AuthError),
     Io(std::io::Error),
     Store(StoreError),
     Tls(TlsError),

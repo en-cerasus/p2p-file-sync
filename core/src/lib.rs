@@ -345,6 +345,7 @@ unsafe fn pull_to_output<T: From<host::PullSummaryV3>>(
             host::HostError::Tls(_) => 4,
             host::HostError::Direct(direct::DirectError::Cancelled) => 7,
             host::HostError::Direct(_)
+            | host::HostError::Authentication(_)
             | host::HostError::Publish(_)
             | host::HostError::Transition(_)
             | host::HostError::CheckpointData(_)

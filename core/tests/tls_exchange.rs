@@ -266,6 +266,139 @@ fn encode_hex(bytes: &[u8]) -> String {
 }
 
 #[test]
+fn local_receiver_confirmations_can_join_a_serving_cache() {
+    use p2p_sync_core::{
+        auth::{PeerSigningKey, Role, Roster},
+        host::Sender,
+        replica::{Change, Entry, EntryKind, Event, EventId, VersionVector},
+        retention::Confirmation,
+        store::Store,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let setup = root.path().join("setup");
+    assert!(std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
+        .arg("setup")
+        .arg(&setup)
+        .args(["127.0.0.1:8765", "127.0.0.1:8765"])
+        .status()
+        .unwrap()
+        .success());
+    let writer = PeerSigningKey::from_bytes(
+        &std::fs::read(setup.join("sender/event-key.bin"))
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    );
+    let reader = PeerSigningKey::from_bytes(
+        &std::fs::read(setup.join("receiver/event-key.bin"))
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    );
+    let writer_id = writer.verifying_key().to_bytes();
+    let reader_id = reader.verifying_key().to_bytes();
+    let server_config = setup.join("sender/server.json");
+    let direct_config = setup.join("receiver/direct.json");
+    let config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&server_config).unwrap()).unwrap();
+    let share = config["share"].as_str().unwrap();
+    let share_bytes: [u8; 16] = (0..16)
+        .map(|index| u8::from_str_radix(&share[index * 2..index * 2 + 2], 16).unwrap())
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap();
+    let roster = Roster::new(
+        share_bytes,
+        1,
+        [(writer_id, Role::Writer), (reader_id, Role::Reader)].into(),
+    );
+    let object = [9; 16];
+    let first = Event {
+        id: EventId {
+            peer: writer_id,
+            sequence: 1,
+        },
+        context: VersionVector::new(),
+        object,
+        change: Change::Create(Entry {
+            parent: None,
+            name: "song.tja".into(),
+            kind: EntryKind::File([3; 32]),
+        }),
+    };
+    let next = Event {
+        id: EventId {
+            peer: writer_id,
+            sequence: 2,
+        },
+        context: [(writer_id, 1)].into(),
+        object,
+        change: Change::Revise {
+            base: first.id,
+            entry: Some(Entry {
+                parent: None,
+                name: "song.tja".into(),
+                kind: EntryKind::File([4; 32]),
+            }),
+        },
+    };
+    let server_state = root.path().join("server-state");
+    let mut server = Sender::open(&server_config, &server_state).unwrap();
+    let server_db = server_state.join(share).join("1/sync.db");
+    let destination = root.path().join("destination");
+    std::fs::create_dir(&destination).unwrap();
+    let receive_state = root.path().join("receive-state");
+    let destination_id = encode_hex(&sha256(
+        destination
+            .canonicalize()
+            .unwrap()
+            .as_os_str()
+            .as_encoded_bytes(),
+    ));
+    let receive_db = receive_state
+        .join(share)
+        .join("1")
+        .join(destination_id)
+        .join("sync.db");
+    std::fs::create_dir_all(receive_db.parent().unwrap()).unwrap();
+    let mut source = Store::open(&receive_db, roster.membership().clone()).unwrap();
+    let mut target = Store::open(&server_db, roster.membership().clone()).unwrap();
+    for event in [&first, &next] {
+        let wire = roster.sign_event(&writer, event).unwrap();
+        roster.receive(&mut source, &wire).unwrap();
+        roster.receive(&mut target, &wire).unwrap();
+    }
+    let confirmation = Confirmation {
+        generation: 1,
+        peer: reader_id,
+        object,
+        successor: next.id,
+        sent_through: 0,
+    };
+    let wire = roster.sign_confirmation(&reader, &confirmation).unwrap();
+    roster.receive_confirmation(&mut source, &wire).unwrap();
+    drop(source);
+    drop(target);
+    assert_eq!(
+        server
+            .import_local_confirmations(&direct_config, &receive_state, &destination)
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        server
+            .import_local_confirmations(&direct_config, &receive_state, &destination)
+            .unwrap(),
+        1
+    );
+    let reopened = Store::open(&server_db, roster.membership().clone()).unwrap();
+    assert_eq!(reopened.signed_confirmations_page(0, 128).unwrap().len(), 1);
+    assert!(server
+        .import_local_confirmations(&direct_config, &receive_state, root.path())
+        .is_err());
+}
+
+#[test]
 fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
     use p2p_sync_core::host::{pull_from_config, Sender};
 
