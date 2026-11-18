@@ -5,6 +5,7 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Threading;
 using Microsoft.Win32;
 
 internal static class Program
@@ -21,6 +22,15 @@ internal sealed class SyncWindow : Window
     private readonly Button configButton = new() { Content = "設定ファイルを選択" };
     private readonly Button destinationButton = new() { Content = "保存先を選択" };
     private readonly Button syncButton = new() { Content = "同期を開始", IsEnabled = false };
+    private readonly CheckBox autoSync = new()
+    {
+        Content = "10 秒ごとに自動同期",
+        Margin = new Thickness(0, 12, 0, 0),
+        IsEnabled = false,
+    };
+    private readonly DispatcherTimer syncTimer = new() { Interval = TimeSpan.FromSeconds(10) };
+    private bool syncing;
+    private bool closing;
     private string? configuration;
     private string? destination;
 
@@ -37,30 +47,70 @@ internal sealed class SyncWindow : Window
         syncButton.Margin = new Thickness(0, 16, 0, 0);
         syncButton.HorizontalAlignment = HorizontalAlignment.Left;
         panel.Children.Add(syncButton);
+        panel.Children.Add(autoSync);
         panel.Children.Add(result);
         Content = panel;
 
-        configButton.Click += (_, _) =>
+        configButton.Click += (_, _) => ChoosePath(() =>
         {
             var picker = new OpenFileDialog { Filter = "接続設定 (*.json)|*.json", CheckFileExists = true };
             if (picker.ShowDialog(this) == true)
             {
                 configuration = picker.FileName;
                 configLabel.Text = configuration;
-                syncButton.IsEnabled = destination is not null;
             }
-        };
-        destinationButton.Click += (_, _) =>
+        });
+        destinationButton.Click += (_, _) => ChoosePath(() =>
         {
             var picker = new OpenFolderDialog { Title = "同期先フォルダー" };
             if (picker.ShowDialog(this) == true)
             {
                 destination = picker.FolderName;
                 destinationLabel.Text = destination;
-                syncButton.IsEnabled = configuration is not null;
             }
-        };
+        });
         syncButton.Click += async (_, _) => await RunSync();
+        autoSync.Checked += async (_, _) => await RunSync();
+        autoSync.Unchecked += (_, _) => syncTimer.Stop();
+        syncTimer.Tick += async (_, _) => await RunSync();
+        Closed += (_, _) =>
+        {
+            closing = true;
+            syncTimer.Stop();
+        };
+    }
+
+    private void ChoosePath(Action choose)
+    {
+        syncTimer.Stop();
+        try
+        {
+            choose();
+        }
+        finally
+        {
+            UpdateControls();
+        }
+    }
+
+    private void UpdateControls()
+    {
+        if (closing)
+        {
+            return;
+        }
+        bool ready = configuration is not null && destination is not null;
+        configButton.IsEnabled = destinationButton.IsEnabled = !syncing;
+        syncButton.IsEnabled = ready && !syncing;
+        autoSync.IsEnabled = ready;
+        if (ready && !syncing && autoSync.IsChecked == true)
+        {
+            syncTimer.Start();
+        }
+        else
+        {
+            syncTimer.Stop();
+        }
     }
 
     private static void AddPicker(StackPanel panel, Button button, TextBlock label, string placeholder)
@@ -74,11 +124,12 @@ internal sealed class SyncWindow : Window
 
     private async Task RunSync()
     {
-        if (configuration is not string config || destination is not string root)
+        if (closing || syncing || configuration is not string config || destination is not string root)
         {
             return;
         }
-        configButton.IsEnabled = destinationButton.IsEnabled = syncButton.IsEnabled = false;
+        syncing = true;
+        UpdateControls();
         result.Text = "同期中…";
         var state = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "P2PSync");
         try
@@ -94,7 +145,8 @@ internal sealed class SyncWindow : Window
         }
         finally
         {
-            configButton.IsEnabled = destinationButton.IsEnabled = syncButton.IsEnabled = true;
+            syncing = false;
+            UpdateControls();
         }
     }
 }

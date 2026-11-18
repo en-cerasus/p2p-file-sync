@@ -12,7 +12,7 @@ cargo build --locked --release
 dotnet run --project windows/P2PSync.csproj -c Release
 ```
 
-画面で接続設定のJSONと保存先フォルダーを選び、「同期を開始」を押します。
+画面で接続設定のJSONと保存先フォルダーを選び、「同期を開始」を押します。「10 秒ごとに自動同期」を有効にする場合は、前回の同期完了から10秒後に次回の受信を開始します。ウィンドウを閉じると自動同期は止まります。
 
 ## iOS
 
