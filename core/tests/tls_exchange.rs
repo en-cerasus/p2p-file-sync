@@ -463,6 +463,91 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
 }
 
 #[test]
+fn generated_writers_use_distinct_credentials_and_share_their_changes() {
+    use p2p_sync_core::host::{pull_from_config, Sender};
+
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    let setup = root.join("setup");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
+        .arg("setup")
+        .arg(&setup)
+        .args(["127.0.0.1:8750", "127.0.0.1:8750", "1", "2"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let config = |name: &str| {
+        let path = setup.join(name).join("server.json");
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        json["bind"] = "127.0.0.1:0".into();
+        std::fs::write(&path, json.to_string()).unwrap();
+        path
+    };
+    let mut first = Sender::open(&config("sender"), &root.join("first")).unwrap();
+    let mut second = Sender::open(&config("writer-2"), &root.join("second")).unwrap();
+    let first_file = root.join("first.tja");
+    let second_file = root.join("second.tja");
+    std::fs::write(&first_file, b"writer one").unwrap();
+    std::fs::write(&second_file, b"writer two").unwrap();
+    assert_ne!(
+        first.publish(&first_file).unwrap().peer,
+        second.publish(&second_file).unwrap().peer
+    );
+    let first_listener = first.bind().unwrap();
+    let update_address = |path: &std::path::Path, listener: &TcpListener| {
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        json["address"] = listener.local_addr().unwrap().to_string().into();
+        std::fs::write(path, json.to_string()).unwrap();
+    };
+    let peer_config = setup.join("writer-2/direct.json");
+    update_address(&peer_config, &first_listener);
+    std::thread::scope(|threads| {
+        let serving = threads.spawn(move || {
+            first.serve(first_listener.accept().unwrap().0).unwrap();
+        });
+        assert_eq!(second.catch_up(&peer_config).unwrap(), 1);
+        serving.join().unwrap();
+    });
+    let second_listener = second.bind().unwrap();
+    let receiver = setup.join("receiver/direct.json");
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&receiver).unwrap()).unwrap();
+    let endpoint = json["fallback_peers"][0].clone();
+    json["server_pin"] = endpoint["server_pin"].clone();
+    json.as_object_mut().unwrap().remove("fallback_peers");
+    std::fs::write(&receiver, json.to_string()).unwrap();
+    update_address(&receiver, &second_listener);
+    let destination = root.join("received");
+    std::fs::create_dir(&destination).unwrap();
+    std::thread::scope(|threads| {
+        let serving = threads.spawn(move || {
+            second.serve(second_listener.accept().unwrap().0).unwrap();
+        });
+        assert_eq!(
+            pull_from_config(&receiver, &root.join("receiver"), &destination)
+                .unwrap()
+                .files_published,
+            2
+        );
+        serving.join().unwrap();
+    });
+    assert_eq!(
+        std::fs::read(destination.join("first.tja")).unwrap(),
+        b"writer one"
+    );
+    assert_eq!(
+        std::fs::read(destination.join("second.tja")).unwrap(),
+        b"writer two"
+    );
+}
+
+#[test]
 fn running_sender_refreshes_its_source_and_serves_new_files() {
     use p2p_sync_core::host::{pull_from_config, Sender};
     use std::{

@@ -23,7 +23,7 @@ fn main() -> ExitCode {
 fn run() -> Result<(), String> {
     let args: Vec<_> = env::args_os().skip(1).collect();
     let mode = args.first().and_then(|arg| arg.to_str());
-    if mode == Some("setup") && (4..=5).contains(&args.len()) {
+    if mode == Some("setup") && (4..=6).contains(&args.len()) {
         let address = |index: usize| {
             args[index]
                 .to_str()
@@ -38,7 +38,14 @@ fn run() -> Result<(), String> {
                 .ok_or_else(|| "Specify the number of receiver configurations.".to_owned())?,
             None => 1,
         };
-        setup::create(output, address(2)?, address(3)?, receivers)?;
+        let writers = match args.get(5) {
+            Some(value) => value
+                .to_str()
+                .and_then(|count| count.parse().ok())
+                .ok_or_else(|| "Specify the number of writer configurations.".to_owned())?,
+            None => 1,
+        };
+        setup::create(output, address(2)?, address(3)?, receivers, writers)?;
         println!("Test connection files created in {}", output.display());
         return Ok(());
     }
@@ -69,7 +76,7 @@ fn run() -> Result<(), String> {
         || (mode == Some("catch-up") && args.len() != 4)
     {
         return Err(
-            "Usage: p2p-send setup <new-dir> <bind-ip:port> <peer-ip:port> [receivers]\n       p2p-send publish <server.json> <state-dir> <file> [file ...]\n       p2p-send publish-tree <server.json> <state-dir> <folder>\n       p2p-send refresh-tree <server.json> <state-dir> <folder>\n       p2p-send update <server.json> <state-dir> <shared/path> <source>\n       p2p-send delete <server.json> <state-dir> <shared/path>\n       p2p-send move <server.json> <state-dir> <old/path> <new/path>\n       p2p-send conflicts <server.json> <state-dir>\n       p2p-send catch-up <server.json> <state-dir> <direct.json>\n       p2p-send resolve <server.json> <state-dir> <chosen-id> <other-id> [other-id ...]\n       p2p-send serve <server.json> <state-dir>\n       p2p-send serve-peer <server.json> <state-dir> <direct.json> <interval-seconds>\n       p2p-send serve-tree <server.json> <state-dir> <folder> <interval-seconds>"
+            "Usage: p2p-send setup <new-dir> <bind-ip:port> <peer-ip:port> [receivers] [writers]\n       p2p-send publish <server.json> <state-dir> <file> [file ...]\n       p2p-send publish-tree <server.json> <state-dir> <folder>\n       p2p-send refresh-tree <server.json> <state-dir> <folder>\n       p2p-send update <server.json> <state-dir> <shared/path> <source>\n       p2p-send delete <server.json> <state-dir> <shared/path>\n       p2p-send move <server.json> <state-dir> <old/path> <new/path>\n       p2p-send conflicts <server.json> <state-dir>\n       p2p-send catch-up <server.json> <state-dir> <direct.json>\n       p2p-send resolve <server.json> <state-dir> <chosen-id> <other-id> [other-id ...]\n       p2p-send serve <server.json> <state-dir>\n       p2p-send serve-peer <server.json> <state-dir> <direct.json> <interval-seconds>\n       p2p-send serve-tree <server.json> <state-dir> <folder> <interval-seconds>"
                 .to_string(),
         );
     }
