@@ -37,6 +37,8 @@ internal sealed class SyncWindow : Window
         IsEnabled = false,
     };
     private readonly DispatcherTimer syncTimer = new() { Interval = TimeSpan.FromSeconds(10) };
+    private readonly System.Windows.Forms.NotifyIcon tray = new();
+    private readonly System.Windows.Forms.ToolStripMenuItem traySync = new("同期を開始");
     private bool syncing;
     private bool closing;
     private string? configuration;
@@ -62,6 +64,24 @@ internal sealed class SyncWindow : Window
         panel.Children.Add(originals);
         Content = panel;
         RestorePreferences();
+        var trayMenu = new System.Windows.Forms.ContextMenuStrip();
+        trayMenu.Items.Add("画面を開く", null, (_, _) => ShowWindow());
+        trayMenu.Items.Add(traySync);
+        trayMenu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
+        trayMenu.Items.Add("終了", null, (_, _) => Close());
+        tray.ContextMenuStrip = trayMenu;
+        tray.Icon = System.Drawing.SystemIcons.Application;
+        tray.Text = "P2P Sync";
+        tray.Visible = true;
+        tray.DoubleClick += (_, _) => ShowWindow();
+        traySync.Click += async (_, _) => await RunSync();
+        StateChanged += (_, _) =>
+        {
+            if (WindowState == WindowState.Minimized)
+            {
+                Hide();
+            }
+        };
 
         configButton.Click += (_, _) => ChoosePath(() =>
         {
@@ -105,6 +125,9 @@ internal sealed class SyncWindow : Window
             closing = true;
             syncTimer.Stop();
             cancellation?.Cancel();
+            tray.Visible = false;
+            tray.Dispose();
+            trayMenu.Dispose();
         };
         Loaded += async (_, _) =>
         {
@@ -114,6 +137,13 @@ internal sealed class SyncWindow : Window
                 await RunSync();
             }
         };
+    }
+
+    private void ShowWindow()
+    {
+        Show();
+        WindowState = WindowState.Normal;
+        Activate();
     }
 
     private void ChoosePath(Action choose)
@@ -207,6 +237,8 @@ internal sealed class SyncWindow : Window
         bool ready = configuration is not null && destination is not null;
         configButton.IsEnabled = destinationButton.IsEnabled = !syncing;
         syncButton.IsEnabled = ready && !syncing;
+        traySync.Enabled = ready && !syncing;
+        tray.Text = syncing ? "P2P Sync - 同期中" : "P2P Sync";
         cancelButton.IsEnabled = syncing && cancellation?.IsCancellationRequested == false;
         autoSync.IsEnabled = ready;
         if (ready && !syncing && autoSync.IsChecked == true)
