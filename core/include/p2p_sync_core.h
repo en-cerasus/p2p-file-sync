@@ -18,6 +18,20 @@ uint32_t p2p_sync_abi_version(void);
 int32_t p2p_sync_sha256(const uint8_t *input, size_t input_len,
                        uint8_t *output, size_t output_len);
 
+typedef struct {
+    uint64_t events_added;
+    uint64_t files_published;
+    uint64_t files_present;
+    uint64_t files_blocked;
+} p2p_sync_pull_summary;
+
+/* Blocking call. Output is written only on success. Return codes 2–6
+   indicate configuration, local storage, TLS setup, sync, or internal error. */
+int32_t p2p_sync_pull(const uint8_t *config, size_t config_len,
+                      const uint8_t *state, size_t state_len,
+                      const uint8_t *destination, size_t destination_len,
+                      p2p_sync_pull_summary *output);
+
 #ifdef __cplusplus
 }
 #endif

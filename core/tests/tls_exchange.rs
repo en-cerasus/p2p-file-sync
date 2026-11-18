@@ -6,11 +6,12 @@ use std::{
 use p2p_sync_core::{
     auth::{PeerSigningKey, Role, Roster},
     blob::{Blob, BlobStore},
-    direct::{self, PeerEndpoint},
+    direct,
+    host::PullSummary,
+    p2p_sync_pull,
     replica::{Change, Entry, EntryKind, Event, EventId, VersionVector},
     sha256,
     store::Store,
-    sync::{Destination, FileResult},
     tls::{certificate_pin, Client, Credentials, Server, TlsError},
 };
 use rcgen::{
@@ -18,11 +19,16 @@ use rcgen::{
     KeyUsagePurpose,
 };
 use rustls::{
-    pki_types::{PrivatePkcs8KeyDer, ServerName},
+    pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName},
     RootCertStore,
 };
 
-fn identities() -> (RootCertStore, Credentials, Credentials) {
+fn identities() -> (
+    RootCertStore,
+    CertificateDer<'static>,
+    Credentials,
+    Credentials,
+) {
     let mut params = CertificateParams::default();
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
@@ -42,7 +48,7 @@ fn identities() -> (RootCertStore, Credentials, Credentials) {
     let client = issue(ExtendedKeyUsagePurpose::ClientAuth);
     let mut roots = RootCertStore::empty();
     roots.add(issuer.der().clone()).unwrap();
-    (roots, server, client)
+    (roots, issuer.der().clone(), server, client)
 }
 
 fn configure(stream: &TcpStream) {
@@ -56,10 +62,26 @@ fn configure(stream: &TcpStream) {
 
 #[test]
 fn exchanges_signed_events_only_after_mutual_tls_and_pin_validation() {
-    let (roots, server_credentials, client_credentials) = identities();
+    let (roots, ca_der, server_credentials, client_credentials) = identities();
     let client_pin = certificate_pin(&client_credentials.chain[0]);
     let server_pin = certificate_pin(&server_credentials.chain[0]);
     let server = Server::new(roots.clone(), server_credentials).unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let config = folder.path().join("direct.json");
+    let state = folder.path().join("state");
+    let destination = folder.path().join("destination");
+    std::fs::create_dir(&destination).unwrap();
+    std::fs::write(folder.path().join("ca.der"), ca_der.as_ref()).unwrap();
+    std::fs::write(
+        folder.path().join("client.der"),
+        client_credentials.chain[0].as_ref(),
+    )
+    .unwrap();
+    std::fs::write(
+        folder.path().join("key.der"),
+        client_credentials.key.secret_der(),
+    )
+    .unwrap();
     let client = Client::new(roots, client_credentials).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -125,34 +147,36 @@ fn exchanges_signed_events_only_after_mutual_tls_and_pin_validation() {
             ));
         });
 
-        let endpoint = PeerEndpoint {
-            address: addr,
-            server_name: ServerName::try_from("localhost").unwrap(),
-            certificate: server_pin,
+        let setup = serde_json::json!({
+            "share": encode_hex(&[3; 16]),
+            "generation": 1,
+            "members": { (encode_hex(&peer)): "writer" },
+            "address": addr.to_string(),
+            "server_name": "localhost",
+            "server_pin": encode_hex(&server_pin),
+            "ca_der": "ca.der",
+            "certificate_der": "client.der",
+            "private_key_der": "key.der"
+        });
+        std::fs::write(&config, setup.to_string()).unwrap();
+        let [config, state, destination_path] =
+            [&config, &state, &destination].map(|path| path.to_str().unwrap().as_bytes());
+        let mut report = PullSummary::default();
+        let status = unsafe {
+            p2p_sync_pull(
+                config.as_ptr(),
+                config.len(),
+                state.as_ptr(),
+                state.len(),
+                destination_path.as_ptr(),
+                destination_path.len(),
+                &mut report,
+            )
         };
-        let roster = roster();
-        let mut receiver = Store::open(":memory:", roster.membership().clone()).unwrap();
-        let folder = tempfile::tempdir().unwrap();
-        let cache = BlobStore::open(folder.path().join("chunks")).unwrap();
-        let completed = BlobStore::open(folder.path().join("blobs")).unwrap();
-        let destination = folder.path().join("destination");
-        std::fs::create_dir(&destination).unwrap();
-        let report = direct::pull(
-            &client,
-            &endpoint,
-            Duration::from_secs(5),
-            &mut receiver,
-            &roster,
-            Destination {
-                root: &destination,
-                chunks: &cache,
-                completed: &completed,
-            },
-        )
-        .unwrap();
+        assert_eq!(status, 0);
         assert_eq!(report.events_added, 2);
-        assert_eq!(report.files, [(item.object, FileResult::Published)]);
-        assert_eq!(receiver.replica().get(item.id), Some(&item));
+        assert_eq!(report.files_published, 1);
+        assert_eq!(report.files_blocked, 0);
         assert_eq!(
             std::fs::read(destination.join("譜面/song.tja")).unwrap(),
             data
@@ -166,4 +190,8 @@ fn exchanges_signed_events_only_after_mutual_tls_and_pin_validation() {
         ));
         worker.join().unwrap();
     });
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }

@@ -3,6 +3,7 @@ pub mod blob;
 pub mod catchup;
 pub mod chunks;
 pub mod direct;
+pub mod host;
 mod local_target;
 pub mod materialize;
 pub mod names;
@@ -105,5 +106,62 @@ mod tests {
         assert_eq!(invalid, INVALID_ARGUMENT);
         assert_eq!(too_short, INVALID_ARGUMENT);
         assert_eq!(output, unchanged);
+    }
+}
+
+/// Pull once using an explicitly selected local configuration.
+///
+/// # Safety
+/// Each pointer/length pair refers to readable UTF-8 bytes for this call.
+/// The output is aligned, writable, and does not overlap any input.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_pull(
+    config: *const u8,
+    config_len: usize,
+    state: *const u8,
+    state_len: usize,
+    destination: *const u8,
+    destination_len: usize,
+    output: *mut host::PullSummary,
+) -> i32 {
+    if output.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    let paths = [
+        (config, config_len),
+        (state, state_len),
+        (destination, destination_len),
+    ];
+    if paths
+        .iter()
+        .any(|(ptr, len)| ptr.is_null() || *len == 0 || *len > 32_768)
+    {
+        return INVALID_ARGUMENT;
+    }
+    let run = std::panic::catch_unwind(|| {
+        let [config, state, destination] = paths.map(|(ptr, len)| {
+            let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+            std::str::from_utf8(bytes)
+                .ok()
+                .filter(|path| !path.contains('\0'))
+                .map(std::path::Path::new)
+        });
+        let (Some(config), Some(state), Some(destination)) = (config, state, destination) else {
+            return Err(INVALID_ARGUMENT);
+        };
+        host::pull_from_config(config, state, destination).map_err(|error| match error {
+            host::HostError::Configuration => 2,
+            host::HostError::Io(_) | host::HostError::Store(_) => 3,
+            host::HostError::Tls(_) => 4,
+            host::HostError::Direct(_) => 5,
+        })
+    });
+    match run {
+        Ok(Ok(summary)) => {
+            unsafe { output.write(summary) };
+            OK
+        }
+        Ok(Err(code)) => code,
+        Err(_) => 6,
     }
 }
