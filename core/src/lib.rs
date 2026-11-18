@@ -1,5 +1,6 @@
 pub mod blob;
 pub mod materialize;
+pub mod names;
 pub mod replica;
 pub mod retention;
 pub mod store;

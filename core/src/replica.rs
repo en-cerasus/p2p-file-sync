@@ -70,6 +70,7 @@ pub enum Reject {
     InvalidSequence,
     InvalidContext,
     InvalidBasis,
+    InvalidEntry,
     EventIdReuse,
 }
 
@@ -127,6 +128,14 @@ impl Replica {
             } else {
                 Err(Reject::EventIdReuse)
             };
+        }
+
+        if let Some(entry) = event.change.entry() {
+            if entry.parent == Some(event.object)
+                || crate::names::validate_component(&entry.name).is_err()
+            {
+                return Err(Reject::InvalidEntry);
+            }
         }
 
         let predecessor = clock_at(&event.context, event.id.peer);

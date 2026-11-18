@@ -14,3 +14,4 @@ rusqlite = { version = "0.40.1", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 tempfile = "3.27"
+unicode-normalization = "0.1.26"
