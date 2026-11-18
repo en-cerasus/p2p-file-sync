@@ -23,27 +23,32 @@ pub(crate) struct NewFileTarget {
 impl NewFileTarget {
     pub(crate) fn open(root: &Dir, components: &[&str]) -> io::Result<Self> {
         let (name, ancestors) = components.split_last().ok_or_else(invalid_name)?;
-        let mut parent = root.try_clone()?;
-        for component in ancestors {
-            validate_component(component).map_err(|_| invalid_name())?;
-            parent = match parent.open_dir_nofollow(component) {
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    match parent.create_dir(component) {
-                        Ok(()) => {}
-                        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                        Err(error) => return Err(error),
-                    }
-                    parent.open_dir_nofollow(component)?
-                }
-                result => result?,
-            };
-        }
+        let parent = open_or_create_directories(root, ancestors)?;
         validate_component(name).map_err(|_| invalid_name())?;
         Ok(Self {
             parent,
             name: (*name).into(),
         })
     }
+}
+
+pub(crate) fn open_or_create_directories(root: &Dir, components: &[&str]) -> io::Result<Dir> {
+    let mut parent = root.try_clone()?;
+    for component in components {
+        validate_component(component).map_err(|_| invalid_name())?;
+        parent = match parent.open_dir_nofollow(component) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                match parent.create_dir(component) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(error),
+                }
+                parent.open_dir_nofollow(component)?
+            }
+            result => result?,
+        };
+    }
+    Ok(parent)
 }
 
 impl FileTarget for NewFileTarget {

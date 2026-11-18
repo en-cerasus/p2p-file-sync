@@ -30,18 +30,29 @@ fn run() -> Result<(), String> {
         println!("Test connection files created in {}", output.display());
         return Ok(());
     }
-    if !matches!(mode, Some("publish" | "serve"))
+    if !matches!(mode, Some("publish" | "publish-tree" | "serve"))
         || (mode == Some("publish") && args.len() < 4)
+        || (mode == Some("publish-tree") && args.len() != 4)
         || (mode == Some("serve") && args.len() != 3)
     {
         return Err(
-            "Usage: p2p-send setup <new-dir> <bind-ip:port> <peer-ip:port>\n       p2p-send publish <server.json> <state-dir> <file> [file ...]\n       p2p-send serve <server.json> <state-dir>"
+            "Usage: p2p-send setup <new-dir> <bind-ip:port> <peer-ip:port>\n       p2p-send publish <server.json> <state-dir> <file> [file ...]\n       p2p-send publish-tree <server.json> <state-dir> <folder>\n       p2p-send serve <server.json> <state-dir>"
                 .to_string(),
         );
     }
 
     let mut sender = Sender::open(Path::new(&args[1]), Path::new(&args[2]))
         .map_err(|error| format!("Could not open sender configuration: {error:?}"))?;
+    if mode == Some("publish-tree") {
+        let summary = sender
+            .publish_tree(Path::new(&args[3]))
+            .map_err(|error| format!("Could not publish folder: {error:?}"))?;
+        println!(
+            "Registered {} file(s) and {} folder(s); skipped {} link or special entry(s).",
+            summary.files, summary.directories, summary.skipped
+        );
+        return Ok(());
+    }
     if mode == Some("publish") {
         for source in &args[3..] {
             let event = sender.publish(Path::new(source)).map_err(|error| {

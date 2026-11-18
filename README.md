@@ -75,3 +75,11 @@ cargo run --locked --release -p p2p-sync-core --bin p2p-send -- serve .\trial-se
 ```
 
 現在は受信側証明書を1件指定する手動接続です。配信開始のGUIは未実装です。
+
+譜面集をまとめて登録する場合は、`publish` の代わりに `publish-tree` を使います。
+
+```powershell
+cargo run --locked --release -p p2p-sync-core --bin p2p-send -- publish-tree .\trial-setup\sender\server.json .\server-state .\譜面集
+```
+
+指定フォルダー内の階層と空フォルダーも登録します。同じ内容の再登録は既存イベントを再利用します。

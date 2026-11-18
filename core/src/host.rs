@@ -17,7 +17,7 @@ use crate::{
     auth::{PeerSigningKey, Role, Roster},
     blob::BlobStore,
     direct::{self, DirectError, PeerEndpoint},
-    publish::{publish_file, PublishError},
+    publish::{publish_file, publish_tree, PublishError, TreeSummary},
     replica::{EventId, PeerId},
     store::{Store, StoreError},
     sync::{Destination, FileResult},
@@ -126,6 +126,17 @@ impl Sender {
             &self.completed,
             None,
             name,
+        )
+        .map_err(HostError::Publish)
+    }
+
+    pub fn publish_tree(&mut self, root: &Path) -> Result<TreeSummary, HostError> {
+        publish_tree(
+            root,
+            &mut self.store,
+            &self.roster,
+            &self.signer,
+            &self.completed,
         )
         .map_err(HostError::Publish)
     }

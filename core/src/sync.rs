@@ -6,6 +6,7 @@ use std::{
 use crate::{
     auth::Roster,
     blob::BlobStore,
+    local_target::{open_or_create_directories, open_root},
     materialize::{FileIntent, MaterializeError, Recovery},
     projection::{PathIssue, Projection},
     replica::{EntryKind, EventId, ObjectId},
@@ -78,9 +79,19 @@ fn publish_heads(
     store.refresh().map_err(SyncError::Store)?;
     let projection = Projection::new(store.replica());
     let mut files = Vec::new();
+    let mut directories = Vec::new();
     for object in store.replica().objects() {
         let mut heads = store.replica().heads(object);
         let Some(first) = heads.next() else { continue };
+        if first
+            .change
+            .entry()
+            .is_some_and(|entry| entry.kind == EntryKind::Directory)
+        {
+            if let Ok(path) = projection.path(object) {
+                directories.push(path);
+            }
+        }
         let file_head = store.replica().heads(object).find(|head| {
             head.change
                 .entry()
@@ -115,6 +126,13 @@ fn publish_heads(
                 }
                 Err(issue) => report.files.push((object, FileResult::BlockedPath(issue))),
             }
+        }
+    }
+
+    if !directories.is_empty() {
+        let root = open_root(destination.root).map_err(SyncError::Content)?;
+        for components in directories {
+            open_or_create_directories(&root, &components).map_err(SyncError::Content)?;
         }
     }
 

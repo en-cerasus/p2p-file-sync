@@ -221,14 +221,17 @@ fn command_line_publish_can_be_served_to_the_receive_host() {
         serde_json::from_slice(&std::fs::read(&server_config).unwrap()).unwrap();
     settings["bind"] = "127.0.0.1:0".into();
     std::fs::write(&server_config, settings.to_string()).unwrap();
-    let source = path.join("試験譜面.tja");
+    let tree = path.join("share");
+    std::fs::create_dir_all(tree.join("譜面")).unwrap();
+    std::fs::create_dir(tree.join("空フォルダー")).unwrap();
+    let source = tree.join("譜面/試験譜面.tja");
     let contents = b"TITLE:Command line published";
     std::fs::write(&source, contents).unwrap();
     let register = std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
-        .arg("publish")
+        .arg("publish-tree")
         .arg(&server_config)
         .arg(&server_state)
-        .arg(&source)
+        .arg(&tree)
         .output()
         .unwrap();
     assert!(
@@ -256,9 +259,10 @@ fn command_line_publish_can_be_served_to_the_receive_host() {
             pull_from_config(&receive_config, &path.join("client-state"), &destination).unwrap();
         assert_eq!(report.files_published, 1);
         assert_eq!(
-            std::fs::read(destination.join("試験譜面.tja")).unwrap(),
+            std::fs::read(destination.join("譜面/試験譜面.tja")).unwrap(),
             contents
         );
+        assert!(destination.join("空フォルダー").is_dir());
         serving.join().unwrap();
     });
 }

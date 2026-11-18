@@ -101,3 +101,40 @@ fn updates_and_tombstones_share_the_same_object_and_retain_previous_versions() {
             .is_ok());
     }
 }
+
+#[test]
+fn tree_publication_is_repeatable_and_skips_directory_links() {
+    use p2p_sync_core::{projection::Projection, publish::publish_tree};
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    std::fs::create_dir_all(source.join("譜面")).unwrap();
+    std::fs::create_dir(source.join("空")).unwrap();
+    std::fs::write(source.join("譜面/song.tja"), b"song").unwrap();
+
+    let outside = root.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("secret.tja"), b"do not publish").unwrap();
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink(&outside, source.join("link")).is_ok();
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_dir(&outside, source.join("link")).is_ok();
+
+    let key = PeerSigningKey::from_bytes(&[11; 32]);
+    let peer = key.verifying_key().to_bytes();
+    let roster = Roster::new([4; 16], 1, [(peer, Role::Writer)].into());
+    let blobs = BlobStore::open(root.path().join("completed")).unwrap();
+    let mut store = Store::open(":memory:", roster.membership().clone()).unwrap();
+    for _ in 0..2 {
+        let report = publish_tree(&source, &mut store, &roster, &key, &blobs).unwrap();
+        assert_eq!(
+            (report.files, report.directories, report.skipped),
+            (1, 2, usize::from(linked))
+        );
+        assert_eq!(store.replica().clock()[&peer], 3);
+    }
+    let projection = Projection::new(store.replica());
+    assert!(store
+        .replica()
+        .objects()
+        .any(|object| projection.path(object) == Ok(vec!["譜面", "song.tja"])));
+}
