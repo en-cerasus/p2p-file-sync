@@ -11,6 +11,7 @@ use crate::{
     blob::{Blob, BlobStore},
     materialize::AppliedFile,
     replica::{EventId, ObjectId},
+    retention::Protection,
     store::{decode, decode_column, encode, Store, StoreError},
 };
 
@@ -34,17 +35,22 @@ pub struct ProtectedStorage {
 }
 
 impl Store {
+    pub(crate) fn active_protections(&self) -> impl Iterator<Item = &Protection> {
+        let replica = self.replica();
+        self.protections().filter(move |protection| {
+            !protection.can_release(replica.clock())
+                || replica
+                    .get(protection.original())
+                    .is_some_and(|event| replica.has_conflict(event.object))
+        })
+    }
+
     /// List unique contents required by unconfirmed peers or a live conflict.
     pub fn protected_originals(&self, blobs: &BlobStore) -> io::Result<Vec<ProtectedOriginal>> {
         let replica = self.replica();
         let mut originals = BTreeMap::<_, BTreeSet<String>>::new();
-        for protection in self.protections() {
+        for protection in self.active_protections() {
             let event = replica.get(protection.original());
-            if protection.can_release(replica.clock())
-                && !event.is_some_and(|event| replica.has_conflict(event.object))
-            {
-                continue;
-            }
             let names = originals.entry(protection.content()).or_default();
             if let Some(entry) = event.and_then(|event| event.change.entry()) {
                 names.insert(entry.name.clone());

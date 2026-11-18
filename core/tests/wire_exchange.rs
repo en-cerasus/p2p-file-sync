@@ -193,11 +193,13 @@ fn share_session_refuses_content_without_a_signed_event_even_when_blob_exists() 
     let roster = roster_for([9; 32]);
     let mut store = Store::open(":memory:", roster.membership().clone()).unwrap();
     let request = [b"P2P1".as_slice(), &[3], &32_u32.to_be_bytes(), &hash].concat();
-    let mut stream = Scripted(Cursor::new(request));
+    let response_offset = request.len();
+    let mut stream = Cursor::new(request);
     assert!(matches!(
         ShareSession::default().serve_next(&mut stream, &mut store, &blobs, &roster),
-        Err(WireError::UnavailableContent)
+        Ok(SessionProgress::Continue)
     ));
+    assert_eq!(&stream.into_inner()[response_offset..], b"P2P1\x0b\0\0\0\0");
 }
 
 #[test]

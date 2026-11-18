@@ -22,6 +22,7 @@ const CONFIRM: u8 = 7;
 const CONFIRMED: u8 = 8;
 const FINISH: u8 = 9;
 const FINISHED: u8 = 10;
+const CONTENT_UNAVAILABLE: u8 = 11;
 const MAX_CONFIRMATION_FRAME: usize = 320;
 const MAX_MANIFEST_BYTES: usize = 8 + MAX_CHUNKS * 32;
 const MAX_FRONTIER_PEERS: usize = 1024;
@@ -135,7 +136,12 @@ pub fn pull_manifest(
         return Err(WireError::UnavailableContent);
     };
     write_frame(stream, GET_MANIFEST, expected)?;
-    let response = read_frame(stream, MANIFEST, MAX_MANIFEST_BYTES)?;
+    let (kind, length) = read_header(stream)?;
+    let response = match kind {
+        MANIFEST => read_body(stream, length, MAX_MANIFEST_BYTES)?,
+        CONTENT_UNAVAILABLE if length == 0 => return Err(WireError::UnavailableContent),
+        _ => return Err(WireError::InvalidFrame),
+    };
     let Some((length, hashes)) = response.split_first_chunk::<8>() else {
         return Err(WireError::InvalidFrame);
     };
@@ -241,9 +247,17 @@ impl ShareSession {
                 let hash: ContentHash = body.try_into().map_err(|_| WireError::InvalidFrame)?;
                 store.refresh().map_err(CatchupError::Store)?;
                 if !has_signed_content(store, hash) {
-                    return Err(WireError::UnavailableContent);
+                    write_frame(stream, CONTENT_UNAVAILABLE, &[])?;
+                    return Ok(SessionProgress::Continue);
                 }
-                let mut file = completed.open_candidate(hash)?;
+                let mut file = match completed.open_candidate(hash) {
+                    Ok(file) => file,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        write_frame(stream, CONTENT_UNAVAILABLE, &[])?;
+                        return Ok(SessionProgress::Continue);
+                    }
+                    Err(error) => return Err(error.into()),
+                };
                 let metadata = file.metadata()?;
                 if !metadata.is_file() {
                     return Err(WireError::UnavailableContent);

@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     io::{Read, Write},
     path::Path,
 };
@@ -66,7 +67,9 @@ pub fn sync_new_files(
             if events.deferred != 0 {
                 return Err(SyncError::IncompleteEvents);
             }
-            return publish_heads(stream, store, destination, report);
+            let report = publish_heads(stream, store, &destination, report)?;
+            fetch_protected_originals(stream, store, &destination)?;
+            return Ok(report);
         }
     }
     Err(SyncError::IncompleteEvents)
@@ -75,7 +78,7 @@ pub fn sync_new_files(
 fn publish_heads(
     stream: &mut (impl Read + Write),
     store: &mut Store,
-    destination: Destination<'_>,
+    destination: &Destination<'_>,
     mut report: SyncReport,
 ) -> Result<SyncReport, SyncError> {
     store.refresh().map_err(SyncError::Store)?;
@@ -194,7 +197,7 @@ fn publish_heads(
         }
 
         let desired = if live {
-            Some(fetch_content(stream, store, &destination, event)?)
+            Some(fetch_content(stream, store, destination, event)?)
         } else {
             None
         };
@@ -237,6 +240,30 @@ fn publish_heads(
         report.files.push((object, file_result(outcome)));
     }
     Ok(report)
+}
+
+fn fetch_protected_originals(
+    stream: &mut (impl Read + Write),
+    store: &Store,
+    destination: &Destination<'_>,
+) -> Result<(), SyncError> {
+    let mut requested = BTreeSet::new();
+    for protection in store.active_protections() {
+        let hash = protection.content();
+        if store.signed_event(protection.original()).is_none() || !requested.insert(hash) {
+            continue;
+        }
+        match destination.completed.open_candidate(hash) {
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(SyncError::Content(error)),
+        }
+        match fetch_content(stream, store, destination, protection.original()) {
+            Ok(_) | Err(SyncError::Wire(WireError::UnavailableContent)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 fn fetch_content(

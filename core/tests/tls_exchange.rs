@@ -198,7 +198,7 @@ fn encode_hex(bytes: &[u8]) -> String {
 
 #[test]
 fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
-    use p2p_sync_core::host::{pull_from_config, Sender};
+    use p2p_sync_core::host::{pull_detailed, pull_from_config, Sender};
 
     let root = tempfile::tempdir().unwrap();
     let path = root.path();
@@ -332,9 +332,15 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
                 sender.serve(socket).unwrap();
             }
         });
-        let report = pull_from_config(&receiver, &path.join("client-state"), &destination).unwrap();
-        assert_eq!(report.events_added, 5);
-        assert_eq!(report.files_published, 0);
+        let report = pull_detailed(&receiver, &path.join("client-state"), &destination).unwrap();
+        assert_eq!(report.sync.events_added, 5);
+        assert_eq!(report.sync.files_published, 0);
+        assert_eq!(report.protected_files, 2);
+        assert_eq!(report.protected_missing, 0);
+        assert_eq!(
+            report.protected_bytes,
+            (contents.len() + b"TITLE:Revision".len()) as u64
+        );
         assert!(!destination.join("譜面/試験譜面.tja").exists());
         #[cfg(windows)]
         {
