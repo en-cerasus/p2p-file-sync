@@ -62,6 +62,10 @@ impl Roster {
         &self.membership
     }
 
+    pub(crate) fn roles(&self) -> &BTreeMap<PeerId, Role> {
+        &self.roles
+    }
+
     pub(crate) fn is_reader(&self, peer: &PeerId) -> bool {
         self.roles.get(peer) == Some(&Role::Reader)
     }

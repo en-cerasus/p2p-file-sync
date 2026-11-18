@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
-    io::Read,
+    io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     time::Duration,
@@ -17,6 +17,7 @@ use crate::{
     auth::{PeerSigningKey, Role, Roster},
     blob::BlobStore,
     direct::{self, DirectError, PeerEndpoint},
+    generation::{CheckpointDataError, GenerationTransition, TransitionError},
     names::collision_key,
     projection::Projection,
     publish::{
@@ -443,6 +444,67 @@ impl Sender {
         Ok(self.store.event_order().len().saturating_sub(before))
     }
 
+    /// Export migration data. Write the signed transition last so an
+    /// interrupted export cannot be mistaken for a completed bundle.
+    pub fn prepare_generation(
+        &mut self,
+        next_configuration: &Path,
+        administrator_key: &Path,
+        output: &Path,
+    ) -> Result<usize, HostError> {
+        let next: SenderConfig =
+            serde_json::from_slice(&read_bounded(next_configuration, MAX_CONFIG_BYTES)?)
+                .map_err(|_| HostError::Configuration)?;
+        let old = self.roster.membership();
+        let roster = build_roster(&next.share, next.generation, next.members)?;
+        if roster.membership().share != old.share
+            || old.generation.checked_add(1) != Some(next.generation)
+        {
+            return Err(HostError::Configuration);
+        }
+        let material = read_bounded(administrator_key, 32)?;
+        let seed = material
+            .as_slice()
+            .try_into()
+            .map_err(|_| HostError::Configuration)?;
+        let administrator = PeerSigningKey::from_bytes(seed);
+        let key_id = administrator.verifying_key().to_bytes();
+        if old.members.contains(&key_id) || roster.membership().members.contains(&key_id) {
+            return Err(HostError::Configuration);
+        }
+        let _lock = self.lock_state()?;
+        let checkpoint = self
+            .store
+            .generation_checkpoint(std::time::SystemTime::now())
+            .map_err(HostError::Store)?;
+        let bytes = checkpoint
+            .encode()
+            .map_err(StoreError::from)
+            .map_err(HostError::Store)?;
+        let transition = GenerationTransition {
+            share: old.share,
+            previous: old.generation,
+            next: next.generation,
+            checkpoint: crate::sha256(&bytes),
+            members: roster.roles().clone(),
+        };
+        let signature = transition
+            .sign(&administrator)
+            .map_err(HostError::Transition)?;
+        transition
+            .verify_checkpoint(&bytes, &self.roster)
+            .map_err(HostError::Transition)?;
+
+        fs::create_dir(output).map_err(HostError::Io)?;
+        let staged = BlobStore::open(output.join("files")).map_err(HostError::Io)?;
+        let count = checkpoint
+            .stage_contents(&self.completed, &staged)
+            .map_err(HostError::CheckpointData)?;
+        write_bundle_file(output, "checkpoint.bin", &bytes)?;
+        write_bundle_file(output, "transition.bin", &signature)?;
+        Ok(count)
+    }
+
     pub fn serve(&mut self, socket: TcpStream) -> Result<(), HostError> {
         {
             let lock = self.open_state_lock()?;
@@ -481,6 +543,18 @@ pub enum HostError {
     Tls(TlsError),
     Direct(DirectError),
     Publish(PublishError),
+    Transition(TransitionError),
+    CheckpointData(CheckpointDataError),
+}
+
+fn write_bundle_file(output: &Path, name: &str, bytes: &[u8]) -> Result<(), HostError> {
+    let mut temporary = tempfile::NamedTempFile::new_in(output).map_err(HostError::Io)?;
+    temporary.write_all(bytes).map_err(HostError::Io)?;
+    temporary.as_file().sync_all().map_err(HostError::Io)?;
+    temporary
+        .persist_noclobber(output.join(name))
+        .map_err(|error| HostError::Io(error.error))?;
+    Ok(())
 }
 
 #[repr(C)]

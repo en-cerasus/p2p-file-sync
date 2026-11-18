@@ -84,6 +84,8 @@ cargo run --locked --release -p p2p-sync-core --bin p2p-send -- serve .\trial-se
 
 配信側と受信側は同じ共有ID・世代を設定し、両方のアプリを更新してください。共有ID・世代が異なる接続と、従来の世代照合を行わない接続方式は、TLS接続時に拒否されます。
 
+`p2p-send prepare-generation <server.json> <state-dir> <next-server.json> <administrator-seed-file> <new-dir>` で移行用データを作成できます。次の設定には同じ共有IDと1つ進んだ世代、新しいピア一覧を指定します。管理鍵には、同期ピアの署名鍵と別の32バイトのEd25519シードを使います。出力には署名済みの `transition.bin`、`checkpoint.bin`、検証済みの `files` が含まれます。出力フォルダーには共有ファイル本体が含まれるため、共有先と同様に管理してください。作成だけでは世代は切り替わりません。
+
 `p2p-send catch-up <server.json> <state-dir> <direct.json>` は、同じ共有・世代で登録された別の配信先から、署名付きイベントと取得可能なファイル本体を配信用キャッシュへ取り込みます。取り込んだデータは `serve` で再配信でき、作業フォルダーには書き込みません。接続には `direct.json` の主接続先と追加の接続先を設定順に使います。
 
 `p2p-send serve-peer <server.json> <state-dir> <direct.json> <間隔秒>` は、配信しながら取り込みを繰り返します。間隔は1〜86400秒で、接続に失敗した場合も次の周期で再試行します。

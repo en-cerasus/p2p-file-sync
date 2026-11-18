@@ -386,6 +386,46 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
     assert_eq!(std::fs::read(&source).unwrap(), contents);
     assert_eq!(std::fs::read(&revised).unwrap(), b"TITLE:Revision");
 
+    let next_config = setup.join("sender/next.json");
+    legacy["generation"] = 2.into();
+    std::fs::write(&next_config, legacy.to_string()).unwrap();
+    let admin = path.join("admin-test.bin");
+    std::fs::write(&admin, [47; 32]).unwrap();
+    let bundle = path.join("migration");
+    let prepare = || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
+            .arg("prepare-generation")
+            .arg(&server_config)
+            .arg(&server_state)
+            .arg(&next_config)
+            .arg(&admin)
+            .arg(&bundle)
+            .output()
+            .unwrap()
+    };
+    let output = prepare();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!prepare().status.success());
+    assert!(bundle.join("checkpoint.bin").is_file());
+    assert!(bundle.join("transition.bin").is_file());
+    assert_eq!(
+        std::fs::read(bundle.join("files").join(encode_hex(&sha256(contents)))).unwrap(),
+        contents
+    );
+    assert_eq!(
+        std::fs::read(
+            bundle
+                .join("files")
+                .join(encode_hex(&sha256(b"TITLE:Revision")))
+        )
+        .unwrap(),
+        b"TITLE:Revision"
+    );
+
     let mut sender = Sender::open(&server_config, &server_state).unwrap();
     let listener = sender.bind().unwrap();
     let receiver = setup.join("receiver-1/direct.json");

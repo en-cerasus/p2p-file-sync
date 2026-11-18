@@ -261,7 +261,10 @@ unsafe fn pull_to_output<T: From<host::PullSummaryV3>>(
                 host::HostError::Configuration => 2,
                 host::HostError::Io(_) | host::HostError::Store(_) => 3,
                 host::HostError::Tls(_) => 4,
-                host::HostError::Direct(_) | host::HostError::Publish(_) => 5,
+                host::HostError::Direct(_)
+                | host::HostError::Publish(_)
+                | host::HostError::Transition(_)
+                | host::HostError::CheckpointData(_) => 5,
             })?;
         let json = originals
             .map(|_| serde_json::to_vec(&entries))
