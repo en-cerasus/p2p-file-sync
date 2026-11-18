@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     blob::Blob,
     materialize::{FileIntent, FileTarget},
-    names::validate_component,
+    names::{collision_key, validate_component},
     replica::ObjectId,
 };
 
@@ -21,6 +21,25 @@ pub(crate) struct NewFileTarget {
 }
 
 impl NewFileTarget {
+    pub(crate) fn name_is_vacant(&self) -> io::Result<bool> {
+        let key = collision_key(&self.name).map_err(|_| invalid_name())?;
+        for entry in self.parent.entries()? {
+            if entry?
+                .file_name()
+                .to_str()
+                .and_then(|name| collision_key(name).ok())
+                .is_some_and(|candidate| candidate == key)
+            {
+                return Ok(false);
+            }
+        }
+        match self.parent.symlink_metadata(&self.name) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
+            Ok(_) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
     pub(crate) fn existing(root: &Dir, components: &[&str]) -> io::Result<Self> {
         let (name, ancestors) = components.split_last().ok_or_else(invalid_name)?;
         let mut parent = root.try_clone()?;

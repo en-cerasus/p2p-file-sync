@@ -198,7 +198,7 @@ fn encode_hex(bytes: &[u8]) -> String {
 
 #[test]
 fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
-    use p2p_sync_core::host::{pull_detailed, pull_from_config, Sender};
+    use p2p_sync_core::host::{pull_from_config, Sender};
 
     let root = tempfile::tempdir().unwrap();
     let path = root.path();
@@ -328,30 +328,21 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
     config["address"] = listener.local_addr().unwrap().to_string().into();
     std::fs::write(&receiver, config.to_string()).unwrap();
     let destination = path.join("fresh-destination");
-    std::fs::create_dir(&destination).unwrap();
+    let local = destination.join("譜面/試験譜面.TJA");
+    std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+    std::fs::write(&local, b"local file").unwrap();
     std::thread::scope(|threads| {
         let session = threads.spawn(move || {
-            for _ in 0..1 + usize::from(cfg!(windows)) {
+            for _ in 0..2 + usize::from(cfg!(windows)) {
                 let (socket, _) = listener.accept().unwrap();
                 sender.serve(socket).unwrap();
             }
         });
-        let report = pull_detailed(&receiver, &path.join("client-state"), &destination).unwrap();
-        assert_eq!(report.sync.events_added, 5);
-        assert_eq!(report.sync.files_published, 0);
-        assert_eq!(report.protected_files, 2);
-        assert_eq!(report.protected_missing, 0);
-        assert_eq!(
-            report.protected_bytes,
-            (contents.len() + b"TITLE:Revision".len()) as u64
-        );
-        assert!(!destination.join("譜面/試験譜面.tja").exists());
-        #[cfg(windows)]
-        {
-            let existing = path.join("destination-1");
-            let state = path.join("client-state");
+        let state = path.join("client-state");
+        let pull = |destination: &std::path::Path| {
             let [config_path, state_path, output_path] =
-                [&receiver, &state, &existing].map(|path| path.to_str().unwrap().as_bytes());
+                [receiver.as_path(), state.as_path(), destination]
+                    .map(|path| path.to_str().unwrap().as_bytes());
             extern "C" fn copy_originals(
                 context: *mut std::ffi::c_void,
                 data: *const u8,
@@ -378,27 +369,52 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
                 )
             };
             assert_eq!(status, 0);
+            let originals: Vec<serde_json::Value> = serde_json::from_slice(&json).unwrap();
+            (report, originals)
+        };
+        let seed = std::fs::read(receiver.parent().unwrap().join("event-key.bin")).unwrap();
+        let reader = PeerSigningKey::from_bytes(seed.as_slice().try_into().unwrap());
+        let reader_hex: String = reader
+            .verifying_key()
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let reader_waiting = |original: &serde_json::Value| {
+            original["waiting"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["peer"] == reader_hex)
+        };
+        let (report, originals) = pull(&destination);
+        assert_eq!(report.sync.events_added, 5);
+        assert_eq!(report.sync.files_published, 0);
+        assert_eq!(report.protected_files, 2);
+        assert_eq!(report.protected_missing, 0);
+        assert_eq!(
+            report.protected_bytes,
+            (contents.len() + b"TITLE:Revision".len()) as u64
+        );
+        assert_eq!(originals.len(), 2);
+        assert!(originals.iter().all(reader_waiting));
+        assert_eq!(std::fs::read(&local).unwrap(), b"local file");
+        std::fs::remove_file(&local).unwrap();
+
+        let (_, originals) = pull(&destination);
+        assert_eq!(originals.len(), 2);
+        assert!(originals.iter().all(|original| !reader_waiting(original)));
+        assert!(!destination.join("譜面/試験譜面.tja").exists());
+
+        #[cfg(windows)]
+        {
+            let existing = path.join("destination-1");
+            let (report, originals) = pull(&existing);
             assert_eq!(report.sync.events_added, 2);
             assert_eq!(report.sync.files_blocked, 0);
             assert_eq!(report.sync.files_removed, 1);
-            let originals: Vec<serde_json::Value> = serde_json::from_slice(&json).unwrap();
-            assert_eq!(
-                originals.len() as u64,
-                report.protected_files + report.protected_missing
-            );
-            assert!(originals.iter().any(|entry| {
-                entry["names"][0] == "試験譜面.tja" && entry["bytes"] == contents.len() as u64
-            }));
-            let seed = std::fs::read(receiver.parent().unwrap().join("event-key.bin")).unwrap();
-            let reader = PeerSigningKey::from_bytes(seed.as_slice().try_into().unwrap());
-            let reader = reader.verifying_key().to_bytes();
-            let reader_hex: String = reader.iter().map(|byte| format!("{byte:02x}")).collect();
             assert_eq!(originals.len(), 2);
-            for original in &originals {
-                let waiting = original["waiting"].as_array().unwrap();
-                assert!(!waiting.iter().any(|entry| entry["peer"] == reader_hex));
-                assert_eq!(waiting.len(), 2);
-            }
+            assert!(originals.iter().all(|original| !reader_waiting(original)));
             assert!(!existing.join("譜面/試験譜面.tja").exists());
         }
         session.join().unwrap();

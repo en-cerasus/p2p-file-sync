@@ -11,8 +11,9 @@ use crate::{
     auth::{AuthError, PeerSigningKey, Roster},
     blob::BlobStore,
     local_target::{open_root, NewFileTarget},
-    materialize::{FileTarget, MaterializeError},
-    replica::{Change, EventId, Replica},
+    materialize::FileTarget,
+    projection::Projection,
+    replica::{Change, EntryKind, EventId, ObjectId, Replica},
     retention::{Confirmation, PeerState},
     store::Store,
     sync::{sync_new_files, Destination, FileResult, SyncError, SyncReport},
@@ -99,43 +100,61 @@ fn confirm_applied(
                 .insert(protection.successor());
         }
     }
-    for &(object, ref result) in &report.files {
-        let Some(awaiting) = awaiting.get(&object) else {
-            continue;
-        };
-        if !matches!(
-            result,
-            FileResult::Published | FileResult::Updated | FileResult::Present | FileResult::Removed
-        ) || store.replica().has_conflict(object)
+    let results: BTreeMap<_, _> = report
+        .files
+        .iter()
+        .map(|(object, result)| (*object, result))
+        .collect();
+    for (object, awaiting) in awaiting {
+        let result = results.get(&object).copied();
+        if result.is_some_and(|result| {
+            !matches!(
+                result,
+                FileResult::Published
+                    | FileResult::Updated
+                    | FileResult::Present
+                    | FileResult::Removed
+            )
+        }) || store.replica().has_conflict(object)
         {
             continue;
         }
-        let Some(applied) = store
+        let applied = store
             .applied_file(object)
-            .map_err(|error| DirectError::Sync(SyncError::Materialize(error)))?
-        else {
-            continue;
-        };
+            .map_err(|error| DirectError::Sync(SyncError::Materialize(error)))?;
         let replica = store.replica();
-        if !replica.heads(object).any(|head| head.id == applied.event) {
-            continue;
-        }
-        let successors = applied_lineage(replica, applied.event, awaiting);
-        if successors.is_empty() {
-            continue;
-        }
-        let Some(path) = applied.path else { continue };
         let root = open_root(root).map_err(|error| DirectError::Sync(SyncError::Content(error)))?;
-        let path: Vec<_> = path.iter().map(String::as_str).collect();
-        let mut target = NewFileTarget::existing(&root, &path)
-            .map_err(|error| DirectError::Sync(SyncError::Content(error)))?;
-        if target.inspect(object).map_err(|error| {
-            DirectError::Sync(SyncError::Materialize(MaterializeError::Io(error)))
-        })? != applied.contents
-        {
-            continue;
-        }
-        for successor in successors {
+        let head = if let Some(applied) = applied {
+            if !replica.heads(object).any(|head| head.id == applied.event)
+                || (result.is_none() && applied.contents.is_some())
+            {
+                continue;
+            }
+            let Some(path) = applied.path else { continue };
+            let path: Vec<_> = path.iter().map(String::as_str).collect();
+            let Ok(mut target) = NewFileTarget::existing(&root, &path) else {
+                continue;
+            };
+            if !target
+                .inspect(object)
+                .is_ok_and(|actual| actual == applied.contents)
+            {
+                continue;
+            }
+            applied.event
+        } else {
+            let Some((head, path)) = unapplied_deletion_path(replica, object) else {
+                continue;
+            };
+            let Ok(target) = NewFileTarget::existing(&root, &path) else {
+                continue;
+            };
+            if !target.name_is_vacant().unwrap_or(false) {
+                continue;
+            }
+            head
+        };
+        for successor in applied_lineage(replica, head, &awaiting) {
             let confirmation = Confirmation {
                 generation: roster.membership().generation,
                 peer,
@@ -153,6 +172,28 @@ fn confirm_applied(
         }
     }
     Ok(())
+}
+
+fn unapplied_deletion_path(replica: &Replica, object: ObjectId) -> Option<(EventId, Vec<&str>)> {
+    let mut heads = replica.heads(object);
+    let head = heads.next()?;
+    if heads.next().is_some() {
+        return None;
+    }
+    let Change::Revise { base, entry: None } = &head.change else {
+        return None;
+    };
+    let entry = replica.get(*base)?.change.entry()?;
+    let projection = Projection::new(replica);
+    if !matches!(entry.kind, EntryKind::File(_)) || !projection.vacant(entry.parent, &entry.name) {
+        return None;
+    }
+    let mut path = match entry.parent {
+        Some(parent) => projection.path(parent).ok()?,
+        None => Vec::new(),
+    };
+    path.push(&entry.name);
+    Some((head.id, path))
 }
 
 /// Traverse the actual file-version bases. The causal clock also includes
