@@ -11,7 +11,7 @@ use crate::{
     retention::{Confirmation, Protection},
 };
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const MAX_RECORD_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -60,7 +60,7 @@ struct Index {
 }
 
 pub struct Store {
-    connection: Connection,
+    pub(crate) connection: Connection,
     membership: Membership,
     index: Index,
 }
@@ -81,9 +81,8 @@ impl Store {
                     "INSERT INTO membership (id, value) VALUES (1, ?1)",
                     [encode(&membership)?],
                 )?;
-                tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             }
-            SCHEMA_VERSION => {
+            1 | SCHEMA_VERSION => {
                 let stored =
                     tx.query_row("SELECT value FROM membership WHERE id = 1", [], |row| {
                         decode_column(row, 0)
@@ -93,6 +92,16 @@ impl Store {
                 }
             }
             _ => return Err(StoreError::UnsupportedSchema(version)),
+        }
+
+        if version < SCHEMA_VERSION {
+            tx.execute_batch(
+                "CREATE TABLE file_intent (
+                    object BLOB PRIMARY KEY,
+                    payload BLOB NOT NULL
+                );",
+            )?;
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
 
         let mut index = Index::default();
@@ -116,6 +125,16 @@ impl Store {
     /// Read commits made by another handle before querying this handle's index.
     pub fn refresh(&mut self) -> Result<(), StoreError> {
         self.index.refresh(&self.connection, &self.membership)
+    }
+
+    pub(crate) fn begin_indexed_write(
+        &mut self,
+    ) -> Result<(rusqlite::Transaction<'_>, &Replica), StoreError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        self.index.refresh(&tx, &self.membership)?;
+        Ok((tx, &self.index.replica))
     }
 
     /// Accepts values only after the caller verifies their authentication.
@@ -296,7 +315,7 @@ fn append(connection: &Connection, record: &Record) -> Result<i64, StoreError> {
     Ok(connection.last_insert_rowid())
 }
 
-fn encode(value: &impl Serialize) -> Result<Vec<u8>, StoreError> {
+pub(crate) fn encode(value: &impl Serialize) -> Result<Vec<u8>, StoreError> {
     let bytes = postcard::to_allocvec(value)?;
     if bytes.len() > MAX_RECORD_BYTES {
         return Err(StoreError::OversizedRecord);
@@ -304,7 +323,7 @@ fn encode(value: &impl Serialize) -> Result<Vec<u8>, StoreError> {
     Ok(bytes)
 }
 
-fn decode<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, StoreError> {
+pub(crate) fn decode<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, StoreError> {
     let (record, rest) = postcard::take_from_bytes(bytes)?;
     if !rest.is_empty() {
         return Err(StoreError::InvalidRecord);
@@ -312,7 +331,7 @@ fn decode<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, StoreError> {
     Ok(record)
 }
 
-fn decode_column(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Vec<u8>> {
+pub(crate) fn decode_column(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Vec<u8>> {
     let column = row.get_ref(index)?;
     let value = column.as_blob().map_err(|_| {
         rusqlite::Error::InvalidColumnType(index, "record".into(), column.data_type())
