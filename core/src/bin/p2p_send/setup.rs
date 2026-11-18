@@ -23,7 +23,12 @@ pub fn create(
     if !(1..=32).contains(&receivers) {
         return Err("Generate between 1 and 32 receiver configurations.".into());
     }
-    if !(1..=8).contains(&writers) || bind.port().checked_add(writers - 1).is_none() {
+    if !(1..=8).contains(&writers)
+        || bind
+            .port()
+            .checked_add(writers + receivers as u16 - 1)
+            .is_none()
+    {
         return Err("Generate between 1 and 8 writers with enough consecutive ports.".into());
     }
     if bind.port() == 0
@@ -96,17 +101,20 @@ pub fn create(
         let mut listen = bind;
         listen.set_port(bind.port() + index);
         servers.push((directory.clone(), listen, pin.clone()));
-        if writers > 1 {
-            client_pins.push(pin);
-        }
+        client_pins.push(pin);
         write_event_key(&directory, "writer", &mut members, write_error)?;
     }
 
     let mut clients = Vec::with_capacity(receivers);
     for index in 1..=receivers {
-        let (client_cert, client_key) =
-            issue(Vec::new(), vec![ExtendedKeyUsagePurpose::ClientAuth])
-                .map_err(certificate_error)?;
+        let (client_cert, client_key) = issue(
+            vec![host.clone()],
+            vec![
+                ExtendedKeyUsagePurpose::ServerAuth,
+                ExtendedKeyUsagePurpose::ClientAuth,
+            ],
+        )
+        .map_err(certificate_error)?;
         let receiver = if receivers == 1 {
             output.join("receiver")
         } else {
@@ -124,9 +132,12 @@ pub fn create(
             &client_key.serialize_der(),
         )
         .map_err(write_error)?;
-        client_pins.push(hex(&sha256(client_cert.der().as_ref())));
+        let pin = hex(&sha256(client_cert.der().as_ref()));
+        client_pins.push(pin.clone());
         write_event_key(&receiver, "reader", &mut members, write_error)?;
-        clients.push(receiver);
+        let mut listen = bind;
+        listen.set_port(bind.port() + writers + index as u16 - 1);
+        clients.push((receiver, listen, pin));
     }
     let direct_config = |peers: &[serde_json::Value], reader: bool| {
         let first = &peers[0];
@@ -144,9 +155,18 @@ pub fn create(
         }
         client
     };
-    for receiver in clients {
+    for (receiver, listen, pin) in clients {
         let client = direct_config(&endpoints, true);
         write_new(&receiver.join("direct.json"), client.to_string().as_bytes())
+            .map_err(write_error)?;
+        let pins: Vec<_> = client_pins.iter().filter(|peer| **peer != pin).collect();
+        let server = json!({
+            "share": share, "generation": 1, "members": members,
+            "bind": listen.to_string(), "client_pins": pins,
+            "ca_der": "ca.der", "certificate_der": "certificate.der",
+            "private_key_der": "private-key.der", "event_key": "event-key.bin",
+        });
+        write_new(&receiver.join("server.json"), server.to_string().as_bytes())
             .map_err(write_error)?;
     }
     for (index, (directory, listen, pin)) in servers.into_iter().enumerate() {

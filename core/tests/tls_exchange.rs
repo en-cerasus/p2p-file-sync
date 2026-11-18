@@ -354,10 +354,11 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
             assert!(destination.join("空フォルダー").is_dir());
         }
         let direct = setup.join("receiver-1/direct.json");
+        let mirror_config = setup.join("receiver-1/server.json");
         let mirror_state = path.join("mirror-state");
         let imported = std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
             .arg("catch-up")
-            .arg(&server_config)
+            .arg(&mirror_config)
             .arg(&mirror_state)
             .arg(&direct)
             .output()
@@ -368,19 +369,38 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
             String::from_utf8_lossy(&imported.stderr)
         );
         serving.join().unwrap();
-        let mut mirror = Sender::open(&server_config, &mirror_state).unwrap();
+        let rejected = std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
+            .arg("publish-tree")
+            .arg(&mirror_config)
+            .arg(&mirror_state)
+            .arg(&tree)
+            .output()
+            .unwrap();
+        assert!(!rejected.status.success());
+        let mut mirror = Sender::open(&mirror_config, &mirror_state).unwrap();
         let listener = mirror.bind().unwrap();
+        let relay_direct = setup.join("receiver-2/direct.json");
         let mut settings: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&direct).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(&relay_direct).unwrap()).unwrap();
         settings["address"] = listener.local_addr().unwrap().to_string().into();
-        std::fs::write(&direct, settings.to_string()).unwrap();
+        settings["server_pin"] = encode_hex(&sha256(
+            &std::fs::read(setup.join("receiver-1/certificate.der")).unwrap(),
+        ))
+        .into();
+        settings.as_object_mut().unwrap().remove("fallback_peers");
+        std::fs::write(&relay_direct, settings.to_string()).unwrap();
         let serving = threads.spawn(move || {
             let (socket, _) = listener.accept().unwrap();
             mirror.serve(socket).unwrap();
         });
         let destination = path.join("mirror-destination");
         std::fs::create_dir(&destination).unwrap();
-        let report = pull_from_config(&direct, &path.join("client-state"), &destination).unwrap();
+        let report = pull_from_config(
+            &relay_direct,
+            &path.join("mirror-client-state"),
+            &destination,
+        )
+        .unwrap();
         assert_eq!(report.files_published, 1);
         assert_eq!(
             std::fs::read(destination.join("譜面/試験譜面.tja")).unwrap(),

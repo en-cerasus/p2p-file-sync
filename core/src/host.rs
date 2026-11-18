@@ -169,9 +169,12 @@ impl Sender {
             .try_into()
             .map_err(|_| HostError::Configuration)?;
         let signer = PeerSigningKey::from_bytes(seed);
-        roster
-            .check_writer(&signer.verifying_key().to_bytes())
-            .map_err(|_| HostError::Configuration)?;
+        if !roster
+            .roles()
+            .contains_key(&signer.verifying_key().to_bytes())
+        {
+            return Err(HostError::Configuration);
+        }
         let share_root = state_root.join(config.share.to_ascii_lowercase());
         let generation_marker = share_root.join("active-generation");
         let root = share_root.join(config.generation.to_string());
