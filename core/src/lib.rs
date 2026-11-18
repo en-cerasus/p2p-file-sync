@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod blob;
+pub mod catchup;
 pub mod chunks;
 mod local_target;
 pub mod materialize;

@@ -57,6 +57,7 @@ enum Record {
 struct Index {
     offset: i64,
     replica: Replica,
+    event_order: Vec<EventId>,
     signed_events: BTreeMap<EventId, Vec<u8>>,
     protections: BTreeMap<(ObjectId, EventId, EventId), Protection>,
 }
@@ -118,6 +119,10 @@ impl Store {
 
     pub(crate) fn membership(&self) -> &Membership {
         &self.membership
+    }
+
+    pub(crate) fn event_order(&self) -> &[EventId] {
+        &self.index.event_order
     }
 
     /// Original signed event for forwarding to another peer.
@@ -265,6 +270,7 @@ impl Index {
                         }
                     }
                 }
+                self.event_order.push(event.id);
                 self.replica.record(event);
                 if let Some((id, wire)) = signature {
                     self.signed_events.insert(id, wire);
