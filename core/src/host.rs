@@ -1010,6 +1010,9 @@ pub(crate) fn pull_with_originals(
         .map_err(HostError::Io)?;
     let protected = crate::archive::ProtectedStorage::from_originals(&originals);
     let conflicts = store.file_conflicts(&completed).map_err(HostError::Io)?;
+    let history = store
+        .archives(std::time::SystemTime::now())
+        .map_err(HostError::Store)?;
     Ok((
         PullSummaryV3 {
             sync: summary,
@@ -1020,6 +1023,7 @@ pub(crate) fn pull_with_originals(
         crate::archive::SyncDetails {
             originals,
             conflicts,
+            history,
         },
     ))
 }

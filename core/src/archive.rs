@@ -21,6 +21,7 @@ pub const RETENTION_SECONDS: i64 = 48 * 60 * 60;
 pub struct SyncDetails {
     pub originals: Vec<ProtectedOriginal>,
     pub conflicts: Vec<FileConflict>,
+    pub history: Vec<ArchivedFile>,
 }
 
 #[derive(Debug, Serialize)]

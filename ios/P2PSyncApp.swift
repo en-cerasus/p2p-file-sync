@@ -122,6 +122,7 @@ struct DirectSyncView: View {
     @State private var result = ""
     @State private var originals: [SyncCore.ProtectedOriginal] = []
     @State private var conflicts: [SyncCore.FileConflict] = []
+    @State private var history: [SyncCore.HistoryEntry] = []
 
     private var shouldPoll: Bool {
         automaticSync && configFolder != nil && phase == .active && !pickingFolder
@@ -172,6 +173,21 @@ struct DirectSyncView: View {
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
+                        }
+                    }
+                }
+            }
+            if !history.isEmpty {
+                Section("48時間の履歴") {
+                    ForEach(history.indices, id: \.self) { index in
+                        let entry = history[index]
+                        VStack(alignment: .leading) {
+                            Text(entry.path?.joined(separator: "/") ?? "パス不明")
+                            Text("\(entry.content.length.formatted()) バイト")
+                            Text(Date(timeIntervalSince1970: TimeInterval(entry.archived_at)), style: .date)
+                                .font(.caption).foregroundStyle(.secondary)
+                            Text(Date(timeIntervalSince1970: TimeInterval(entry.archived_at)), style: .time)
+                                .font(.caption).foregroundStyle(.secondary)
                         }
                     }
                 }
@@ -239,6 +255,7 @@ struct DirectSyncView: View {
             configFolder = url
             originals = []
             conflicts = []
+            history = []
             result = ""
         } catch {
             result = "接続設定フォルダーへのアクセスを保存できませんでした。"
@@ -289,6 +306,7 @@ struct DirectSyncView: View {
             let summary = try await operation.value
             originals = summary.originals
             conflicts = summary.conflicts
+            history = summary.history
             result = "イベント \(summary.eventsAdded) 件、新規 \(summary.filesPublished) 件、更新 \(summary.filesUpdated) 件、削除 \(summary.filesRemoved) 件、変更なし \(summary.filesPresent) 件、保留 \(summary.filesBlocked) 件\n保護原本 \(summary.protectedFiles) 件 (\(summary.protectedBytes.formatted()) バイト)、未取得 \(summary.protectedMissing) 件"
         } catch SyncRunner.Failure.busy {
             result = "別の同期が進行中です。"
@@ -296,6 +314,7 @@ struct DirectSyncView: View {
             self.configFolder = nil
             originals = []
             conflicts = []
+            history = []
             result = "接続設定フォルダーへのアクセスを失いました。もう一度選択してください。"
         } catch SyncCore.CoreError.pullFailed(let status) {
             switch status {

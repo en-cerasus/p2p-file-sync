@@ -225,6 +225,7 @@ fn exchanges_signed_events_only_after_mutual_tls_and_pin_validation() {
         let details: serde_json::Value = serde_json::from_slice(&json).unwrap();
         assert_eq!(details["originals"], serde_json::json!([]));
         assert_eq!(details["conflicts"], serde_json::json!([]));
+        assert_eq!(details["history"], serde_json::json!([]));
         assert_eq!(report.events_added, 2);
         assert_eq!(report.files_published, 1);
         assert_eq!(report.files_blocked, 0);

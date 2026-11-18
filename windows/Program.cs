@@ -32,6 +32,8 @@ internal sealed class SyncWindow : Window
     private readonly Expander originals = new() { Header = "保護原本の一覧", Visibility = Visibility.Collapsed };
     private readonly ListBox conflictList = new() { MaxHeight = 240 };
     private readonly Expander conflicts = new() { Header = "未解決の競合", Visibility = Visibility.Collapsed };
+    private readonly ListBox historyList = new() { MaxHeight = 240 };
+    private readonly Expander history = new() { Header = "48時間の履歴", Visibility = Visibility.Collapsed };
     private readonly CheckBox autoSync = new()
     {
         Content = "10 秒ごとに自動同期",
@@ -66,6 +68,8 @@ internal sealed class SyncWindow : Window
         panel.Children.Add(originals);
         conflicts.Content = conflictList;
         panel.Children.Add(conflicts);
+        history.Content = historyList;
+        panel.Children.Add(history);
         Content = panel;
         RestorePreferences();
         var trayMenu = new System.Windows.Forms.ContextMenuStrip();
@@ -164,6 +168,8 @@ internal sealed class SyncWindow : Window
                 originals.Visibility = Visibility.Collapsed;
                 conflictList.ItemsSource = null;
                 conflicts.Visibility = Visibility.Collapsed;
+                historyList.ItemsSource = null;
+                history.Visibility = Visibility.Collapsed;
                 SavePreferences();
             }
         }
@@ -294,6 +300,10 @@ internal sealed class SyncWindow : Window
                      version.Kind == "directory" ? "フォルダー" :
                      version.Bytes is ulong bytes ? $"{bytes:N0} バイト" : "本体未取得")))).ToArray();
                 conflicts.Visibility = pull.Conflicts.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+                historyList.ItemsSource = pull.History.Select(entry =>
+                    $"{(entry.Path is null ? "パス不明" : string.Join("/", entry.Path))}\n" +
+                    $"{entry.Content.Length:N0} バイト · {DateTimeOffset.FromUnixTimeSeconds(entry.ArchivedAt).ToLocalTime():g}").ToArray();
+                history.Visibility = pull.History.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
             }
         }
         catch (JsonException)
@@ -365,11 +375,18 @@ internal static class SyncCore
         [property: JsonPropertyName("object")] string Object,
         [property: JsonPropertyName("versions")] ConflictVersion[] Versions);
 
+    internal sealed record HistoryContent([property: JsonPropertyName("length")] ulong Length);
+    internal sealed record HistoryEntry(
+        [property: JsonPropertyName("path")] string[]? Path,
+        [property: JsonPropertyName("content")] HistoryContent Content,
+        [property: JsonPropertyName("archived_at")] long ArchivedAt);
+
     private sealed record SyncDetails(
         [property: JsonPropertyName("originals")] ProtectedOriginal[] Originals,
-        [property: JsonPropertyName("conflicts")] FileConflict[] Conflicts);
+        [property: JsonPropertyName("conflicts")] FileConflict[] Conflicts,
+        [property: JsonPropertyName("history")] HistoryEntry[] History);
 
-    internal static (int Status, PullSummary Summary, ProtectedOriginal[] Originals, FileConflict[] Conflicts) Pull(
+    internal static (int Status, PullSummary Summary, ProtectedOriginal[] Originals, FileConflict[] Conflicts, HistoryEntry[] History) Pull(
         string config, string state, string destination, CancellationToken cancellation)
     {
         byte[] configBytes = Encoding.UTF8.GetBytes(config);
@@ -389,10 +406,10 @@ internal static class SyncCore
             }, IntPtr.Zero, _ => cancellation.IsCancellationRequested ? (byte)1 : (byte)0);
         if (status != 0)
         {
-            return (status, summary, [], []);
+            return (status, summary, [], [], []);
         }
         var details = json is null ? null : JsonSerializer.Deserialize<SyncDetails>(json);
-        return details is null ? (6, summary, [], []) : (status, summary, details.Originals, details.Conflicts);
+        return details is null ? (6, summary, [], [], []) : (status, summary, details.Originals, details.Conflicts, details.History);
     }
 
     internal static string ErrorMessage(int status) => status switch
