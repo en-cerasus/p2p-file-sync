@@ -129,6 +129,7 @@ pub struct Sender {
     write_lock: PathBuf,
     private_paths: Vec<PathBuf>,
     baseline_digest: Option<[u8; 32]>,
+    generation_marker: PathBuf,
 }
 
 impl Sender {
@@ -171,9 +172,9 @@ impl Sender {
         roster
             .check_writer(&signer.verifying_key().to_bytes())
             .map_err(|_| HostError::Configuration)?;
-        let root = state_root
-            .join(config.share.to_ascii_lowercase())
-            .join(config.generation.to_string());
+        let share_root = state_root.join(config.share.to_ascii_lowercase());
+        let generation_marker = share_root.join("active-generation");
+        let root = share_root.join(config.generation.to_string());
         fs::create_dir_all(&root).map_err(HostError::Io)?;
         let completed = BlobStore::open(root.join("files")).map_err(HostError::Io)?;
         let config_directory = configuration.parent().ok_or(HostError::Configuration)?;
@@ -194,7 +195,7 @@ impl Sender {
         .map_err(HostError::Tls)?;
         let private_paths = [
             configuration.to_owned(),
-            root.clone(),
+            share_root,
             config_directory.join(config.private_key_der),
             config_directory.join(&config.event_key),
         ]
@@ -219,7 +220,13 @@ impl Sender {
             write_lock: root.join("write.lock"),
             private_paths,
             baseline_digest,
+            generation_marker,
         };
+        activate_generation(
+            &sender.generation_marker,
+            config.generation,
+            baseline_digest,
+        )?;
         let _lock = sender.lock_state()?;
         sender.sweep_archives()?;
         Ok(sender)
@@ -228,7 +235,16 @@ impl Sender {
     fn lock_state(&self) -> Result<File, HostError> {
         let file = self.open_state_lock()?;
         file.lock().map_err(HostError::Io)?;
+        self.check_generation()?;
         Ok(file)
+    }
+
+    fn check_generation(&self) -> Result<(), HostError> {
+        check_generation(
+            &self.generation_marker,
+            self.roster.membership().generation,
+            self.baseline_digest,
+        )
     }
 
     fn open_state_lock(&self) -> Result<File, HostError> {
@@ -418,6 +434,7 @@ impl Sender {
     }
 
     pub fn bind(&self) -> Result<TcpListener, HostError> {
+        self.check_generation()?;
         TcpListener::bind(self.address).map_err(HostError::Io)
     }
 
@@ -535,6 +552,7 @@ impl Sender {
     }
 
     pub fn serve(&mut self, socket: TcpStream) -> Result<(), HostError> {
+        self.check_generation()?;
         {
             let lock = self.open_state_lock()?;
             // A concurrent outbound pull may be waiting for this peer to serve.
@@ -576,6 +594,61 @@ pub enum HostError {
     CheckpointData(CheckpointDataError),
     CheckpointTooLarge,
     Baseline(BaselineError),
+    InactiveGeneration,
+}
+
+fn generation_marker_bytes(generation: u64, digest: [u8; 32]) -> [u8; 40] {
+    let mut marker = [0; 40];
+    marker[..8].copy_from_slice(&generation.to_be_bytes());
+    marker[8..].copy_from_slice(&digest);
+    marker
+}
+
+fn check_generation(
+    marker: &Path,
+    generation: u64,
+    digest: Option<[u8; 32]>,
+) -> Result<(), HostError> {
+    match read_bounded(marker, 40) {
+        Ok(active)
+            if digest
+                .is_some_and(|digest| active == generation_marker_bytes(generation, digest)) =>
+        {
+            Ok(())
+        }
+        Ok(_) => Err(HostError::InactiveGeneration),
+        Err(HostError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Publish the first verified transition atomically. Concurrent attempts
+/// must agree with the already activated checkpoint and generation.
+fn activate_generation(
+    marker: &Path,
+    generation: u64,
+    digest: Option<[u8; 32]>,
+) -> Result<(), HostError> {
+    check_generation(marker, generation, digest)?;
+    let Some(digest) = digest else { return Ok(()) };
+    let parent = marker.parent().ok_or(HostError::Configuration)?;
+    let name = marker
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(HostError::Configuration)?;
+    match write_bundle_file(parent, name, &generation_marker_bytes(generation, digest)) {
+        Ok(()) => {
+            #[cfg(unix)]
+            File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(HostError::Io)?;
+            Ok(())
+        }
+        Err(HostError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            check_generation(marker, generation, Some(digest))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn open_host_store(
@@ -787,8 +860,8 @@ pub(crate) fn pull_with_originals(
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    let state_root = state_root
-        .join(config.share.to_ascii_lowercase())
+    let share_root = state_root.join(config.share.to_ascii_lowercase());
+    let state_root = share_root
         .join(config.generation.to_string())
         .join(destination_id);
     fs::create_dir_all(&state_root).map_err(HostError::Io)?;
@@ -810,6 +883,11 @@ pub(crate) fn pull_with_originals(
         baseline_digest,
     )
     .map_err(HostError::Tls)?;
+    activate_generation(
+        &share_root.join("active-generation"),
+        config.generation,
+        baseline_digest,
+    )?;
 
     store
         .prune_archives(std::time::SystemTime::now())

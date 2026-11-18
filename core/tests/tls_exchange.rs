@@ -559,7 +559,18 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
     });
     legacy["migration"] = migration.clone();
     std::fs::write(&next_config, legacy.to_string()).unwrap();
+    let old_sender = Sender::open(&server_config, &server_state).unwrap();
+    let old_receiver = receiver.with_file_name("old-generation.json");
+    std::fs::write(&old_receiver, config.to_string()).unwrap();
     let mut upgraded = Sender::open(&next_config, &server_state).unwrap();
+    assert!(matches!(
+        old_sender.bind(),
+        Err(p2p_sync_core::host::HostError::InactiveGeneration)
+    ));
+    assert!(matches!(
+        Sender::open(&server_config, &server_state),
+        Err(p2p_sync_core::host::HostError::InactiveGeneration)
+    ));
     let new_file = path.join("after-migration.tja");
     std::fs::write(&new_file, b"new generation").unwrap();
     upgraded.publish(&new_file).unwrap();
@@ -594,6 +605,10 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
         session.join().unwrap();
     });
     assert!(!destination.join("譜面/試験譜面.tja").exists());
+    assert!(matches!(
+        pull_from_config(&old_receiver, &path.join("client-state"), &destination),
+        Err(p2p_sync_core::host::HostError::InactiveGeneration)
+    ));
     assert_eq!(
         std::fs::read(destination.join("after-migration.tja")).unwrap(),
         b"new generation"

@@ -258,7 +258,7 @@ unsafe fn pull_to_output<T: From<host::PullSummaryV3>>(
         };
         let (summary, entries) =
             host::pull_with_originals(config, state, destination).map_err(|error| match error {
-                host::HostError::Configuration => 2,
+                host::HostError::Configuration | host::HostError::InactiveGeneration => 2,
                 host::HostError::Io(_) | host::HostError::Store(_) => 3,
                 host::HostError::Tls(_) => 4,
                 host::HostError::Direct(_)
