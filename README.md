@@ -45,7 +45,7 @@ GitHub Actionsの「Build unsigned iOS IPA」も手動で実行できます。�
 |`server_pin`|配信ピアの証明書DERのSHA-256を64桁の16進数で指定|
 |`ca_der`、`certificate_der`、`private_key_der`|それぞれCA証明書、クライアント証明書、クライアント秘密鍵のDERファイル名。JSONからの相対パスを使用可能|
 
-鍵や接続設定は信頼できるローカルファイルを使用してください。接続先の登録・配信開始・証明書発行の画面と、同期先の既存ファイルの更新・削除は未実装です。
+鍵や接続設定は信頼できるローカルファイルを使用してください。接続先の登録・配信開始・証明書発行の画面と、同期先の既存ファイルの更新は保留されます。Windowsは反映済みの版と一致するファイルを削除できます。
 
 ### Windowsからの試験配信
 
@@ -91,4 +91,4 @@ cargo run --locked --release -p p2p-sync-core --bin p2p-send -- update .\trial-s
 cargo run --locked --release -p p2p-sync-core --bin p2p-send -- delete .\trial-setup\sender\server.json .\server-state '譜面/song.tja'
 ```
 
-両コマンドは共有上のイベントを記録します。配信時に指定した元ファイルは引き続きローカルに残ります。受信側で既に保存されたファイルの更新・削除は保留と表示されます。
+両コマンドは共有上のイベントを記録します。配信時に指定した元ファイルは引き続きローカルに残ります。Windowsの受信側は最後に反映した版と一致し、他のアプリが開いていない場合に削除します。変更済みのファイル、更新による置換、iOSでの削除は保留と表示されます。

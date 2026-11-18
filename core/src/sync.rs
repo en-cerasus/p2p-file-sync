@@ -34,6 +34,7 @@ pub enum SyncError {
 #[derive(Debug, Eq, PartialEq)]
 pub enum FileResult {
     Published,
+    Removed,
     Present,
     BlockedPath(PathIssue),
     ExistingContent,
@@ -137,6 +138,21 @@ fn publish_heads(
     }
 
     for (object, event, previous, live) in files {
+        #[cfg(windows)]
+        if !live {
+            match store.recover_deleted_file(destination.completed, destination.root, object) {
+                Ok(Recovery::NonePending) => {}
+                Ok(outcome) => {
+                    report.files.push((object, deletion_result(outcome)));
+                    continue;
+                }
+                Err(MaterializeError::InvalidIntent) => {
+                    report.files.push((object, FileResult::PendingRecovery));
+                    continue;
+                }
+                Err(error) => return Err(SyncError::Materialize(error)),
+            }
+        }
         match store.recover_new_file(destination.completed, destination.root, object) {
             Ok(Recovery::NonePending) => {}
             Ok(outcome) => {
@@ -169,6 +185,14 @@ fn publish_heads(
             .map_err(SyncError::Materialize)?;
 
         if is_update {
+            #[cfg(windows)]
+            if !live {
+                let outcome = store
+                    .recover_deleted_file(destination.completed, destination.root, object)
+                    .map_err(SyncError::Materialize)?;
+                report.files.push((object, deletion_result(outcome)));
+                continue;
+            }
             report.files.push((object, FileResult::PendingRecovery));
             continue;
         }
@@ -205,6 +229,14 @@ fn fetch_content(
         Err(error) => return Err(SyncError::Content(error)),
     }
     Ok(blob)
+}
+
+#[cfg(windows)]
+fn deletion_result(outcome: Recovery) -> FileResult {
+    match outcome {
+        Recovery::Applied | Recovery::AlreadyApplied => FileResult::Removed,
+        other => file_result(other),
+    }
 }
 
 fn file_result(outcome: Recovery) -> FileResult {

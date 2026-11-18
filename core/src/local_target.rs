@@ -21,6 +21,75 @@ pub(crate) struct NewFileTarget {
 }
 
 impl NewFileTarget {
+    #[cfg(windows)]
+    pub(crate) fn existing(root: &Dir, components: &[&str]) -> io::Result<Self> {
+        let (name, ancestors) = components.split_last().ok_or_else(invalid_name)?;
+        let mut parent = root.try_clone()?;
+        for component in ancestors {
+            validate_component(component).map_err(|_| invalid_name())?;
+            parent = parent.open_dir_nofollow(component)?;
+        }
+        validate_component(name).map_err(|_| invalid_name())?;
+        Ok(Self {
+            parent,
+            name: (*name).into(),
+        })
+    }
+
+    #[cfg(windows)]
+    fn delete_verified(&self, expected: Blob) -> io::Result<bool> {
+        use cap_std::fs::{MetadataExt, OpenOptionsExt};
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FileDispositionInfo, SetFileInformationByHandle, DELETE, FILE_ATTRIBUTE_REPARSE_POINT,
+            FILE_DISPOSITION_INFO, FILE_GENERIC_READ,
+        };
+
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        options
+            .access_mode(FILE_GENERIC_READ | DELETE)
+            .share_mode(0);
+        let mut file = match self.parent.open_with(&self.name, &options) {
+            Ok(file) => file,
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound || error.raw_os_error() == Some(32) =>
+            {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        };
+        let meta = file.metadata()?;
+        if !meta.is_file() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Ok(false);
+        }
+        let mut hash = Sha256::new();
+        let length = io::copy(&mut file, &mut hash)?;
+        if expected
+            != (Blob {
+                hash: hash.finalize().into(),
+                length,
+            })
+        {
+            return Ok(false);
+        }
+        let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+        // The same exclusive handle was hashed above and remains open until
+        // deletion. A path lookup after validation cannot select another file.
+        let success = unsafe {
+            SetFileInformationByHandle(
+                file.as_raw_handle(),
+                FileDispositionInfo,
+                (&disposition as *const FILE_DISPOSITION_INFO).cast(),
+                std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+            )
+        };
+        if success == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        drop(file);
+        Ok(true)
+    }
     pub(crate) fn open(root: &Dir, components: &[&str]) -> io::Result<Self> {
         let (name, ancestors) = components.split_last().ok_or_else(invalid_name)?;
         let parent = open_or_create_directories(root, ancestors)?;
@@ -86,6 +155,11 @@ impl FileTarget for NewFileTarget {
         intent: &FileIntent,
         replacement: Option<File>,
     ) -> io::Result<bool> {
+        #[cfg(windows)]
+        if let (None, Some(previous)) = (&replacement, intent.previous) {
+            return self.delete_verified(previous);
+        }
+
         let Some(mut replacement) = replacement.filter(|_| intent.previous.is_none()) else {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,

@@ -372,3 +372,73 @@ fn pending_file_does_not_follow_a_parent_renamed_after_staging() {
     assert_eq!(store.pending_files().unwrap(), [intent]);
     assert!(store.applied_file(object).unwrap().is_none());
 }
+
+#[cfg(windows)]
+#[test]
+fn windows_deletion_keeps_changed_or_open_files_and_removes_the_verified_version() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let f = Fixture::new();
+    let root = f.folder.path().join("destination");
+    std::fs::create_dir(&root).unwrap();
+    let mut store = f.open();
+    let create = FileIntent {
+        previous: None,
+        ..f.intent.clone()
+    };
+    store.stage_file(&f.blobs, &create).unwrap();
+    assert_eq!(
+        store.recover_new_file(&f.blobs, &root, OBJECT).unwrap(),
+        Recovery::Applied
+    );
+    let path = root.join("song.tja");
+
+    let id = EventId {
+        peer: PEER,
+        sequence: 3,
+    };
+    store
+        .apply_verified(Event {
+            id,
+            context: [(PEER, 2)].into(),
+            object: OBJECT,
+            change: Change::Revise {
+                base: create.event,
+                entry: None,
+            },
+        })
+        .unwrap();
+    let deletion = FileIntent {
+        object: OBJECT,
+        event: id,
+        previous: create.desired,
+        desired: None,
+    };
+    store.stage_file(&f.blobs, &deletion).unwrap();
+
+    std::fs::write(&path, b"user edit").unwrap();
+    assert_eq!(
+        store.recover_deleted_file(&f.blobs, &root, OBJECT).unwrap(),
+        Recovery::Diverged
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"user edit");
+    std::fs::write(&path, b"new").unwrap();
+
+    let writer = std::fs::OpenOptions::new()
+        .write(true)
+        .share_mode(7)
+        .open(&path)
+        .unwrap();
+    assert_eq!(
+        store.recover_deleted_file(&f.blobs, &root, OBJECT).unwrap(),
+        Recovery::Diverged
+    );
+    drop(writer);
+    assert_eq!(
+        store.recover_deleted_file(&f.blobs, &root, OBJECT).unwrap(),
+        Recovery::Applied
+    );
+    assert!(!path.exists());
+    assert_eq!(store.applied_file(OBJECT).unwrap().unwrap().contents, None);
+    assert!(f.blobs.open_verified(create.desired.unwrap()).is_ok());
+}

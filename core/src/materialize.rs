@@ -199,6 +199,59 @@ impl Store {
         let mut target = NewFileTarget::open(&open_root(root)?, &current_path)?;
         reconcile(tx, blobs, &mut target, &intent, Some(path), true)
     }
+
+    /// Apply a tombstone only to the recorded local version at its original
+    /// path. Windows locks and removes the exact verified file by handle.
+    #[cfg(windows)]
+    pub fn recover_deleted_file(
+        &mut self,
+        blobs: &BlobStore,
+        root: &Path,
+        object: ObjectId,
+    ) -> Result<Recovery, MaterializeError> {
+        let (tx, replica) = self.begin_indexed_write()?;
+        let Some((intent, path)) = load_intent(&tx, object)? else {
+            return Ok(Recovery::NonePending);
+        };
+        let (Some(previous), Some(path)) = (intent.previous, path) else {
+            return Err(MaterializeError::InvalidIntent);
+        };
+        if intent.desired.is_some() {
+            return Err(MaterializeError::InvalidIntent);
+        }
+        let Some(applied) = read_applied(&tx, object)? else {
+            return Ok(Recovery::Superseded);
+        };
+        if !matches_head(replica, &intent)
+            || applied.contents != Some(previous)
+            || applied.path.as_ref() != Some(&path)
+        {
+            return Ok(Recovery::Superseded);
+        }
+        let Some(entry) = replica
+            .get(applied.event)
+            .filter(|event| event.object == object)
+            .and_then(|event| event.change.entry())
+        else {
+            return Ok(Recovery::Superseded);
+        };
+        let projection = Projection::new(replica);
+        let Some((name, ancestors)) = path.split_last() else {
+            return Ok(Recovery::Superseded);
+        };
+        let parent_matches = match entry.parent {
+            Some(parent) => projection
+                .path(parent)
+                .is_ok_and(|current| current.into_iter().eq(ancestors.iter().map(String::as_str))),
+            None => ancestors.is_empty(),
+        };
+        if entry.name != *name || !parent_matches || !projection.vacant(entry.parent, name) {
+            return Ok(Recovery::Superseded);
+        }
+        let components: Vec<_> = path.iter().map(String::as_str).collect();
+        let mut target = NewFileTarget::existing(&open_root(root)?, &components)?;
+        reconcile(tx, blobs, &mut target, &intent, Some(path), true)
+    }
 }
 
 fn reconcile(

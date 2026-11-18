@@ -327,13 +327,24 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
     std::fs::create_dir(&destination).unwrap();
     std::thread::scope(|threads| {
         let session = threads.spawn(move || {
-            let (socket, _) = listener.accept().unwrap();
-            sender.serve(socket).unwrap();
+            for _ in 0..1 + usize::from(cfg!(windows)) {
+                let (socket, _) = listener.accept().unwrap();
+                sender.serve(socket).unwrap();
+            }
         });
         let report = pull_from_config(&receiver, &path.join("client-state"), &destination).unwrap();
         assert_eq!(report.events_added, 5);
         assert_eq!(report.files_published, 0);
         assert!(!destination.join("譜面/試験譜面.tja").exists());
+        #[cfg(windows)]
+        {
+            let existing = path.join("destination-1");
+            let report =
+                pull_from_config(&receiver, &path.join("client-state"), &existing).unwrap();
+            assert_eq!(report.events_added, 2);
+            assert_eq!(report.files_blocked, 0);
+            assert!(!existing.join("譜面/試験譜面.tja").exists());
+        }
         session.join().unwrap();
     });
 }

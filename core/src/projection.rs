@@ -64,6 +64,11 @@ impl<'a> Projection<'a> {
         }
     }
 
+    #[cfg(windows)]
+    pub(crate) fn vacant(&self, parent: Option<ObjectId>, name: &str) -> bool {
+        collision_key(name).is_ok_and(|key| !self.occupants.contains_key(&(parent, key)))
+    }
+
     fn entry(&self, object: ObjectId) -> Result<&'a Entry, PathIssue> {
         let mut heads = self.replica.heads(object);
         let head = heads.next().ok_or(PathIssue::Missing(object))?;
