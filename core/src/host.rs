@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     fs::{self, File},
     io::Read,
-    net::SocketAddr,
+    net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -14,13 +14,14 @@ use rustls::{
 use serde::Deserialize;
 
 use crate::{
-    auth::{Role, Roster},
+    auth::{PeerSigningKey, Role, Roster},
     blob::BlobStore,
     direct::{self, DirectError, PeerEndpoint},
-    replica::PeerId,
+    publish::{publish_file, PublishError},
+    replica::{EventId, PeerId},
     store::{Store, StoreError},
     sync::{Destination, FileResult},
-    tls::{Client, Credentials, TlsError},
+    tls::{CertificatePin, Client, Credentials, Server, TlsError},
 };
 
 const MAX_CONFIG_BYTES: u64 = 256 * 1024;
@@ -42,6 +43,112 @@ struct Config {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SenderConfig {
+    share: String,
+    generation: u64,
+    members: BTreeMap<String, ConfigRole>,
+    bind: SocketAddr,
+    client_pin: String,
+    ca_der: PathBuf,
+    certificate_der: PathBuf,
+    private_key_der: PathBuf,
+    event_key: PathBuf,
+}
+
+pub struct Sender {
+    address: SocketAddr,
+    client_pin: CertificatePin,
+    server: Server,
+    roster: Roster,
+    signer: PeerSigningKey,
+    store: Store,
+    completed: BlobStore,
+}
+
+impl Sender {
+    pub fn open(configuration: &Path, state_root: &Path) -> Result<Self, HostError> {
+        let config: SenderConfig =
+            serde_json::from_slice(&read_bounded(configuration, MAX_CONFIG_BYTES)?)
+                .map_err(|_| HostError::Configuration)?;
+        let roster = build_roster(&config.share, config.generation, config.members)?;
+        let client_pin = hex(&config.client_pin)?;
+        let (roots, credentials) = read_credentials(
+            configuration,
+            &config.ca_der,
+            &config.certificate_der,
+            &config.private_key_der,
+        )?;
+        let material = read_bounded(
+            &configuration
+                .parent()
+                .ok_or(HostError::Configuration)?
+                .join(config.event_key),
+            32,
+        )?;
+        let seed: &[u8; 32] = material
+            .as_slice()
+            .try_into()
+            .map_err(|_| HostError::Configuration)?;
+        let signer = PeerSigningKey::from_bytes(seed);
+        roster
+            .check_writer(&signer.verifying_key().to_bytes())
+            .map_err(|_| HostError::Configuration)?;
+        let server = Server::new(roots, credentials).map_err(HostError::Tls)?;
+        let root = state_root
+            .join(config.share.to_ascii_lowercase())
+            .join(config.generation.to_string());
+        fs::create_dir_all(&root).map_err(HostError::Io)?;
+        let completed = BlobStore::open(root.join("files")).map_err(HostError::Io)?;
+        let store = Store::open(root.join("sync.db"), roster.membership().clone())
+            .map_err(HostError::Store)?;
+        Ok(Self {
+            address: config.bind,
+            client_pin,
+            server,
+            roster,
+            signer,
+            store,
+            completed,
+        })
+    }
+
+    pub fn publish(&mut self, source: &Path) -> Result<EventId, HostError> {
+        let name = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(HostError::Configuration)?;
+        publish_file(
+            source,
+            &mut self.store,
+            &self.roster,
+            &self.signer,
+            &self.completed,
+            None,
+            name,
+        )
+        .map_err(HostError::Publish)
+    }
+
+    pub fn bind(&self) -> Result<TcpListener, HostError> {
+        TcpListener::bind(self.address).map_err(HostError::Io)
+    }
+
+    pub fn serve(&mut self, socket: TcpStream) -> Result<(), HostError> {
+        direct::serve(
+            &self.server,
+            socket,
+            self.client_pin,
+            Duration::from_secs(15),
+            &mut self.store,
+            &self.roster,
+            &self.completed,
+        )
+        .map_err(HostError::Direct)
+    }
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum ConfigRole {
     Reader,
@@ -55,6 +162,7 @@ pub enum HostError {
     Store(StoreError),
     Tls(TlsError),
     Direct(DirectError),
+    Publish(PublishError),
 }
 
 #[repr(C)]
@@ -75,38 +183,16 @@ pub fn pull_from_config(
 ) -> Result<PullSummary, HostError> {
     let config: Config = serde_json::from_slice(&read_bounded(configuration, MAX_CONFIG_BYTES)?)
         .map_err(|_| HostError::Configuration)?;
-    let share = hex::<16>(&config.share)?;
-    if config.members.is_empty() || config.members.len() > MAX_MEMBERS || config.generation == 0 {
-        return Err(HostError::Configuration);
-    }
-    let server_pin = hex::<32>(&config.server_pin)?;
+    let roster = build_roster(&config.share, config.generation, config.members)?;
+    let server_pin = hex(&config.server_pin)?;
     let server_name =
         ServerName::try_from(config.server_name).map_err(|_| HostError::Configuration)?;
-    let mut roles = BTreeMap::<PeerId, Role>::new();
-    for (peer, role) in config.members {
-        let peer = hex(&peer)?;
-        let role = match role {
-            ConfigRole::Reader => Role::Reader,
-            ConfigRole::Writer => Role::Writer,
-        };
-        if roles.insert(peer, role).is_some() {
-            return Err(HostError::Configuration);
-        }
-    }
-    let roster = Roster::new(share, config.generation, roles);
-    let directory = configuration.parent().ok_or(HostError::Configuration)?;
-    let read_credential = |path: &Path| read_bounded(&directory.join(path), MAX_CREDENTIAL_BYTES);
-    let mut roots = RootCertStore::empty();
-    roots
-        .add(CertificateDer::from(read_credential(&config.ca_der)?))
-        .map_err(|_| HostError::Configuration)?;
-    let credentials = Credentials {
-        chain: vec![CertificateDer::from(read_credential(
-            &config.certificate_der,
-        )?)],
-        key: PrivateKeyDer::try_from(read_credential(&config.private_key_der)?)
-            .map_err(|_| HostError::Configuration)?,
-    };
+    let (roots, credentials) = read_credentials(
+        configuration,
+        &config.ca_der,
+        &config.certificate_der,
+        &config.private_key_der,
+    )?;
     let client = Client::new(roots, credentials).map_err(HostError::Tls)?;
     let peer = PeerEndpoint {
         address: config.address,
@@ -158,6 +244,47 @@ pub fn pull_from_config(
         }
     }
     Ok(summary)
+}
+
+fn build_roster(
+    share: &str,
+    generation: u64,
+    members: BTreeMap<String, ConfigRole>,
+) -> Result<Roster, HostError> {
+    if members.is_empty() || members.len() > MAX_MEMBERS || generation == 0 {
+        return Err(HostError::Configuration);
+    }
+    let mut roles = BTreeMap::<PeerId, Role>::new();
+    for (peer, role) in members {
+        let peer = hex(&peer)?;
+        let role = match role {
+            ConfigRole::Reader => Role::Reader,
+            ConfigRole::Writer => Role::Writer,
+        };
+        if roles.insert(peer, role).is_some() {
+            return Err(HostError::Configuration);
+        }
+    }
+    Ok(Roster::new(hex(share)?, generation, roles))
+}
+
+fn read_credentials(
+    configuration: &Path,
+    ca_path: &Path,
+    certificate_path: &Path,
+    key_path: &Path,
+) -> Result<(RootCertStore, Credentials), HostError> {
+    let directory = configuration.parent().ok_or(HostError::Configuration)?;
+    let read = |path: &Path| read_bounded(&directory.join(path), MAX_CREDENTIAL_BYTES);
+    let mut roots = RootCertStore::empty();
+    roots
+        .add(CertificateDer::from(read(ca_path)?))
+        .map_err(|_| HostError::Configuration)?;
+    let credentials = Credentials {
+        chain: vec![CertificateDer::from(read(certificate_path)?)],
+        key: PrivateKeyDer::try_from(read(key_path)?).map_err(|_| HostError::Configuration)?,
+    };
+    Ok((roots, credentials))
 }
 
 fn hex<const N: usize>(value: &str) -> Result<[u8; N], HostError> {

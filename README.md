@@ -46,3 +46,23 @@ GitHub Actionsの「Build unsigned iOS IPA」も手動で実行できます。�
 |`ca_der`、`certificate_der`、`private_key_der`|それぞれCA証明書、クライアント証明書、クライアント秘密鍵のDERファイル名。JSONからの相対パスを使用可能|
 
 鍵や接続設定は信頼できるローカルファイルを使用してください。接続先の登録・配信開始・証明書発行の画面と、同期先の既存ファイルの更新・削除は未実装です。
+
+### Windowsからの試験配信
+
+受信設定と同じ `share`、`generation`、`members` を持つ `server.json` を用意します。配信には次のフィールドを指定します。
+
+|JSON項目|内容|
+|---|---|
+|`bind`|TCP待受のアドレスとポート。同一PCでの試験は `127.0.0.1:8765`|
+|`client_pin`|受信側証明書DERのSHA-256を64桁の16進数で指定|
+|`ca_der`、`certificate_der`、`private_key_der`|CA証明書、配信側証明書、配信側秘密鍵のDERファイル名|
+|`event_key`|配信側Ed25519秘密鍵の32バイトseedを保存したファイル。対応する公開鍵を `members` に `writer` として登録|
+
+ルート直下に共有するファイルを登録してから配信を開始します。同じ状態フォルダーを両コマンドに渡します。停止はCtrl+Cです。
+
+```powershell
+cargo run --locked --release -p p2p-sync-core --bin p2p-send -- publish .\server.json .\server-state .\song.tja
+cargo run --locked --release -p p2p-sync-core --bin p2p-send -- serve .\server.json .\server-state
+```
+
+現在は受信側証明書を1件指定する手動接続です。証明書の発行ツールと配信画面は未実装です。

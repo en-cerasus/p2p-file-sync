@@ -153,7 +153,7 @@ pub unsafe extern "C" fn p2p_sync_pull(
             host::HostError::Configuration => 2,
             host::HostError::Io(_) | host::HostError::Store(_) => 3,
             host::HostError::Tls(_) => 4,
-            host::HostError::Direct(_) => 5,
+            host::HostError::Direct(_) | host::HostError::Publish(_) => 5,
         })
     });
     match run {

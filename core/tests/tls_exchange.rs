@@ -195,3 +195,78 @@ fn exchanges_signed_events_only_after_mutual_tls_and_pin_validation() {
 fn encode_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
+
+#[test]
+fn command_line_publish_can_be_served_to_the_receive_host() {
+    use p2p_sync_core::host::{pull_from_config, Sender};
+
+    let (_, ca_der, server, client) = identities();
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path();
+    let files = [
+        ("ca.der", ca_der.as_ref()),
+        ("server.der", server.chain[0].as_ref()),
+        ("server-key.der", server.key.secret_der()),
+        ("client.der", client.chain[0].as_ref()),
+        ("client-key.der", client.key.secret_der()),
+    ];
+    for (name, body) in files {
+        std::fs::write(path.join(name), body).unwrap();
+    }
+    let key = PeerSigningKey::from_bytes(&[22; 32]);
+    std::fs::write(path.join("event-key.bin"), key.to_bytes()).unwrap();
+    let member = encode_hex(&key.verifying_key().to_bytes());
+    let share = encode_hex(&[10; 16]);
+    let server_config = path.join("server.json");
+    let server_state = path.join("server-state");
+    let settings = serde_json::json!({
+        "share": share, "generation": 1, "members": { (member.as_str()): "writer" },
+        "bind": "127.0.0.1:0", "client_pin": encode_hex(&certificate_pin(&client.chain[0])),
+        "ca_der": "ca.der", "certificate_der": "server.der",
+        "private_key_der": "server-key.der", "event_key": "event-key.bin"
+    });
+    std::fs::write(&server_config, settings.to_string()).unwrap();
+    let source = path.join("試験譜面.tja");
+    let contents = b"TITLE:Command line published";
+    std::fs::write(&source, contents).unwrap();
+    let register = std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
+        .arg("publish")
+        .arg(&server_config)
+        .arg(&server_state)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        register.status.success(),
+        "{}",
+        String::from_utf8_lossy(&register.stderr)
+    );
+
+    let mut sender = Sender::open(&server_config, &server_state).unwrap();
+    let listener = sender.bind().unwrap();
+    let address = listener.local_addr().unwrap();
+    let receive_config = path.join("direct.json");
+    let settings = serde_json::json!({
+        "share": share, "generation": 1, "members": { (member.as_str()): "writer" },
+        "address": address.to_string(), "server_name": "localhost",
+        "server_pin": encode_hex(&certificate_pin(&server.chain[0])),
+        "ca_der": "ca.der", "certificate_der": "client.der", "private_key_der": "client-key.der"
+    });
+    std::fs::write(&receive_config, settings.to_string()).unwrap();
+    let destination = path.join("destination");
+    std::fs::create_dir(&destination).unwrap();
+    std::thread::scope(|threads| {
+        let serving = threads.spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            sender.serve(socket).unwrap();
+        });
+        let report =
+            pull_from_config(&receive_config, &path.join("client-state"), &destination).unwrap();
+        assert_eq!(report.files_published, 1);
+        assert_eq!(
+            std::fs::read(destination.join("試験譜面.tja")).unwrap(),
+            contents
+        );
+        serving.join().unwrap();
+    });
+}
