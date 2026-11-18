@@ -292,17 +292,32 @@ fn an_applied_file_gets_a_durable_update_intent_with_verified_old_and_new_conten
         },
     )
     .unwrap();
-    assert_eq!(report.files, [(object, FileResult::PendingRecovery)]);
-    assert_eq!(
-        store.pending_files().unwrap(),
-        [FileIntent {
-            object,
-            event: revision.id,
-            previous: Some(old),
-            desired: Some(new),
-        }]
-    );
-    assert_eq!(store.applied_file(object).unwrap().unwrap().event, first.id);
-    assert_eq!(std::fs::read(destination.join("song.tja")).unwrap(), b"old");
+    #[cfg(windows)]
+    {
+        assert_eq!(report.files, [(object, FileResult::Updated)]);
+        assert!(store.pending_files().unwrap().is_empty());
+        assert_eq!(
+            store.applied_file(object).unwrap().unwrap().event,
+            revision.id
+        );
+        assert_eq!(std::fs::read(destination.join("song.tja")).unwrap(), b"new");
+        assert_eq!(std::fs::read_dir(&destination).unwrap().count(), 1);
+    }
+    #[cfg(not(windows))]
+    {
+        assert_eq!(report.files, [(object, FileResult::PendingRecovery)]);
+        assert_eq!(
+            store.pending_files().unwrap(),
+            [FileIntent {
+                object,
+                event: revision.id,
+                previous: Some(old),
+                desired: Some(new),
+            }]
+        );
+        assert_eq!(store.applied_file(object).unwrap().unwrap().event, first.id);
+        assert_eq!(std::fs::read(destination.join("song.tja")).unwrap(), b"old");
+    }
+    assert!(completed.open_verified(old).is_ok());
     assert!(completed.open_verified(new).is_ok());
 }

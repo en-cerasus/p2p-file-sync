@@ -442,3 +442,58 @@ fn windows_deletion_keeps_changed_or_open_files_and_removes_the_verified_version
     assert_eq!(store.applied_file(OBJECT).unwrap().unwrap().contents, None);
     assert!(f.blobs.open_verified(create.desired.unwrap()).is_ok());
 }
+
+#[cfg(windows)]
+#[test]
+fn update_recovers_after_old_path_was_moved_and_does_not_clobber_a_new_occupant() {
+    use sha2::{Digest, Sha256};
+    let f = Fixture::new();
+    let root = f.folder.path().join("destination");
+    std::fs::create_dir(&root).unwrap();
+    let mut store = f.open();
+    let old = metadata(b"new");
+    let first = FileIntent {
+        previous: None,
+        ..f.intent.clone()
+    };
+    store.stage_file(&f.blobs, &first).unwrap();
+    store.recover_new_file(&f.blobs, &root, OBJECT).unwrap();
+    let target = root.join("song.tja");
+
+    let desired = metadata(b"updated");
+    f.blobs.put(desired, &b"updated"[..]).unwrap();
+    let next = event(3, content_entry(desired.hash));
+    store.apply_verified(next.clone()).unwrap();
+    let pending = FileIntent {
+        object: OBJECT,
+        event: next.id,
+        previous: Some(old),
+        desired: Some(desired),
+    };
+    store.stage_file(&f.blobs, &pending).unwrap();
+
+    let mut digest = Sha256::new();
+    digest.update(OBJECT);
+    digest.update(next.id.peer);
+    digest.update(next.id.sequence.to_be_bytes());
+    let backup = root.join(format!(".p2p-update-{:x}", digest.finalize()));
+    std::fs::rename(&target, &backup).unwrap();
+    drop(store);
+    std::fs::write(&target, b"local file").unwrap();
+    let mut store = f.open();
+    assert_eq!(
+        store.recover_updated_file(&f.blobs, &root, OBJECT).unwrap(),
+        Recovery::Diverged
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"local file");
+    assert_eq!(std::fs::read(&backup).unwrap(), b"new");
+    std::fs::remove_file(&target).unwrap();
+
+    assert_eq!(
+        store.recover_updated_file(&f.blobs, &root, OBJECT).unwrap(),
+        Recovery::Applied
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"updated");
+    assert!(!backup.exists());
+    assert!(f.blobs.open_verified(old).is_ok());
+}

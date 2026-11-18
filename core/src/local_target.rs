@@ -37,12 +37,10 @@ impl NewFileTarget {
     }
 
     #[cfg(windows)]
-    fn delete_verified(&self, expected: Blob) -> io::Result<bool> {
+    fn lock_verified(&self, name: &str, expected: Blob) -> io::Result<Option<cap_std::fs::File>> {
         use cap_std::fs::{MetadataExt, OpenOptionsExt};
-        use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::Storage::FileSystem::{
-            FileDispositionInfo, SetFileInformationByHandle, DELETE, FILE_ATTRIBUTE_REPARSE_POINT,
-            FILE_DISPOSITION_INFO, FILE_GENERIC_READ,
+            DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_GENERIC_READ,
         };
 
         let mut options = OpenOptions::new();
@@ -50,32 +48,37 @@ impl NewFileTarget {
         options
             .access_mode(FILE_GENERIC_READ | DELETE)
             .share_mode(0);
-        let mut file = match self.parent.open_with(&self.name, &options) {
+        let mut file = match self.parent.open_with(name, &options) {
             Ok(file) => file,
             Err(error)
                 if error.kind() == io::ErrorKind::NotFound || error.raw_os_error() == Some(32) =>
             {
-                return Ok(false);
+                return Ok(None);
             }
             Err(error) => return Err(error),
         };
         let meta = file.metadata()?;
         if !meta.is_file() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return Ok(false);
+            return Ok(None);
         }
-        let mut hash = Sha256::new();
-        let length = io::copy(&mut file, &mut hash)?;
-        if expected
-            != (Blob {
-                hash: hash.finalize().into(),
-                length,
-            })
-        {
-            return Ok(false);
+        if measure(&mut file)? != expected {
+            return Ok(None);
         }
+        Ok(Some(file))
+    }
+
+    #[cfg(windows)]
+    fn delete_named_verified(&self, name: &str, expected: Blob) -> io::Result<bool> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FileDispositionInfo, SetFileInformationByHandle, FILE_DISPOSITION_INFO,
+        };
+
+        let Some(file) = self.lock_verified(name, expected)? else {
+            return Ok(false);
+        };
         let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
-        // The same exclusive handle was hashed above and remains open until
-        // deletion. A path lookup after validation cannot select another file.
+        // The file stays locked between the content check and the disposition.
         let success = unsafe {
             SetFileInformationByHandle(
                 file.as_raw_handle(),
@@ -90,6 +93,61 @@ impl NewFileTarget {
         drop(file);
         Ok(true)
     }
+
+    #[cfg(windows)]
+    pub(crate) fn update_status(&self, intent: &FileIntent) -> io::Result<Option<Blob>> {
+        let current = self.inspect_name(&self.name)?;
+        if current == intent.desired {
+            self.finish_update(intent)?;
+        }
+        if current.is_none() {
+            // A verified backup proves the pending transition removed the
+            // live name. Absence without this evidence is a local edit.
+            let backup = update_backup(intent);
+            if self.inspect_name(&backup)? == intent.previous {
+                return Ok(intent.previous);
+            }
+        }
+        Ok(current)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn finish_update(&self, intent: &FileIntent) -> io::Result<()> {
+        let backup = update_backup(intent);
+        if let Some(previous) = intent.previous {
+            // If the reserved path contains unrelated data, leave it alone.
+            self.delete_named_verified(&backup, previous)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn update_verified(
+        &self,
+        intent: &FileIntent,
+        replacement: File,
+        previous: Blob,
+    ) -> io::Result<bool> {
+        let backup = update_backup(intent);
+        let current = self.inspect_name(&self.name)?;
+        let backup_contents = self.inspect_name(&backup)?;
+        match (current, backup_contents) {
+            (Some(current), None) if current == previous => {
+                let Some(file) = self.lock_verified(&self.name, previous)? else {
+                    return Ok(false);
+                };
+                rename_by_handle(&file, &backup)?;
+            }
+            (None, Some(saved)) if saved == previous => {}
+            _ => return Ok(false),
+        }
+        let published = self.publish_at_vacant_name(replacement)?;
+        if published {
+            self.finish_update(intent)?;
+        }
+        Ok(published)
+    }
+
     pub(crate) fn open(root: &Dir, components: &[&str]) -> io::Result<Self> {
         let (name, ancestors) = components.split_last().ok_or_else(invalid_name)?;
         let parent = open_or_create_directories(root, ancestors)?;
@@ -120,11 +178,11 @@ pub(crate) fn open_or_create_directories(root: &Dir, components: &[&str]) -> io:
     Ok(parent)
 }
 
-impl FileTarget for NewFileTarget {
-    fn inspect(&mut self, _: ObjectId) -> io::Result<Option<Blob>> {
+impl NewFileTarget {
+    fn inspect_name(&self, name: &str) -> io::Result<Option<Blob>> {
         let mut options = OpenOptions::new();
         options.read(true).follow(FollowSymlinks::No);
-        match self.parent.symlink_metadata(&self.name) {
+        match self.parent.symlink_metadata(name) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Ok(metadata) if metadata.is_file() => {}
             Err(error) => return Err(error),
@@ -135,37 +193,17 @@ impl FileTarget for NewFileTarget {
                 ))
             }
         }
-        let mut file = self.parent.open_with(&self.name, &options)?;
+        let mut file = self.parent.open_with(name, &options)?;
         if !file.metadata()?.is_file() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "target is not a regular file",
             ));
         }
-        let mut hash = Sha256::new();
-        let length = io::copy(&mut file, &mut hash)?;
-        Ok(Some(Blob {
-            hash: hash.finalize().into(),
-            length,
-        }))
+        Ok(Some(measure(&mut file)?))
     }
 
-    fn replace_if_current(
-        &mut self,
-        intent: &FileIntent,
-        replacement: Option<File>,
-    ) -> io::Result<bool> {
-        #[cfg(windows)]
-        if let (None, Some(previous)) = (&replacement, intent.previous) {
-            return self.delete_verified(previous);
-        }
-
-        let Some(mut replacement) = replacement.filter(|_| intent.previous.is_none()) else {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "only new files can be published",
-            ));
-        };
+    fn publish_at_vacant_name(&self, mut replacement: File) -> io::Result<bool> {
         let name = scratch_name()?;
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
@@ -190,6 +228,99 @@ impl FileTarget for NewFileTarget {
         self.parent.try_clone()?.into_std_file().sync_all()?;
         Ok(linked)
     }
+}
+
+impl FileTarget for NewFileTarget {
+    fn inspect(&mut self, _: ObjectId) -> io::Result<Option<Blob>> {
+        self.inspect_name(&self.name)
+    }
+
+    fn replace_if_current(
+        &mut self,
+        intent: &FileIntent,
+        replacement: Option<File>,
+    ) -> io::Result<bool> {
+        #[cfg(windows)]
+        if let Some(previous) = intent.previous {
+            return match replacement {
+                Some(file) => self.update_verified(intent, file, previous),
+                None => self.delete_named_verified(&self.name, previous),
+            };
+        }
+        match replacement {
+            Some(file) if intent.previous.is_none() => self.publish_at_vacant_name(file),
+            _ => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "unsupported file transition",
+            )),
+        }
+    }
+}
+
+fn measure(file: &mut cap_std::fs::File) -> io::Result<Blob> {
+    let mut hash = Sha256::new();
+    let length = io::copy(file, &mut hash)?;
+    Ok(Blob {
+        hash: hash.finalize().into(),
+        length,
+    })
+}
+
+#[cfg(windows)]
+fn update_backup(intent: &FileIntent) -> String {
+    let mut context = Sha256::new();
+    context.update(intent.object);
+    context.update(intent.event.peer);
+    context.update(intent.event.sequence.to_be_bytes());
+    format!(".p2p-update-{:x}", context.finalize())
+}
+
+#[cfg(windows)]
+fn rename_by_handle(file: &cap_std::fs::File, name: &str) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::FILE_RENAME_INFO;
+
+    use windows_sys::{
+        Wdk::Storage::FileSystem::{FileRenameInformation, NtSetInformationFile},
+        Win32::{Foundation::RtlNtStatusToDosError, System::IO::IO_STATUS_BLOCK},
+    };
+
+    // FILE_RENAME_INFO ends with a flexible UTF-16 array. The fixed backing
+    // struct retains native alignment and provides room for our fixed ASCII name.
+    #[repr(C)]
+    struct RenameBuffer {
+        prefix: FILE_RENAME_INFO,
+        tail: [u16; 128],
+    }
+    let mut buffer = RenameBuffer {
+        prefix: FILE_RENAME_INFO::default(),
+        tail: [0; 128],
+    };
+    let name: Vec<u16> = name.encode_utf16().collect();
+    assert!(name.len() < 128);
+    let offset = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+    // A null root and a plain filename rename within the existing parent.
+    buffer.prefix.FileNameLength = (name.len() * 2) as u32;
+    let address = (&mut buffer as *mut RenameBuffer).cast::<u8>();
+    let mut status_block = IO_STATUS_BLOCK::default();
+    let status = unsafe {
+        // The offset is naturally aligned for UTF-16 and the tail covers the
+        // bytes passed to Windows, including termination.
+        std::ptr::copy_nonoverlapping(name.as_ptr(), address.add(offset).cast::<u16>(), name.len());
+        NtSetInformationFile(
+            file.as_raw_handle(),
+            &mut status_block,
+            address.cast(),
+            std::mem::size_of::<RenameBuffer>() as u32,
+            FileRenameInformation,
+        )
+    };
+    if status < 0 {
+        return Err(io::Error::from_raw_os_error(
+            unsafe { RtlNtStatusToDosError(status) } as i32,
+        ));
+    }
+    Ok(())
 }
 
 fn scratch_name() -> io::Result<String> {

@@ -35,6 +35,7 @@ pub enum SyncError {
 pub enum FileResult {
     Published,
     Removed,
+    Updated,
     Present,
     BlockedPath(PathIssue),
     ExistingContent,
@@ -153,6 +154,17 @@ fn publish_heads(
                 Err(error) => return Err(SyncError::Materialize(error)),
             }
         }
+        #[cfg(windows)]
+        if live && previous.is_some() {
+            match store.recover_updated_file(destination.completed, destination.root, object) {
+                Ok(Recovery::NonePending) | Err(MaterializeError::InvalidIntent) => {}
+                Ok(outcome) => {
+                    report.files.push((object, update_result(outcome)));
+                    continue;
+                }
+                Err(error) => return Err(SyncError::Materialize(error)),
+            }
+        }
         match store.recover_new_file(destination.completed, destination.root, object) {
             Ok(Recovery::NonePending) => {}
             Ok(outcome) => {
@@ -193,6 +205,14 @@ fn publish_heads(
                 report.files.push((object, deletion_result(outcome)));
                 continue;
             }
+            #[cfg(windows)]
+            if live {
+                let outcome = store
+                    .recover_updated_file(destination.completed, destination.root, object)
+                    .map_err(SyncError::Materialize)?;
+                report.files.push((object, update_result(outcome)));
+                continue;
+            }
             report.files.push((object, FileResult::PendingRecovery));
             continue;
         }
@@ -229,6 +249,14 @@ fn fetch_content(
         Err(error) => return Err(SyncError::Content(error)),
     }
     Ok(blob)
+}
+
+#[cfg(windows)]
+fn update_result(outcome: Recovery) -> FileResult {
+    match outcome {
+        Recovery::Applied => FileResult::Updated,
+        other => file_result(other),
+    }
 }
 
 #[cfg(windows)]

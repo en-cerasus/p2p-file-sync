@@ -9,6 +9,9 @@ pub enum NameError {
 
 /// Names are supplied as one component, never as platform paths.
 pub fn validate_component(name: &str) -> Result<(), NameError> {
+    if recovery_name(name) {
+        return Err(NameError::InvalidComponent);
+    }
     if name.is_empty()
         || name.ends_with([' ', '.'])
         || name.chars().any(|value| {
@@ -41,6 +44,11 @@ pub fn validate_component(name: &str) -> Result<(), NameError> {
         return Err(NameError::ReservedDevice);
     }
     Ok(())
+}
+
+pub(crate) fn recovery_name(name: &str) -> bool {
+    name.get(..12)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(".p2p-update-"))
 }
 
 /// Conservative logical sibling comparison. The filesystem adapter must

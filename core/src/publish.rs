@@ -124,6 +124,10 @@ impl TreePublisher<'_> {
                 .file_name()
                 .into_string()
                 .map_err(|_| PublishError::InvalidName(NameError::InvalidComponent))?;
+            if crate::names::recovery_name(&name) {
+                self.summary.skipped += 1;
+                continue;
+            }
             collision_key(&name).map_err(PublishError::InvalidName)?;
             if kind.is_dir() {
                 let child = directory

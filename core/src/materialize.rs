@@ -200,6 +200,44 @@ impl Store {
         reconcile(tx, blobs, &mut target, &intent, Some(path), true)
     }
 
+    #[cfg(windows)]
+    pub fn recover_updated_file(
+        &mut self,
+        blobs: &BlobStore,
+        root: &Path,
+        object: ObjectId,
+    ) -> Result<Recovery, MaterializeError> {
+        let (tx, replica) = self.begin_indexed_write()?;
+        let Some((intent, path)) = load_intent(&tx, object)? else {
+            return Ok(Recovery::NonePending);
+        };
+        let (Some(previous), Some(path)) = (intent.previous, path) else {
+            return Err(MaterializeError::InvalidIntent);
+        };
+        if intent.desired.is_none() {
+            return Err(MaterializeError::InvalidIntent);
+        }
+        let Some(applied) = read_applied(&tx, object)? else {
+            return Ok(Recovery::Superseded);
+        };
+        let projection = Projection::new(replica);
+        let current = projection.path(object);
+        if !matches_head(replica, &intent)
+            || applied.contents != Some(previous)
+            || applied.path.as_ref() != Some(&path)
+            || !current.is_ok_and(|current| current.into_iter().eq(path.iter().map(String::as_str)))
+        {
+            return Ok(Recovery::Superseded);
+        }
+        let components: Vec<_> = path.iter().map(String::as_str).collect();
+        let target = NewFileTarget::existing(&open_root(root)?, &components)?;
+        let mut target = UpdateTarget {
+            target,
+            intent: &intent,
+        };
+        reconcile(tx, blobs, &mut target, &intent, Some(path), true)
+    }
+
     /// Apply a tombstone only to the recorded local version at its original
     /// path. Windows locks and removes the exact verified file by handle.
     #[cfg(windows)]
@@ -251,6 +289,27 @@ impl Store {
         let components: Vec<_> = path.iter().map(String::as_str).collect();
         let mut target = NewFileTarget::existing(&open_root(root)?, &components)?;
         reconcile(tx, blobs, &mut target, &intent, Some(path), true)
+    }
+}
+
+#[cfg(windows)]
+struct UpdateTarget<'a> {
+    target: NewFileTarget,
+    intent: &'a FileIntent,
+}
+
+#[cfg(windows)]
+impl FileTarget for UpdateTarget<'_> {
+    fn inspect(&mut self, _: ObjectId) -> io::Result<Option<Blob>> {
+        self.target.update_status(self.intent)
+    }
+
+    fn replace_if_current(
+        &mut self,
+        intent: &FileIntent,
+        replacement: Option<File>,
+    ) -> io::Result<bool> {
+        self.target.replace_if_current(intent, replacement)
     }
 }
 

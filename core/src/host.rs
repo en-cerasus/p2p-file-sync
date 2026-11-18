@@ -322,7 +322,7 @@ pub fn pull_from_config(
         match result {
             FileResult::Published => summary.files_published += 1,
             FileResult::Present => summary.files_present += 1,
-            FileResult::Removed => {}
+            FileResult::Removed | FileResult::Updated => {}
             _ => summary.files_blocked += 1,
         }
     }
