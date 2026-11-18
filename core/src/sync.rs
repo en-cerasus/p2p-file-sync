@@ -42,6 +42,7 @@ pub enum FileResult {
     ExistingContent,
     Superseded,
     PendingRecovery,
+    UnavailableContent,
 }
 
 #[derive(Debug, Default)]
@@ -197,7 +198,14 @@ fn publish_heads(
         }
 
         let desired = if live {
-            Some(fetch_content(stream, store, destination, event)?)
+            match fetch_content(stream, store, destination, event) {
+                Ok(blob) => Some(blob),
+                Err(SyncError::Wire(WireError::UnavailableContent)) => {
+                    report.files.push((object, FileResult::UnavailableContent));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
         } else {
             None
         };
@@ -283,25 +291,40 @@ fn fetch_content(
     destination: &Destination<'_>,
     event: EventId,
 ) -> Result<crate::blob::Blob, SyncError> {
-    let manifest = pull_manifest(stream, store, event).map_err(SyncError::Wire)?;
-    let blob = manifest.file();
-    match destination.completed.open_verified(blob) {
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            for index in manifest
-                .missing_chunks(destination.chunks)
-                .map_err(SyncError::Content)?
-            {
-                pull_chunk(stream, &manifest, destination.chunks, index)
-                    .map_err(SyncError::Wire)?;
-            }
-            manifest
-                .finish(destination.chunks, destination.completed)
+    let Some(&EntryKind::File(hash)) = store
+        .replica()
+        .get(event)
+        .filter(|_| store.signed_event(event).is_some())
+        .and_then(|event| event.change.entry())
+        .map(|entry| &entry.kind)
+    else {
+        return Err(SyncError::Wire(WireError::UnavailableContent));
+    };
+    match destination.completed.open_candidate(hash) {
+        Ok(file) => {
+            let length = file.metadata().map_err(SyncError::Content)?.len();
+            drop(file);
+            let blob = crate::blob::Blob { hash, length };
+            destination
+                .completed
+                .open_verified(blob)
                 .map_err(SyncError::Content)?;
+            return Ok(blob);
         }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(SyncError::Content(error)),
     }
-    Ok(blob)
+    let manifest = pull_manifest(stream, store, event).map_err(SyncError::Wire)?;
+    for index in manifest
+        .missing_chunks(destination.chunks)
+        .map_err(SyncError::Content)?
+    {
+        pull_chunk(stream, &manifest, destination.chunks, index).map_err(SyncError::Wire)?;
+    }
+    manifest
+        .finish(destination.chunks, destination.completed)
+        .map_err(SyncError::Content)?;
+    Ok(manifest.file())
 }
 
 #[cfg(windows)]

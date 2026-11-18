@@ -292,6 +292,37 @@ fn a_fresh_peer_caches_all_conflicting_versions_without_publishing_a_winner() {
             .unwrap();
         roster.receive(&mut sender, &signed).unwrap();
     }
+    for (index, name, data) in [
+        (6, "missing.tja", b"missing".as_slice()),
+        (7, "remote.tja", b"remote".as_slice()),
+        (8, "cached.tja", b"cached".as_slice()),
+    ] {
+        let blob = Blob {
+            hash: sha256(data),
+            length: data.len() as u64,
+        };
+        match index {
+            7 => source.put(blob, data).unwrap(),
+            8 => completed.put(blob, data).unwrap(),
+            _ => {}
+        }
+        let sequence = u64::from(index) - 3;
+        let event = Event {
+            id: EventId {
+                peer: first_peer,
+                sequence,
+            },
+            context: [(first_peer, sequence - 1), (second_peer, 1)].into(),
+            object: [index; 16],
+            change: Change::Create(Entry {
+                parent: None,
+                name: name.into(),
+                kind: EntryKind::File(blob.hash),
+            }),
+        };
+        let signed = roster.sign_event(&first_key, &event).unwrap();
+        roster.receive(&mut sender, &signed).unwrap();
+    }
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     std::thread::scope(|threads| {
@@ -323,13 +354,27 @@ fn a_fresh_peer_caches_all_conflicting_versions_without_publishing_a_winner() {
         server.join().unwrap();
         assert_eq!(
             report.files,
-            [(
-                object,
-                FileResult::BlockedPath(PathIssue::Divergent(object))
-            )]
+            [
+                (
+                    object,
+                    FileResult::BlockedPath(PathIssue::Divergent(object))
+                ),
+                ([6; 16], FileResult::UnavailableContent),
+                ([7; 16], FileResult::Published),
+                ([8; 16], FileResult::Published),
+            ]
         );
     });
     assert!(!destination.join("song.tja").exists());
+    assert!(!destination.join("missing.tja").exists());
+    assert_eq!(
+        std::fs::read(destination.join("remote.tja")).unwrap(),
+        b"remote"
+    );
+    assert_eq!(
+        std::fs::read(destination.join("cached.tja")).unwrap(),
+        b"cached"
+    );
     for blob in expected {
         assert!(completed.open_verified(blob).is_ok());
     }
