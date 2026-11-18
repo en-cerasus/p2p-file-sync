@@ -9,6 +9,7 @@ pub mod projection;
 pub mod replica;
 pub mod retention;
 pub mod store;
+pub mod sync;
 pub mod tls;
 pub mod wire;
 

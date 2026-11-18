@@ -26,7 +26,17 @@ impl NewFileTarget {
         let mut parent = root.try_clone()?;
         for component in ancestors {
             validate_component(component).map_err(|_| invalid_name())?;
-            parent = parent.open_dir_nofollow(component)?;
+            parent = match parent.open_dir_nofollow(component) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    match parent.create_dir(component) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                        Err(error) => return Err(error),
+                    }
+                    parent.open_dir_nofollow(component)?
+                }
+                result => result?,
+            };
         }
         validate_component(name).map_err(|_| invalid_name())?;
         Ok(Self {

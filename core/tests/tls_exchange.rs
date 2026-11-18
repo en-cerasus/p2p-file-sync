@@ -9,8 +9,9 @@ use p2p_sync_core::{
     replica::{Change, Entry, EntryKind, Event, EventId, VersionVector},
     sha256,
     store::Store,
+    sync::{sync_new_files, Destination, FileResult},
     tls::{certificate_pin, Client, Credentials, Server, TlsError},
-    wire::{pull_chunk, pull_manifest, pull_page, ShareSession},
+    wire::ShareSession,
 };
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
@@ -71,12 +72,23 @@ fn exchanges_signed_events_only_after_mutual_tls_and_pin_validation() {
         hash: sha256(data),
         length: data.len() as u64,
     };
-    let item = Event {
+    let directory = Event {
         id: EventId { peer, sequence: 1 },
         context: VersionVector::new(),
-        object: [5; 16],
+        object: [7; 16],
         change: Change::Create(Entry {
             parent: None,
+            name: "譜面".into(),
+            kind: EntryKind::Directory,
+        }),
+    };
+    let directory_wire = roster().sign_event(&key, &directory).unwrap();
+    let item = Event {
+        id: EventId { peer, sequence: 2 },
+        context: [(peer, 1)].into(),
+        object: [5; 16],
+        change: Change::Create(Entry {
+            parent: Some(directory.object),
             name: "song.tja".into(),
             kind: EntryKind::File(blob.hash),
         }),
@@ -87,6 +99,7 @@ fn exchanges_signed_events_only_after_mutual_tls_and_pin_validation() {
         let worker = threads.spawn(|| {
             let roster = roster();
             let mut store = Store::open(":memory:", roster.membership().clone()).unwrap();
+            roster.receive(&mut store, &directory_wire).unwrap();
             roster.receive(&mut store, &wire).unwrap();
             let (socket, _) = listener.accept().unwrap();
             configure(&socket);
@@ -118,37 +131,29 @@ fn exchanges_signed_events_only_after_mutual_tls_and_pin_validation() {
             .unwrap();
         let roster = roster();
         let mut receiver = Store::open(":memory:", roster.membership().clone()).unwrap();
-        assert_eq!(
-            pull_page(&mut secure, &mut receiver, &roster)
-                .unwrap()
-                .0
-                .added,
-            1
-        );
-        assert_eq!(receiver.replica().get(item.id), Some(&item));
         let folder = tempfile::tempdir().unwrap();
         let cache = BlobStore::open(folder.path().join("chunks")).unwrap();
         let completed = BlobStore::open(folder.path().join("blobs")).unwrap();
-        let manifest = pull_manifest(&mut secure, &receiver, item.id).unwrap();
-        pull_chunk(&mut secure, &manifest, &cache, 0).unwrap();
-        manifest.finish(&cache, &completed).unwrap();
         let destination = folder.path().join("destination");
         std::fs::create_dir(&destination).unwrap();
-        receiver
-            .stage_file(
-                &completed,
-                &p2p_sync_core::materialize::FileIntent {
-                    object: item.object,
-                    event: item.id,
-                    previous: None,
-                    desired: Some(blob),
-                },
-            )
-            .unwrap();
-        receiver
-            .recover_new_file(&completed, &destination, item.object)
-            .unwrap();
-        assert_eq!(std::fs::read(destination.join("song.tja")).unwrap(), data);
+        let report = sync_new_files(
+            &mut secure,
+            &mut receiver,
+            &roster,
+            Destination {
+                root: &destination,
+                chunks: &cache,
+                completed: &completed,
+            },
+        )
+        .unwrap();
+        assert_eq!(report.events_added, 2);
+        assert_eq!(report.files, [(item.object, FileResult::Published)]);
+        assert_eq!(receiver.replica().get(item.id), Some(&item));
+        assert_eq!(
+            std::fs::read(destination.join("譜面/song.tja")).unwrap(),
+            data
+        );
 
         let socket = TcpStream::connect_timeout(&addr, Duration::from_secs(5)).unwrap();
         configure(&socket);
