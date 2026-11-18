@@ -1,17 +1,24 @@
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 
 use crate::{
     auth::Roster,
+    blob::{Blob, BlobStore},
     catchup::{
         outgoing_page, receive_page, CatchupError, ReceiveReport, MAX_PAGE_BYTES, MAX_PAGE_EVENTS,
     },
-    replica::VersionVector,
+    chunks::{Manifest, CHUNK_BYTES, MAX_CHUNKS},
+    replica::{ContentHash, EntryKind, EventId, VersionVector},
     store::Store,
 };
 
 const MAGIC: [u8; 4] = *b"P2P1";
 const PULL: u8 = 1;
 const PAGE: u8 = 2;
+const GET_MANIFEST: u8 = 3;
+const MANIFEST: u8 = 4;
+const GET_CHUNK: u8 = 5;
+const CHUNK: u8 = 6;
+const MAX_MANIFEST_BYTES: usize = 8 + MAX_CHUNKS * 32;
 const MAX_FRONTIER_PEERS: usize = 1024;
 const FRONTIER_ENTRY_BYTES: usize = 40;
 const MAX_PAGE_FRAME: usize = MAX_PAGE_BYTES + MAX_PAGE_EVENTS * 4 + 1;
@@ -22,6 +29,7 @@ pub enum WireError {
     Catchup(CatchupError),
     InvalidFrame,
     NoProgress,
+    UnavailableContent,
 }
 
 impl From<io::Error> for WireError {
@@ -77,6 +85,101 @@ pub fn pull_page(
         return Err(WireError::NoProgress);
     }
     Ok((report, has_more))
+}
+
+/// Serve metadata for a version that the caller has authorized for this
+/// authenticated peer. This API never looks up arbitrary requested hashes.
+pub fn serve_manifest(
+    stream: &mut (impl Read + Write),
+    manifest: &Manifest,
+) -> Result<(), WireError> {
+    let request = read_frame(stream, GET_MANIFEST, 32)?;
+    if request != manifest.file().hash {
+        return Err(WireError::UnavailableContent);
+    }
+    let mut response = Vec::with_capacity(8 + manifest.hashes().len() * 32);
+    response.extend_from_slice(&manifest.file().length.to_be_bytes());
+    for hash in manifest.hashes() {
+        response.extend_from_slice(hash);
+    }
+    write_frame(stream, MANIFEST, &response)
+}
+
+pub fn pull_manifest(
+    stream: &mut (impl Read + Write),
+    store: &Store,
+    event: EventId,
+) -> Result<Manifest, WireError> {
+    if store.signed_event(event).is_none() {
+        return Err(WireError::UnavailableContent);
+    }
+    let Some(EntryKind::File(expected)) = store
+        .replica()
+        .get(event)
+        .and_then(|event| event.change.entry())
+        .map(|entry| &entry.kind)
+    else {
+        return Err(WireError::UnavailableContent);
+    };
+    write_frame(stream, GET_MANIFEST, expected)?;
+    let response = read_frame(stream, MANIFEST, MAX_MANIFEST_BYTES)?;
+    let Some((length, hashes)) = response.split_first_chunk::<8>() else {
+        return Err(WireError::InvalidFrame);
+    };
+    let mut chunks = hashes.chunks_exact(32);
+    let hashes: Vec<ContentHash> = (&mut chunks).map(|hash| hash.try_into().unwrap()).collect();
+    if !chunks.remainder().is_empty() {
+        return Err(WireError::InvalidFrame);
+    }
+    Manifest::new(
+        Blob {
+            hash: *expected,
+            length: u64::from_be_bytes(*length),
+        },
+        hashes,
+    )
+    .map_err(|_| WireError::InvalidFrame)
+}
+
+/// Serve a chunk of an authorized version using its immutable source.
+/// The caller opens that source once and can reuse it for successive requests.
+pub fn serve_chunk(
+    stream: &mut (impl Read + Write),
+    manifest: &Manifest,
+    source: &mut (impl Read + Seek),
+) -> Result<(), WireError> {
+    let request = read_frame(stream, GET_CHUNK, 36)?;
+    if request.len() != 36 {
+        return Err(WireError::InvalidFrame);
+    }
+    if request[..32] != manifest.file().hash {
+        return Err(WireError::UnavailableContent);
+    }
+    let index = u32::from_be_bytes(request[32..].try_into().unwrap()) as usize;
+    let chunk = manifest.chunk(index).ok_or(WireError::UnavailableContent)?;
+    source.seek(SeekFrom::Start(index as u64 * CHUNK_BYTES))?;
+    let mut data = vec![0; chunk.length as usize];
+    source.read_exact(&mut data)?;
+    if crate::sha256(&data) != chunk.hash {
+        return Err(WireError::UnavailableContent);
+    }
+    write_frame(stream, CHUNK, &data)
+}
+
+pub fn pull_chunk(
+    stream: &mut (impl Read + Write),
+    manifest: &Manifest,
+    cache: &BlobStore,
+    index: usize,
+) -> Result<(), WireError> {
+    let chunk = manifest.chunk(index).ok_or(WireError::UnavailableContent)?;
+    let mut request = [0; 36];
+    request[..32].copy_from_slice(&manifest.file().hash);
+    request[32..].copy_from_slice(&(index as u32).to_be_bytes());
+    write_frame(stream, GET_CHUNK, &request)?;
+    let response = read_frame(stream, CHUNK, chunk.length as usize)?;
+    manifest.receive_chunk(cache, index, response.as_slice())?;
+    Ok(())
 }
 
 fn read_frame(stream: &mut impl Read, kind: u8, max_bytes: usize) -> Result<Vec<u8>, WireError> {

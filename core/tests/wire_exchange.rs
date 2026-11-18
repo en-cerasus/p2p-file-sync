@@ -100,3 +100,73 @@ fn rejects_oversized_and_truncated_frames_without_applying_any_event() {
     );
     assert!(store.replica().clock().is_empty());
 }
+
+#[test]
+fn transfers_missing_chunks_after_a_network_reconnection() {
+    use p2p_sync_core::{
+        blob::BlobStore,
+        chunks::{Manifest, CHUNK_BYTES},
+    };
+    let key = PeerSigningKey::from_bytes(&[20; 32]);
+    let peer = key.verifying_key().to_bytes();
+    let roster = roster_for(peer);
+    let first = vec![7; CHUNK_BYTES as usize];
+    let data = [first.as_slice(), b"short tail"].concat();
+    let sender_data = data.clone();
+    let manifest = Manifest::build(data.as_slice(), data.len() as u64).unwrap();
+    let item = Event {
+        id: EventId { peer, sequence: 1 },
+        context: VersionVector::new(),
+        object: [5; 16],
+        change: Change::Create(Entry {
+            parent: None,
+            name: "song.tja".into(),
+            kind: EntryKind::File(manifest.file().hash),
+        }),
+    };
+    let mut store = Store::open(":memory:", roster.membership().clone()).unwrap();
+    roster
+        .receive(&mut store, &roster.sign_event(&key, &item).unwrap())
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let mut source = Cursor::new(sender_data);
+        let (mut stream, _) = listener.accept().unwrap();
+        configure(&stream);
+        serve_manifest(&mut stream, &manifest).unwrap();
+        serve_chunk(&mut stream, &manifest, &mut source).unwrap();
+        drop(stream);
+        let (mut stream, _) = listener.accept().unwrap();
+        configure(&stream);
+        serve_chunk(&mut stream, &manifest, &mut source).unwrap();
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let cache_dir = dir.path().join("chunks");
+    let completed = BlobStore::open(dir.path().join("files")).unwrap();
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(5)).unwrap();
+    configure(&stream);
+    let manifest = pull_manifest(&mut stream, &store, item.id).unwrap();
+    {
+        let cache = BlobStore::open(&cache_dir).unwrap();
+        pull_chunk(&mut stream, &manifest, &cache, 0).unwrap();
+        assert!(manifest.finish(&cache, &completed).is_err());
+    }
+    drop(stream);
+    let cache = BlobStore::open(&cache_dir).unwrap();
+    assert_eq!(manifest.missing_chunks(&cache).unwrap(), [1]);
+
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(5)).unwrap();
+    configure(&stream);
+    pull_chunk(&mut stream, &manifest, &cache, 1).unwrap();
+    manifest.finish(&cache, &completed).unwrap();
+    let mut result = Vec::new();
+    completed
+        .open_verified(manifest.file())
+        .unwrap()
+        .read_to_end(&mut result)
+        .unwrap();
+    assert_eq!(result, data);
+    server.join().unwrap();
+}
