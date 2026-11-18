@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
 @main
@@ -8,6 +9,24 @@ struct P2PSyncApp: App {
         WindowGroup {
             NavigationStack { DirectSyncView() }
         }
+    }
+}
+
+@MainActor
+private final class SyncExecutionTime {
+    private var taskID: UIBackgroundTaskIdentifier = .invalid
+
+    init() {
+        taskID = UIApplication.shared.beginBackgroundTask(withName: "Finish P2P synchronization") { [weak self] in
+            self?.end()
+        }
+    }
+
+    func end() {
+        let activeTask = taskID
+        guard activeTask != .invalid else { return }
+        taskID = .invalid
+        UIApplication.shared.endBackgroundTask(activeTask)
     }
 }
 
@@ -144,7 +163,11 @@ struct DirectSyncView: View {
         guard let configFolder, !syncing, phase == .active, !pickingFolder else { return }
         syncing = true
         result = ""
-        defer { syncing = false }
+        let executionTime = SyncExecutionTime()
+        defer {
+            executionTime.end()
+            syncing = false
+        }
         do {
             let summary = try await Task.detached(priority: .userInitiated) {
                 guard configFolder.startAccessingSecurityScopedResource() else {
