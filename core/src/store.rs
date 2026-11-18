@@ -4,18 +4,22 @@ use std::{
     time::SystemTime,
 };
 
-use rusqlite::{params, Connection, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     archive::{archives_on, record_archive},
-    generation::{CheckpointProtection, GenerationCheckpoint},
+    auth::Roster,
+    generation::{CheckpointProtection, GenerationBaseline, GenerationCheckpoint},
     materialize::AppliedFile,
-    replica::{Apply, Change, EntryKind, Event, EventId, ObjectId, PeerId, Reject, Replica},
+    replica::{
+        Apply, Change, ContentHash, EntryKind, Event, EventId, ObjectId, PeerId, Reject, Replica,
+        VersionVector,
+    },
     retention::{Confirmation, Protection},
 };
 
-const SCHEMA_VERSION: u32 = 4;
+const SCHEMA_VERSION: u32 = 5;
 const MAX_RECORD_BYTES: usize = 2 * 1024 * 1024 + 256;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -32,6 +36,7 @@ pub enum StoreError {
     Decode(postcard::Error),
     UnsupportedSchema(u32),
     WrongMembership,
+    WrongBaseline,
     NonMember,
     InvalidConfirmation,
     InvalidRecord,
@@ -65,6 +70,7 @@ struct Index {
     event_order: Vec<EventId>,
     signed_events: BTreeMap<EventId, Vec<u8>>,
     protections: BTreeMap<(ObjectId, EventId, EventId), Protection>,
+    baseline: Option<(VersionVector, Roster)>,
 }
 
 pub struct Store {
@@ -75,6 +81,31 @@ pub struct Store {
 
 impl Store {
     pub fn open(path: impl AsRef<Path>, membership: Membership) -> Result<Self, StoreError> {
+        Self::open_internal(path.as_ref(), membership, None)
+    }
+
+    /// Bind this database to a verified baseline. Supply the same verified
+    /// bundle on restart to reconstruct inherited history before replay.
+    pub fn open_with_baseline(
+        path: impl AsRef<Path>,
+        baseline: GenerationBaseline,
+    ) -> Result<Self, StoreError> {
+        let (roster, checkpoint, replica, digest) = baseline.into_store_parts();
+        if checkpoint.frontier != *replica.clock() {
+            return Err(StoreError::WrongBaseline);
+        }
+        Self::open_internal(
+            path.as_ref(),
+            roster.membership().clone(),
+            Some((checkpoint, replica, roster, digest)),
+        )
+    }
+
+    fn open_internal(
+        path: &Path,
+        membership: Membership,
+        baseline: Option<(GenerationCheckpoint, Replica, Roster, ContentHash)>,
+    ) -> Result<Self, StoreError> {
         let mut connection = Connection::open(path)?;
         connection.pragma_update(None, "synchronous", "FULL")?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -129,10 +160,59 @@ impl Store {
                 );
                 CREATE INDEX file_archive_expiry ON file_archive(recorded_at);",
             )?;
+        }
+        if version < 5 {
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS generation_baseline (
+                    id INTEGER PRIMARY KEY CHECK (id = 1), digest BLOB NOT NULL
+                );",
+            )?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
 
+        let stored: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT digest FROM generation_baseline WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
         let mut index = Index::default();
+        match (stored, baseline) {
+            (None, None) => {}
+            (stored, Some((checkpoint, replica, roster, digest))) => {
+                if let Some(stored) = stored {
+                    if stored != digest {
+                        return Err(StoreError::WrongBaseline);
+                    }
+                } else {
+                    let has_events: bool = tx.query_row(
+                        "SELECT EXISTS (SELECT 1 FROM journal)
+                             OR EXISTS (SELECT 1 FROM file_intent)
+                             OR EXISTS (SELECT 1 FROM applied_file)
+                             OR EXISTS (SELECT 1 FROM file_archive)",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    if has_events {
+                        return Err(StoreError::WrongBaseline);
+                    }
+                    tx.execute(
+                        "INSERT INTO generation_baseline VALUES (1, ?1)",
+                        [digest.as_slice()],
+                    )?;
+                    for archive in &checkpoint.archives {
+                        tx.execute(
+                            "INSERT INTO file_archive (object, recorded_at, payload) VALUES (?1, ?2, ?3)",
+                            params![archive.object.as_slice(), archive.archived_at, encode(archive)?],
+                        )?;
+                    }
+                }
+                index = Index::from_baseline(checkpoint, replica, roster)?;
+            }
+            (Some(_), None) => return Err(StoreError::WrongBaseline),
+        }
+
         index.refresh(&tx, &membership)?;
         tx.commit()?;
         Ok(Self {
@@ -172,6 +252,10 @@ impl Store {
         &mut self,
         now: SystemTime,
     ) -> Result<GenerationCheckpoint, StoreError> {
+        // Exporting a second transition will require a chain of checkpoints.
+        if self.index.baseline.is_some() {
+            return Err(StoreError::WrongBaseline);
+        }
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -265,19 +349,12 @@ impl Store {
         wire: Option<Vec<u8>>,
         previous: Option<AppliedFile>,
     ) -> Result<Apply, StoreError> {
-        if !self.membership.members.contains(&event.id.peer)
-            || !event
-                .context
-                .keys()
-                .all(|peer| self.membership.members.contains(peer))
-        {
-            return Err(StoreError::NonMember);
-        }
-
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         self.index.refresh(&tx, &self.membership)?;
+        self.index
+            .validate_scope(&event, &self.membership, wire.as_deref())?;
         let outcome = self
             .index
             .replica
@@ -359,6 +436,77 @@ impl Store {
 }
 
 impl Index {
+    fn from_baseline(
+        checkpoint: GenerationCheckpoint,
+        replica: Replica,
+        roster: Roster,
+    ) -> Result<Self, StoreError> {
+        let membership = roster.membership();
+        let mut protections = BTreeMap::new();
+        for reference in checkpoint.protected {
+            let object = replica
+                .get(reference.original)
+                .ok_or(StoreError::InvalidRecord)?
+                .object;
+            protections.insert(
+                (object, reference.successor, reference.original),
+                Protection::new(
+                    membership.generation,
+                    object,
+                    reference.original,
+                    reference.successor,
+                    reference.hash,
+                    &membership.members,
+                ),
+            );
+        }
+        Ok(Self {
+            replica,
+            signed_events: checkpoint
+                .events
+                .into_iter()
+                .map(|event| event.id)
+                .zip(checkpoint.signed_events)
+                .collect(),
+            protections,
+            baseline: Some((checkpoint.frontier, roster)),
+            ..Self::default()
+        })
+    }
+
+    fn validate_scope(
+        &self,
+        event: &Event,
+        membership: &Membership,
+        signed: Option<&[u8]>,
+    ) -> Result<(), StoreError> {
+        if !membership.members.contains(&event.id.peer) {
+            return Err(StoreError::NonMember);
+        }
+        if let Some((frontier, roster)) = &self.baseline {
+            if signed
+                .and_then(|wire| roster.verify_event(wire).ok())
+                .as_ref()
+                != Some(event)
+                || frontier
+                    .iter()
+                    .any(|(peer, sequence)| event.context.get(peer).unwrap_or(&0) < sequence)
+            {
+                return Err(StoreError::WrongBaseline);
+            }
+        }
+        if !event.context.iter().all(|(peer, sequence)| {
+            membership.members.contains(peer)
+                || self
+                    .baseline
+                    .as_ref()
+                    .and_then(|(frontier, _)| frontier.get(peer))
+                    == Some(sequence)
+        }) {
+            return Err(StoreError::NonMember);
+        }
+        Ok(())
+    }
     fn refresh(
         &mut self,
         connection: &Connection,
@@ -391,13 +539,12 @@ impl Index {
         match record {
             Record::SignedEvent { .. } => unreachable!(),
             Record::Event(event) => {
-                if !membership.members.contains(&event.id.peer)
-                    || !event
-                        .context
-                        .keys()
-                        .all(|peer| membership.members.contains(peer))
-                    || self.replica.validate(&event) != Ok(Apply::Added)
-                {
+                self.validate_scope(
+                    &event,
+                    membership,
+                    signature.as_ref().map(|(_, wire)| wire.as_slice()),
+                )?;
+                if self.replica.validate(&event) != Ok(Apply::Added) {
                     return Err(StoreError::InvalidRecord);
                 }
 

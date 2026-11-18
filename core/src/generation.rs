@@ -233,6 +233,7 @@ pub struct GenerationBaseline {
     roster: Roster,
     checkpoint: GenerationCheckpoint,
     replica: Replica,
+    transition_digest: ContentHash,
 }
 
 #[derive(Debug)]
@@ -246,6 +247,14 @@ pub enum BaselineError {
 }
 
 impl GenerationBaseline {
+    pub(crate) fn into_store_parts(self) -> (Roster, GenerationCheckpoint, Replica, ContentHash) {
+        (
+            self.roster,
+            self.checkpoint,
+            self.replica,
+            self.transition_digest,
+        )
+    }
     pub fn load(
         transition: &[u8],
         bytes: &[u8],
@@ -254,6 +263,7 @@ impl GenerationBaseline {
         contents: &BlobStore,
     ) -> Result<Self, BaselineError> {
         let old = previous.membership();
+        let transition_digest = crate::sha256(transition);
         let transition =
             GenerationTransition::verify(transition, administrator, old.share, old.generation)
                 .map_err(BaselineError::Transition)?;
@@ -267,6 +277,7 @@ impl GenerationBaseline {
             roster: Roster::new(transition.share, transition.next, transition.members),
             checkpoint,
             replica,
+            transition_digest,
         })
     }
 

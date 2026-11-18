@@ -224,14 +224,17 @@ fn migration_baseline_rejects_old_events_and_preserves_deleted_identity() {
     }
     .sign(&administrator)
     .unwrap();
-    let mut baseline = GenerationBaseline::load(
-        &transition,
-        &bytes,
-        &administrator.verifying_key(),
-        &roster,
-        &blobs,
-    )
-    .unwrap();
+    let load = || {
+        GenerationBaseline::load(
+            &transition,
+            &bytes,
+            &administrator.verifying_key(),
+            &roster,
+            &blobs,
+        )
+        .unwrap()
+    };
+    let mut baseline = load();
     assert!(matches!(
         baseline.receive(store.signed_event(first).unwrap()),
         Err(BaselineError::Authentication(_))
@@ -265,6 +268,50 @@ fn migration_baseline_rejects_old_events_and_preserves_deleted_identity() {
     event.object = [98; 16];
     let signed = current.sign_event(&replacement, &event).unwrap();
     assert_eq!(baseline.receive(&signed).unwrap(), Apply::Added);
+    let database = folder.path().join("new-generation.db");
+    let mut migrated = Store::open_with_baseline(&database, load()).unwrap();
+    assert_eq!(
+        current.receive(&mut migrated, &signed).unwrap(),
+        Apply::Added
+    );
+    assert_eq!(
+        migrated
+            .archives(std::time::SystemTime::now())
+            .unwrap()
+            .len(),
+        1
+    );
+    drop(migrated);
+    assert!(matches!(
+        Store::open(&database, current.membership().clone()),
+        Err(p2p_sync_core::store::StoreError::WrongBaseline)
+    ));
+    let migrated = Store::open_with_baseline(&database, load()).unwrap();
+    assert_eq!(migrated.replica().get(event.id), Some(&event));
+    assert_eq!(migrated.replica().heads(object).next().unwrap().id, deleted);
+    assert_eq!(
+        migrated
+            .archives(std::time::SystemTime::now())
+            .unwrap()
+            .len(),
+        1
+    );
+    let occupied = folder.path().join("existing-generation.db");
+    let mut existing = Store::open(&occupied, current.membership().clone()).unwrap();
+    publish_file(
+        &source,
+        &mut existing,
+        &current,
+        &replacement,
+        &blobs,
+        None,
+        "existing.tja",
+    )
+    .unwrap();
+    assert!(matches!(
+        Store::open_with_baseline(&occupied, load()),
+        Err(p2p_sync_core::store::StoreError::WrongBaseline)
+    ));
 }
 
 #[test]
