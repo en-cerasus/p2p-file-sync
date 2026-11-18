@@ -46,6 +46,18 @@ int32_t p2p_sync_pull_v2(const uint8_t *config, size_t config_len,
                          const uint8_t *destination, size_t destination_len,
                          p2p_sync_pull_summary_v2 *output);
 
+typedef struct {
+    p2p_sync_pull_summary_v2 sync;
+    uint64_t protected_files;
+    uint64_t protected_bytes;
+    uint64_t protected_missing;
+} p2p_sync_pull_summary_v3;
+
+int32_t p2p_sync_pull_v3(const uint8_t *config, size_t config_len,
+                         const uint8_t *state, size_t state_len,
+                         const uint8_t *destination, size_t destination_len,
+                         p2p_sync_pull_summary_v3 *output);
+
 #ifdef __cplusplus
 }
 #endif

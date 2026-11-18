@@ -304,6 +304,27 @@ pub struct PullSummaryV2 {
     pub files_removed: u64,
 }
 
+#[repr(C)]
+#[derive(Default, Debug, Eq, PartialEq)]
+pub struct PullSummaryV3 {
+    pub sync: PullSummaryV2,
+    pub protected_files: u64,
+    pub protected_bytes: u64,
+    pub protected_missing: u64,
+}
+
+impl From<PullSummaryV3> for PullSummaryV2 {
+    fn from(report: PullSummaryV3) -> Self {
+        report.sync
+    }
+}
+
+impl From<PullSummaryV3> for PullSummary {
+    fn from(report: PullSummaryV3) -> Self {
+        report.sync.into()
+    }
+}
+
 impl From<PullSummaryV2> for PullSummary {
     fn from(report: PullSummaryV2) -> Self {
         Self {
@@ -322,6 +343,14 @@ pub fn pull_from_config(
     state_root: &Path,
     destination: &Path,
 ) -> Result<PullSummaryV2, HostError> {
+    pull_detailed(configuration, state_root, destination).map(Into::into)
+}
+
+pub fn pull_detailed(
+    configuration: &Path,
+    state_root: &Path,
+    destination: &Path,
+) -> Result<PullSummaryV3, HostError> {
     let config: Config = serde_json::from_slice(&read_bounded(configuration, MAX_CONFIG_BYTES)?)
         .map_err(|_| HostError::Configuration)?;
     let roster = build_roster(&config.share, config.generation, config.members)?;
@@ -389,7 +418,14 @@ pub fn pull_from_config(
             _ => summary.files_blocked += 1,
         }
     }
-    Ok(summary)
+    store.refresh().map_err(HostError::Store)?;
+    let protected = store.protected_storage(&completed).map_err(HostError::Io)?;
+    Ok(PullSummaryV3 {
+        sync: summary,
+        protected_files: protected.files,
+        protected_bytes: protected.bytes,
+        protected_missing: protected.missing,
+    })
 }
 
 fn build_roster(

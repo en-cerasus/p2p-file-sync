@@ -136,7 +136,7 @@ internal sealed class SyncWindow : Window
         {
             var pull = await Task.Run(() => SyncCore.Pull(config, state, root));
             result.Text = pull.Status == 0
-                ? $"イベント {pull.Summary.EventsAdded} 件、新規 {pull.Summary.FilesPublished} 件、更新 {pull.Summary.FilesUpdated} 件、削除 {pull.Summary.FilesRemoved} 件、変更なし {pull.Summary.FilesPresent} 件、保留 {pull.Summary.FilesBlocked} 件"
+                ? $"イベント {pull.Summary.EventsAdded} 件、新規 {pull.Summary.FilesPublished} 件、更新 {pull.Summary.FilesUpdated} 件、削除 {pull.Summary.FilesRemoved} 件、変更なし {pull.Summary.FilesPresent} 件、保留 {pull.Summary.FilesBlocked} 件\n保護原本 {pull.Summary.ProtectedFiles} 件 ({pull.Summary.ProtectedBytes:N0} バイト)、未取得 {pull.Summary.ProtectedMissing} 件"
                 : SyncCore.ErrorMessage(pull.Status);
         }
         catch (Exception error) when (error is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
@@ -162,6 +162,9 @@ internal static class SyncCore
         public ulong FilesBlocked;
         public ulong FilesUpdated;
         public ulong FilesRemoved;
+        public ulong ProtectedFiles;
+        public ulong ProtectedBytes;
+        public ulong ProtectedMissing;
     }
 
     internal static (int Status, PullSummary Summary) Pull(string config, string state, string destination)
@@ -184,7 +187,7 @@ internal static class SyncCore
         _ => "同期中に内部エラーが発生しました。",
     };
 
-    [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_pull_v2", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_pull_v3", CallingConvention = CallingConvention.Cdecl)]
     private static extern int PullNative(
         byte[] config, nuint configLength, byte[] state, nuint stateLength,
         byte[] destination, nuint destinationLength, out PullSummary summary);

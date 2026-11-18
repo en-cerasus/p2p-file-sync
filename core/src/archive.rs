@@ -1,10 +1,14 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::BTreeSet,
+    io,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use rusqlite::{params, Transaction};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    blob::Blob,
+    blob::{Blob, BlobStore},
     materialize::AppliedFile,
     replica::{EventId, ObjectId},
     store::{decode, decode_column, encode, Store, StoreError},
@@ -22,7 +26,47 @@ pub struct ArchivedFile {
     pub archived_at: i64,
 }
 
+#[derive(Default, Debug, Eq, PartialEq)]
+pub struct ProtectedStorage {
+    pub files: u64,
+    pub bytes: u64,
+    pub missing: u64,
+}
+
 impl Store {
+    /// Count unique contents required by unconfirmed peers or a live
+    /// conflict. Missing content is reported independently of disk usage.
+    pub fn protected_storage(&self, blobs: &BlobStore) -> io::Result<ProtectedStorage> {
+        let replica = self.replica();
+        let hashes: BTreeSet<_> = self
+            .protections()
+            .filter(|protection| {
+                !protection.can_release(replica.clock())
+                    || replica
+                        .get(protection.original())
+                        .is_some_and(|event| replica.has_conflict(event.object))
+            })
+            .map(|protection| protection.content())
+            .collect();
+        let mut result = ProtectedStorage::default();
+        for hash in hashes {
+            match blobs.open_candidate(hash) {
+                Ok(file) => {
+                    let metadata = file.metadata()?;
+                    if !metadata.is_file() {
+                        result.missing += 1;
+                        continue;
+                    }
+                    result.files += 1;
+                    result.bytes = result.bytes.saturating_add(metadata.len());
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => result.missing += 1,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(result)
+    }
+
     /// Return only entries within the normal history window. Blob ownership
     /// is separate: a file may still be needed for conflict recovery.
     pub fn archives(&self, now: SystemTime) -> Result<Vec<ArchivedFile>, StoreError> {

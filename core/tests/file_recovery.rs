@@ -685,3 +685,35 @@ fn archives_expire_without_dropping_a_protected_old_blob() {
         .any(|protection| protection.original() == first.event));
     assert!(f.blobs.open_verified(first.desired.unwrap()).is_ok());
 }
+
+#[test]
+fn protected_storage_counts_unique_content_and_reports_missing_blobs() {
+    let f = Fixture::new();
+    let mut store = f.open();
+    let old = metadata(b"old");
+    let other = [78; 16];
+    let create = Event {
+        object: other,
+        ..event(3, content_entry(old.hash))
+    };
+    let create = Event {
+        change: Change::Create(content_entry(old.hash)),
+        ..create
+    };
+    store.apply_verified(create.clone()).unwrap();
+    let next = Event {
+        object: other,
+        change: Change::Revise {
+            base: create.id,
+            entry: None,
+        },
+        ..event(4, content_entry(old.hash))
+    };
+    store.apply_verified(next).unwrap();
+
+    let report = store.protected_storage(&f.blobs).unwrap();
+    assert_eq!((report.files, report.bytes, report.missing), (1, 3, 0));
+    let empty = BlobStore::open(f.folder.path().join("empty-blobs")).unwrap();
+    let report = store.protected_storage(&empty).unwrap();
+    assert_eq!((report.files, report.bytes, report.missing), (0, 0, 1));
+}

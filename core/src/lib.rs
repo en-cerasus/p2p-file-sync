@@ -163,7 +163,33 @@ pub unsafe extern "C" fn p2p_sync_pull_v2(
     }
 }
 
-unsafe fn pull_to_output<T: From<host::PullSummaryV2>>(
+/// Pull and report disk usage for protected contents.
+///
+/// # Safety
+/// Pointer and buffer requirements are identical to p2p_sync_pull.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_pull_v3(
+    config: *const u8,
+    config_len: usize,
+    state: *const u8,
+    state_len: usize,
+    destination: *const u8,
+    destination_len: usize,
+    output: *mut host::PullSummaryV3,
+) -> i32 {
+    unsafe {
+        pull_to_output(
+            [
+                (config, config_len),
+                (state, state_len),
+                (destination, destination_len),
+            ],
+            output,
+        )
+    }
+}
+
+unsafe fn pull_to_output<T: From<host::PullSummaryV3>>(
     paths: [(*const u8, usize); 3],
     output: *mut T,
 ) -> i32 {
@@ -188,7 +214,7 @@ unsafe fn pull_to_output<T: From<host::PullSummaryV2>>(
         let (Some(config), Some(state), Some(destination)) = (config, state, destination) else {
             return Err(INVALID_ARGUMENT);
         };
-        host::pull_from_config(config, state, destination).map_err(|error| match error {
+        host::pull_detailed(config, state, destination).map_err(|error| match error {
             host::HostError::Configuration => 2,
             host::HostError::Io(_) | host::HostError::Store(_) => 3,
             host::HostError::Tls(_) => 4,
