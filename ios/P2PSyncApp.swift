@@ -14,10 +14,11 @@ struct P2PSyncApp: App {
 @MainActor
 struct DirectSyncView: View {
     @Environment(\.scenePhase) private var phase
+    @AppStorage("directConfigBookmark") private var configBookmark = Data()
+    @AppStorage("directAutomaticSync") private var automaticSync = false
     @State private var configFolder: URL?
     @State private var pickingFolder = false
     @State private var syncing = false
-    @State private var automaticSync = false
     @State private var result = ""
     @State private var originals: [SyncCore.ProtectedOriginal] = []
 
@@ -70,6 +71,11 @@ struct DirectSyncView: View {
             }
         }
         .navigationTitle("直接同期")
+        .task(id: phase) {
+            if phase == .active && configFolder == nil && !pickingFolder {
+                restoreConfigFolder()
+            }
+        }
         .task(id: shouldPoll) {
             guard shouldPoll else { return }
             while !Task.isCancelled && shouldPoll {
@@ -84,11 +90,53 @@ struct DirectSyncView: View {
         .fileImporter(isPresented: $pickingFolder, allowedContentTypes: [.folder]) { selection in
             switch selection {
             case .success(let url):
-                configFolder = url
-                originals = []
-                result = ""
+                selectConfigFolder(url)
             case .failure: result = "接続設定フォルダーを開けませんでした。"
             }
+        }
+    }
+
+    private enum ConfigAccessError: Error {
+        case permissionUnavailable
+    }
+
+    private func bookmark(for url: URL) throws -> Data {
+        guard url.startAccessingSecurityScopedResource() else {
+            throw ConfigAccessError.permissionUnavailable
+        }
+        defer { url.stopAccessingSecurityScopedResource() }
+        return try url.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil)
+    }
+
+    private func selectConfigFolder(_ url: URL) {
+        do {
+            configBookmark = try bookmark(for: url)
+            configFolder = url
+            originals = []
+            result = ""
+        } catch {
+            result = "接続設定フォルダーへのアクセスを保存できませんでした。"
+        }
+    }
+
+    private func restoreConfigFolder() {
+        guard !configBookmark.isEmpty else { return }
+        do {
+            var stale = false
+            let url = try URL(resolvingBookmarkData: configBookmark, options: [.withoutUI],
+                              relativeTo: nil, bookmarkDataIsStale: &stale)
+            if stale {
+                configBookmark = try bookmark(for: url)
+            } else {
+                guard url.startAccessingSecurityScopedResource() else {
+                    throw ConfigAccessError.permissionUnavailable
+                }
+                url.stopAccessingSecurityScopedResource()
+            }
+            configFolder = url
+            result = ""
+        } catch {
+            result = "保存した接続設定フォルダーを開けませんでした。もう一度選択してください。"
         }
     }
 
@@ -99,10 +147,10 @@ struct DirectSyncView: View {
         defer { syncing = false }
         do {
             let summary = try await Task.detached(priority: .userInitiated) {
-                let accessing = configFolder.startAccessingSecurityScopedResource()
-                defer {
-                    if accessing { configFolder.stopAccessingSecurityScopedResource() }
+                guard configFolder.startAccessingSecurityScopedResource() else {
+                    throw ConfigAccessError.permissionUnavailable
                 }
+                defer { configFolder.stopAccessingSecurityScopedResource() }
 
                 let manager = FileManager.default
                 let state = try manager.url(for: .applicationSupportDirectory, in: .userDomainMask,
@@ -119,6 +167,10 @@ struct DirectSyncView: View {
             }.value
             originals = summary.originals
             result = "イベント \(summary.eventsAdded) 件、新規 \(summary.filesPublished) 件、更新 \(summary.filesUpdated) 件、削除 \(summary.filesRemoved) 件、変更なし \(summary.filesPresent) 件、保留 \(summary.filesBlocked) 件\n保護原本 \(summary.protectedFiles) 件 (\(summary.protectedBytes.formatted()) バイト)、未取得 \(summary.protectedMissing) 件"
+        } catch ConfigAccessError.permissionUnavailable {
+            self.configFolder = nil
+            originals = []
+            result = "接続設定フォルダーへのアクセスを失いました。もう一度選択してください。"
         } catch SyncCore.CoreError.pullFailed(let status) {
             switch status {
             case 1, 2: result = "接続設定または保存先を確認してください。"
