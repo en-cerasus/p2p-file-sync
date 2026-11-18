@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -25,6 +26,8 @@ internal sealed class SyncWindow : Window
     private readonly Button configButton = new() { Content = "設定ファイルを選択" };
     private readonly Button destinationButton = new() { Content = "保存先を選択" };
     private readonly Button syncButton = new() { Content = "同期を開始", IsEnabled = false };
+    private readonly Button cancelButton = new() { Content = "同期を中断", IsEnabled = false, Margin = new Thickness(0, 8, 0, 0), HorizontalAlignment = HorizontalAlignment.Left };
+    private CancellationTokenSource? cancellation;
     private readonly ListBox originalList = new() { MaxHeight = 240 };
     private readonly Expander originals = new() { Header = "保護原本の一覧", Visibility = Visibility.Collapsed };
     private readonly CheckBox autoSync = new()
@@ -52,6 +55,7 @@ internal sealed class SyncWindow : Window
         syncButton.Margin = new Thickness(0, 16, 0, 0);
         syncButton.HorizontalAlignment = HorizontalAlignment.Left;
         panel.Children.Add(syncButton);
+        panel.Children.Add(cancelButton);
         panel.Children.Add(autoSync);
         panel.Children.Add(result);
         originals.Content = originalList;
@@ -77,6 +81,13 @@ internal sealed class SyncWindow : Window
             }
         });
         syncButton.Click += async (_, _) => await RunSync();
+        cancelButton.Click += (_, _) =>
+        {
+            autoSync.IsChecked = false;
+            cancellation?.Cancel();
+            cancelButton.IsEnabled = false;
+            result.Text = "同期を中断しています…";
+        };
         autoSync.Checked += async (_, _) => await RunSync();
         autoSync.Unchecked += (_, _) => syncTimer.Stop();
         syncTimer.Tick += async (_, _) => await RunSync();
@@ -84,6 +95,7 @@ internal sealed class SyncWindow : Window
         {
             closing = true;
             syncTimer.Stop();
+            cancellation?.Cancel();
         };
     }
 
@@ -116,6 +128,7 @@ internal sealed class SyncWindow : Window
         bool ready = configuration is not null && destination is not null;
         configButton.IsEnabled = destinationButton.IsEnabled = !syncing;
         syncButton.IsEnabled = ready && !syncing;
+        cancelButton.IsEnabled = syncing && cancellation?.IsCancellationRequested == false;
         autoSync.IsEnabled = ready;
         if (ready && !syncing && autoSync.IsChecked == true)
         {
@@ -143,12 +156,14 @@ internal sealed class SyncWindow : Window
             return;
         }
         syncing = true;
+        using var operation = new CancellationTokenSource();
+        cancellation = operation;
         UpdateControls();
         result.Text = "同期中…";
         var state = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "P2PSync");
         try
         {
-            var pull = await Task.Run(() => SyncCore.Pull(config, state, root));
+            var pull = await Task.Run(() => SyncCore.Pull(config, state, root, operation.Token));
             result.Text = pull.Status == 0
                 ? $"イベント {pull.Summary.EventsAdded} 件、新規 {pull.Summary.FilesPublished} 件、更新 {pull.Summary.FilesUpdated} 件、削除 {pull.Summary.FilesRemoved} 件、変更なし {pull.Summary.FilesPresent} 件、保留 {pull.Summary.FilesBlocked} 件\n保護原本 {pull.Summary.ProtectedFiles} 件 ({pull.Summary.ProtectedBytes:N0} バイト)、未取得 {pull.Summary.ProtectedMissing} 件"
                 : SyncCore.ErrorMessage(pull.Status);
@@ -169,6 +184,7 @@ internal sealed class SyncWindow : Window
         finally
         {
             syncing = false;
+            cancellation = null;
             UpdateControls();
         }
     }
@@ -215,7 +231,8 @@ internal static class SyncCore
         }
     }
 
-    internal static (int Status, PullSummary Summary, ProtectedOriginal[] Originals) Pull(string config, string state, string destination)
+    internal static (int Status, PullSummary Summary, ProtectedOriginal[] Originals) Pull(
+        string config, string state, string destination, CancellationToken cancellation)
     {
         byte[] configBytes = Encoding.UTF8.GetBytes(config);
         byte[] stateBytes = Encoding.UTF8.GetBytes(state);
@@ -231,7 +248,7 @@ internal static class SyncCore
                 }
                 json = new byte[(int)length];
                 Marshal.Copy(data, json, 0, json.Length);
-            }, IntPtr.Zero);
+            }, IntPtr.Zero, _ => cancellation.IsCancellationRequested ? (byte)1 : (byte)0);
         if (status != 0)
         {
             return (status, summary, []);
@@ -246,15 +263,19 @@ internal static class SyncCore
         3 => "ローカルの設定ファイルや保存領域にアクセスできませんでした。",
         4 => "TLS 証明書または秘密鍵を読み込めませんでした。",
         5 => "同期に失敗しました。接続先、証明書、同期先を確認してください。",
+        7 => "同期を中断しました。次回は保存済みのデータを再利用します。",
         _ => "同期中に内部エラーが発生しました。",
     };
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void OriginalsCallback(IntPtr context, IntPtr data, nuint length);
 
-    [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_pull_v4", CallingConvention = CallingConvention.Cdecl)]
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte CancellationCallback(IntPtr context);
+
+    [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_pull_v5", CallingConvention = CallingConvention.Cdecl)]
     private static extern int PullNative(
         byte[] config, nuint configLength, byte[] state, nuint stateLength,
         byte[] destination, nuint destinationLength, out PullSummary summary,
-        OriginalsCallback originals, IntPtr context);
+        OriginalsCallback originals, IntPtr context, CancellationCallback cancellation);
 }
