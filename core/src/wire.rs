@@ -20,6 +20,8 @@ const GET_CHUNK: u8 = 5;
 const CHUNK: u8 = 6;
 const CONFIRM: u8 = 7;
 const CONFIRMED: u8 = 8;
+const FINISH: u8 = 9;
+const FINISHED: u8 = 10;
 const MAX_CONFIRMATION_FRAME: usize = 320;
 const MAX_MANIFEST_BYTES: usize = 8 + MAX_CHUNKS * 32;
 const MAX_FRONTIER_PEERS: usize = 1024;
@@ -202,6 +204,12 @@ pub fn pull_chunk(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionProgress {
+    Continue,
+    Finished,
+}
+
 /// Per-connection file selection. Run only after the caller authenticates
 /// the peer for this exact share generation. A reconnect selects a manifest
 /// again and may continue requesting only missing chunks.
@@ -217,7 +225,7 @@ impl ShareSession {
         store: &mut Store,
         completed: &BlobStore,
         roster: &Roster,
-    ) -> Result<(), WireError> {
+    ) -> Result<SessionProgress, WireError> {
         if store.membership() != roster.membership() {
             return Err(CatchupError::Authentication(crate::auth::AuthError::WrongScope).into());
         }
@@ -225,7 +233,7 @@ impl ShareSession {
         match kind {
             PULL => {
                 let body = read_body(stream, length, MAX_FRONTIER_PEERS * FRONTIER_ENTRY_BYTES)?;
-                write_page(stream, store, &body)
+                write_page(stream, store, &body)?;
             }
             GET_MANIFEST => {
                 self.selected = None;
@@ -246,7 +254,6 @@ impl ShareSession {
                 }
                 write_manifest(stream, &manifest)?;
                 self.selected = Some((manifest, file));
-                Ok(())
             }
             GET_CHUNK => {
                 let body = read_body(stream, length, 36)?;
@@ -254,17 +261,22 @@ impl ShareSession {
                     .selected
                     .as_mut()
                     .ok_or(WireError::UnavailableContent)?;
-                write_chunk(stream, manifest, file, &body)
+                write_chunk(stream, manifest, file, &body)?;
             }
             CONFIRM => {
                 let body = read_body(stream, length, MAX_CONFIRMATION_FRAME)?;
                 roster
                     .receive_confirmation(store, &body)
                     .map_err(CatchupError::Authentication)?;
-                write_frame(stream, CONFIRMED, &[])
+                write_frame(stream, CONFIRMED, &[])?;
             }
-            _ => Err(WireError::InvalidFrame),
+            FINISH if length == 0 => {
+                write_frame(stream, FINISHED, &[])?;
+                return Ok(SessionProgress::Finished);
+            }
+            _ => return Err(WireError::InvalidFrame),
         }
+        Ok(SessionProgress::Continue)
     }
 }
 
@@ -275,6 +287,12 @@ pub fn send_confirmation(stream: &mut (impl Read + Write), wire: &[u8]) -> Resul
     }
     write_frame(stream, CONFIRM, wire)?;
     read_frame(stream, CONFIRMED, 0)?;
+    Ok(())
+}
+
+pub fn finish_session(stream: &mut (impl Read + Write)) -> Result<(), WireError> {
+    write_frame(stream, FINISH, &[])?;
+    read_frame(stream, FINISHED, 0)?;
     Ok(())
 }
 

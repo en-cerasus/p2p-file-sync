@@ -6,12 +6,12 @@ use std::{
 use p2p_sync_core::{
     auth::{PeerSigningKey, Role, Roster},
     blob::{Blob, BlobStore},
+    direct::{self, PeerEndpoint},
     replica::{Change, Entry, EntryKind, Event, EventId, VersionVector},
     sha256,
     store::Store,
-    sync::{sync_new_files, Destination, FileResult},
+    sync::{Destination, FileResult},
     tls::{certificate_pin, Client, Credentials, Server, TlsError},
-    wire::ShareSession,
 };
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
@@ -103,16 +103,19 @@ fn exchanges_signed_events_only_after_mutual_tls_and_pin_validation() {
             roster.receive(&mut store, &wire).unwrap();
             let (socket, _) = listener.accept().unwrap();
             configure(&socket);
-            let mut secure = server.accept(socket, client_pin).unwrap();
             let root = tempfile::tempdir().unwrap();
             let blobs = BlobStore::open(root.path()).unwrap();
             blobs.put(blob, &data[..]).unwrap();
-            let mut session = ShareSession::default();
-            for _ in 0..3 {
-                session
-                    .serve_next(&mut secure, &mut store, &blobs, &roster)
-                    .unwrap();
-            }
+            direct::serve(
+                &server,
+                socket,
+                client_pin,
+                Duration::from_secs(5),
+                &mut store,
+                &roster,
+                &blobs,
+            )
+            .unwrap();
 
             let (socket, _) = listener.accept().unwrap();
             configure(&socket);
@@ -122,15 +125,11 @@ fn exchanges_signed_events_only_after_mutual_tls_and_pin_validation() {
             ));
         });
 
-        let socket = TcpStream::connect_timeout(&addr, Duration::from_secs(5)).unwrap();
-        configure(&socket);
-        let mut secure = client
-            .connect(
-                socket,
-                ServerName::try_from("localhost").unwrap(),
-                server_pin,
-            )
-            .unwrap();
+        let endpoint = PeerEndpoint {
+            address: addr,
+            server_name: ServerName::try_from("localhost").unwrap(),
+            certificate: server_pin,
+        };
         let roster = roster();
         let mut receiver = Store::open(":memory:", roster.membership().clone()).unwrap();
         let folder = tempfile::tempdir().unwrap();
@@ -138,8 +137,10 @@ fn exchanges_signed_events_only_after_mutual_tls_and_pin_validation() {
         let completed = BlobStore::open(folder.path().join("blobs")).unwrap();
         let destination = folder.path().join("destination");
         std::fs::create_dir(&destination).unwrap();
-        let report = sync_new_files(
-            &mut secure,
+        let report = direct::pull(
+            &client,
+            &endpoint,
+            Duration::from_secs(5),
             &mut receiver,
             &roster,
             Destination {
