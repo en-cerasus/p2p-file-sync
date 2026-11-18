@@ -83,3 +83,12 @@ cargo run --locked --release -p p2p-sync-core --bin p2p-send -- publish-tree .\t
 ```
 
 指定フォルダー内の階層と空フォルダーも登録します。同じ内容の再登録は既存イベントを再利用します。
+
+登録済みファイルを更新・削除するには、共有内の相対パスをスラッシュ区切りで指定します。
+
+```powershell
+cargo run --locked --release -p p2p-sync-core --bin p2p-send -- update .\trial-setup\sender\server.json .\server-state '譜面/song.tja' .\最新版.tja
+cargo run --locked --release -p p2p-sync-core --bin p2p-send -- delete .\trial-setup\sender\server.json .\server-state '譜面/song.tja'
+```
+
+両コマンドは共有上のイベントを記録します。配信時に指定した元ファイルは引き続きローカルに残ります。受信側で既に保存されたファイルの更新・削除は保留と表示されます。

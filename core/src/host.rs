@@ -17,8 +17,10 @@ use crate::{
     auth::{PeerSigningKey, Role, Roster},
     blob::BlobStore,
     direct::{self, DirectError, PeerEndpoint},
-    publish::{publish_file, publish_tree, PublishError, TreeSummary},
-    replica::{EventId, PeerId},
+    names::collision_key,
+    projection::Projection,
+    publish::{publish_file, publish_tree, revise_file, PublishError, TreeSummary},
+    replica::{EntryKind, EventId, PeerId},
     store::{Store, StoreError},
     sync::{Destination, FileResult},
     tls::{CertificatePin, Client, Credentials, Server, TlsError},
@@ -150,6 +152,62 @@ impl Sender {
             &self.roster,
             &self.signer,
             &self.completed,
+        )
+        .map_err(HostError::Publish)
+    }
+
+    /// Issue a change for a single existing, non-conflicted shared file.
+    /// The shared path uses slash-separated protocol components.
+    pub fn revise(
+        &mut self,
+        shared_path: &str,
+        source: Option<&Path>,
+    ) -> Result<EventId, HostError> {
+        let target: Vec<_> = shared_path
+            .split('/')
+            .map(collision_key)
+            .collect::<Result<_, _>>()
+            .map_err(|error| HostError::Publish(PublishError::InvalidName(error)))?;
+        self.store.refresh().map_err(HostError::Store)?;
+
+        let base = {
+            let replica = self.store.replica();
+            let projection = Projection::new(replica);
+            replica
+                .objects()
+                .find_map(|object| {
+                    let mut heads = replica.heads(object);
+                    let first = heads.next()?;
+                    if heads.next().is_some()
+                        || !first
+                            .change
+                            .entry()
+                            .is_some_and(|entry| matches!(entry.kind, EntryKind::File(_)))
+                    {
+                        return None;
+                    }
+                    let path = projection.path(object).ok()?;
+                    if path.len() == target.len()
+                        && path
+                            .iter()
+                            .zip(&target)
+                            .all(|(name, key)| collision_key(name).is_ok_and(|value| value == *key))
+                    {
+                        Some(first.id)
+                    } else {
+                        None
+                    }
+                })
+                .ok_or(HostError::Publish(PublishError::StaleBase))?
+        };
+
+        revise_file(
+            source,
+            &mut self.store,
+            &self.roster,
+            &self.signer,
+            &self.completed,
+            base,
         )
         .map_err(HostError::Publish)
     }

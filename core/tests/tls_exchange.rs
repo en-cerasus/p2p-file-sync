@@ -282,4 +282,58 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
     legacy["client_pin"] = pin;
     std::fs::write(&server_config, legacy.to_string()).unwrap();
     assert!(Sender::open(&server_config, &server_state).is_ok());
+
+    let revised = path.join("revision.tja");
+    std::fs::write(&revised, b"TITLE:Revision").unwrap();
+    let change = |mode: &str, shared_path: &str, source: Option<&std::path::Path>| {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"));
+        command
+            .arg(mode)
+            .arg(&server_config)
+            .arg(&server_state)
+            .arg(shared_path);
+        if let Some(source) = source {
+            command.arg(source);
+        }
+        command.output().unwrap()
+    };
+
+    let update = change("update", "譜面/試験譜面.TJA", Some(&revised));
+    assert!(
+        update.status.success(),
+        "{}",
+        String::from_utf8_lossy(&update.stderr)
+    );
+    let invalid = change("delete", "../試験譜面.tja", None);
+    assert!(!invalid.status.success());
+
+    let delete = change("delete", "譜面/試験譜面.tja", None);
+    assert!(
+        delete.status.success(),
+        "{}",
+        String::from_utf8_lossy(&delete.stderr)
+    );
+    assert_eq!(std::fs::read(&source).unwrap(), contents);
+    assert_eq!(std::fs::read(&revised).unwrap(), b"TITLE:Revision");
+
+    let mut sender = Sender::open(&server_config, &server_state).unwrap();
+    let listener = sender.bind().unwrap();
+    let receiver = setup.join("receiver-1/direct.json");
+    let mut config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&receiver).unwrap()).unwrap();
+    config["address"] = listener.local_addr().unwrap().to_string().into();
+    std::fs::write(&receiver, config.to_string()).unwrap();
+    let destination = path.join("fresh-destination");
+    std::fs::create_dir(&destination).unwrap();
+    std::thread::scope(|threads| {
+        let session = threads.spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            sender.serve(socket).unwrap();
+        });
+        let report = pull_from_config(&receiver, &path.join("client-state"), &destination).unwrap();
+        assert_eq!(report.events_added, 5);
+        assert_eq!(report.files_published, 0);
+        assert!(!destination.join("譜面/試験譜面.tja").exists());
+        session.join().unwrap();
+    });
 }
