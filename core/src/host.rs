@@ -369,7 +369,7 @@ impl Sender {
                 Err(error) => return Err(HostError::Io(error)),
             };
             if target.name_is_vacant().map_err(HostError::Io)? {
-                missing.push((path.into_iter().map(str::to_owned).collect(), head.id));
+                missing.push((path.into_iter().map(str::to_owned).collect::<Vec<_>>(), head.id));
             }
         }
         missing.sort_by(|a, b| a.0.cmp(&b.0));
