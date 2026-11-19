@@ -376,14 +376,14 @@ internal sealed class SyncWindow : Window
         bool ready = configuration is not null && destination is not null;
         configButton.IsEnabled = destinationButton.IsEnabled = !syncing;
         writerConfigButton.IsEnabled = writerStateButton.IsEnabled = !syncing && !writerServing;
-        writerSourceButton.IsEnabled = !syncing;
-        refreshWriterButton.IsEnabled = !syncing && writerConfiguration is not null
+        writerSourceButton.IsEnabled = !syncing && !writerServing;
+        refreshWriterButton.IsEnabled = !syncing && !writerServing && writerConfiguration is not null
             && writerState is not null && writerSource is not null;
-        startServerButton.IsEnabled = !writerServing && writerConfiguration is not null && writerState is not null;
+        startServerButton.IsEnabled = !syncing && !writerServing && writerConfiguration is not null && writerState is not null;
         stopServerButton.IsEnabled = writerServing && serverCancellation?.IsCancellationRequested == false;
         trayStartServer.Enabled = startServerButton.IsEnabled;
         trayStopServer.Enabled = stopServerButton.IsEnabled;
-        loadWriterHistoryButton.IsEnabled = !syncing && writerConfiguration is not null && writerState is not null;
+        loadWriterHistoryButton.IsEnabled = !syncing && !writerServing && writerConfiguration is not null && writerState is not null;
         loadWriterConflictsButton.IsEnabled = loadWriterHistoryButton.IsEnabled;
         restoreHistoryButton.IsEnabled = loadWriterHistoryButton.IsEnabled
             && writerHistoryList.SelectedItem is SyncCore.WriterHistoryEntry { CurrentHeads.Length: 1 };
@@ -421,7 +421,7 @@ internal sealed class SyncWindow : Window
 
     private async Task StartServer()
     {
-        if (closing || writerServing || writerConfiguration is not string config || writerState is not string state)
+        if (closing || syncing || writerServing || writerConfiguration is not string config || writerState is not string state)
         {
             return;
         }
@@ -464,7 +464,7 @@ internal sealed class SyncWindow : Window
 
     private async Task RefreshWriterTree()
     {
-        if (closing || syncing || writerConfiguration is not string config
+        if (closing || syncing || writerServing || writerConfiguration is not string config
             || writerState is not string state || writerSource is not string source)
         {
             return;
@@ -550,7 +550,7 @@ internal sealed class SyncWindow : Window
 
     private async Task LoadWriterHistory()
     {
-        if (closing || syncing || writerConfiguration is not string config || writerState is not string state)
+        if (closing || syncing || writerServing || writerConfiguration is not string config || writerState is not string state)
         {
             return;
         }
@@ -583,7 +583,7 @@ internal sealed class SyncWindow : Window
 
     private async Task RestoreWriterHistory()
     {
-        if (closing || syncing || writerConfiguration is not string config || writerState is not string state
+        if (closing || syncing || writerServing || writerConfiguration is not string config || writerState is not string state
             || writerHistoryList.SelectedItem is not SyncCore.WriterHistoryEntry entry
             || entry.CurrentHeads.Length != 1)
         {
@@ -617,7 +617,7 @@ internal sealed class SyncWindow : Window
 
     private async Task DeleteWriterHistory(bool all)
     {
-        if (closing || syncing || writerConfiguration is not string config || writerState is not string state)
+        if (closing || syncing || writerServing || writerConfiguration is not string config || writerState is not string state)
         {
             return;
         }
@@ -658,7 +658,7 @@ internal sealed class SyncWindow : Window
 
     private async Task LoadWriterConflicts()
     {
-        if (closing || syncing || writerConfiguration is not string config || writerState is not string state)
+        if (closing || syncing || writerServing || writerConfiguration is not string config || writerState is not string state)
         {
             return;
         }
@@ -693,7 +693,7 @@ internal sealed class SyncWindow : Window
 
     private async Task ResolveWriterConflict()
     {
-        if (closing || syncing || writerConfiguration is not string config || writerState is not string state
+        if (closing || syncing || writerServing || writerConfiguration is not string config || writerState is not string state
             || writerConflictList.SelectedItem is not SyncCore.WriterConflict conflict
             || writerCandidateList.SelectedItem is not SyncCore.WriterConflictVersion choice
             || conflict.Versions.Length < 2 || conflict.Versions.Any(version => version.Kind == "directory")

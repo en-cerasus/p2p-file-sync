@@ -21,6 +21,7 @@ struct WriterView: View {
         Form {
             Section("書き込みピア") {
                 Button("配信設定フォルダーを選択") { pickingFolder = true }
+                    .disabled(serving || refreshing)
                 Text(configFolder?.lastPathComponent ?? "設定フォルダーが未選択です")
                     .foregroundStyle(.secondary)
             }
@@ -29,17 +30,17 @@ struct WriterView: View {
                 Text("Filesアプリでこのフォルダーに譜面・音源を入れます。")
                     .font(.caption).foregroundStyle(.secondary)
                 Button("新規・変更ファイルを登録") { Task { await refresh() } }
-                    .disabled(configFolder == nil || sourceFolder == nil || refreshing)
+                    .disabled(configFolder == nil || sourceFolder == nil || refreshing || serving)
                 if refreshing { ProgressView("共有元を確認しています…") }
                 if !result.isEmpty { Text(result) }
             }
             Section("配信") {
                 Button("配信を開始") { startServer() }
-                    .disabled(configFolder == nil || serving || phase != .active)
+                    .disabled(configFolder == nil || serving || refreshing || phase != .active)
                 Button("配信を停止") { stopServer() }
                     .disabled(!serving || cancellation?.isCancelled() == true)
                 Text(serverStatus).foregroundStyle(.secondary)
-                Text("配信は画面を開いている間に動作します。アプリがバックグラウンドへ移ると停止します。")
+                Text("共有元の登録・更新は配信を停止してから行います。配信は画面を開いている間に動作し、アプリがバックグラウンドへ移ると停止します。")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -81,6 +82,7 @@ struct WriterView: View {
     }
 
     private func selectConfigFolder(_ url: URL) {
+        guard !serving, !refreshing else { return }
         do {
             guard url.startAccessingSecurityScopedResource() else { throw WriterFailure.permissionUnavailable }
             defer { url.stopAccessingSecurityScopedResource() }
@@ -115,7 +117,7 @@ struct WriterView: View {
     private enum WriterFailure: Error { case permissionUnavailable }
 
     private func refresh() async {
-        guard !refreshing, let configFolder, let sourceFolder else { return }
+        guard !refreshing, !serving, let configFolder, let sourceFolder else { return }
         refreshing = true
         result = ""
         defer { refreshing = false }
@@ -136,7 +138,7 @@ struct WriterView: View {
     }
 
     private func startServer() {
-        guard !serving, phase == .active, let configFolder else { return }
+        guard !serving, !refreshing, phase == .active, let configFolder else { return }
         let state: URL
         do { state = try stateFolder() }
         catch { serverStatus = "配信状態を開けませんでした。"; return }

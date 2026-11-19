@@ -500,14 +500,24 @@ fn writer_ffi_listener_serves_and_stops_on_request() {
         std::fs::write(&receiver, settings.to_string()).unwrap();
         let destination = root.path().join("destination");
         std::fs::create_dir(&destination).unwrap();
+        let later = root.path().join("later.tja");
+        std::fs::write(&later, b"published after listener start").unwrap();
+        Sender::open(&config, &state)
+            .unwrap()
+            .publish(&later)
+            .unwrap();
         let result = pull_from_config(&receiver, &root.path().join("receiver-state"), &destination);
         context.stop.store(true, Ordering::Relaxed);
         assert_eq!(server.join().unwrap(), 7);
         let result = result.unwrap();
-        assert_eq!(result.files_published, 1);
+        assert_eq!(result.files_published, 2);
         assert_eq!(
             std::fs::read(destination.join("song.tja")).unwrap(),
             b"served from GUI entry point"
+        );
+        assert_eq!(
+            std::fs::read(destination.join("later.tja")).unwrap(),
+            b"published after listener start"
         );
     });
 }

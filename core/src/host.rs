@@ -698,6 +698,9 @@ impl Sender {
 
     pub fn serve(&mut self, socket: TcpStream) -> Result<(), HostError> {
         self.check_generation()?;
+        // Another handle may have published while this listener was idle.
+        // Read those commits before calculating the peer's event frontier.
+        self.store.refresh().map_err(HostError::Store)?;
         {
             let lock = self.open_state_lock()?;
             // A concurrent outbound pull may be waiting for this peer to serve.
