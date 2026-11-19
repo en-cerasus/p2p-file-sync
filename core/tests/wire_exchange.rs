@@ -684,6 +684,45 @@ fn an_applied_file_updates_or_keeps_unapplied_version_without_stale_intent() {
         assert!(store.pending_files().unwrap().is_empty());
         assert_eq!(store.applied_file(object).unwrap().unwrap().event, first.id);
         assert_eq!(std::fs::read(destination.join("song.tja")).unwrap(), b"old");
+
+        // A later path-only move back to the applied contents must remain
+        // pending too, even though it needs no new content transfer.
+        let moved = Event {
+            id: EventId { peer, sequence: 3 },
+            context: [(peer, 2)].into(),
+            object,
+            change: Change::Revise {
+                base: revision.id,
+                entry: Some(Entry {
+                    parent: None,
+                    name: "moved.tja".into(),
+                    kind: EntryKind::File(old.hash),
+                }),
+            },
+        };
+        let signed = roster.sign_event(&key, &moved).unwrap();
+        let page = [&[0][..], &(signed.len() as u32).to_be_bytes(), &signed].concat();
+        let mut response = Vec::new();
+        response.extend_from_slice(b"P2P1");
+        response.push(2);
+        response.extend_from_slice(&(page.len() as u32).to_be_bytes());
+        response.extend_from_slice(&page);
+        let report = sync_new_files(
+            &mut Scripted(Cursor::new(response)),
+            &mut store,
+            &roster,
+            Destination {
+                root: &destination,
+                chunks: &chunks,
+                completed: &completed,
+            },
+        )
+        .unwrap();
+        assert_eq!(report.files, [(object, FileResult::PendingRecovery)]);
+        assert!(store.pending_files().unwrap().is_empty());
+        assert_eq!(store.applied_file(object).unwrap().unwrap().event, first.id);
+        assert_eq!(std::fs::read(destination.join("song.tja")).unwrap(), b"old");
+        assert!(!destination.join("moved.tja").exists());
     }
     assert!(completed.open_verified(old).is_ok());
     assert!(completed.open_verified(new).is_ok());

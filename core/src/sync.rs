@@ -164,10 +164,6 @@ fn publish_heads(
                             .as_ref()
                             .and_then(|item| item.path.as_ref())
                             .is_none_or(|previous| !previous.iter().map(String::as_str).eq(path));
-                    if moving && !cfg!(windows) {
-                        report.files.push((object, FileResult::Superseded));
-                        continue;
-                    }
                     files.push((
                         object,
                         head.id,
@@ -256,8 +252,6 @@ fn publish_heads(
             }
             continue;
         }
-        #[cfg(not(windows))]
-        debug_assert!(!moving);
         if !live && previous.is_none() {
             report.files.push((object, FileResult::Removed));
             continue;
@@ -322,10 +316,11 @@ fn publish_heads(
         let is_update = previous.is_some() && previous != desired;
         check_cancelled(cancelled)?;
         #[cfg(not(windows))]
-        if is_update {
+        if is_update || moving {
             // This platform has no conditional existing-file adapter yet.
-            // Keep the verified content cached, but do not create an intent
-            // that cannot be recovered and would block a later revision.
+            // This includes a path-only move with unchanged content. Keep
+            // the verified content cached, but do not create an intent that
+            // cannot be recovered and would block a later revision.
             report.files.push((object, FileResult::PendingRecovery));
             continue;
         }
