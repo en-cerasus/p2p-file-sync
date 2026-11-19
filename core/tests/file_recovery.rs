@@ -135,6 +135,64 @@ fn metadata(bytes: &[u8]) -> Blob {
 }
 
 #[test]
+fn platform_adapter_receives_validated_update_and_deletion_paths() {
+    let folder = tempfile::tempdir().unwrap();
+    let blobs = BlobStore::open(folder.path().join("objects")).unwrap();
+    let old = metadata(b"old");
+    let new = metadata(b"new");
+    blobs.put(old, &b"old"[..]).unwrap();
+    blobs.put(new, &b"new"[..]).unwrap();
+    let mut store = Store::open(folder.path().join("state.db"), Membership {
+        share: [12; 16], generation: 1, members: [PEER].into(),
+    }).unwrap();
+    let created = event(1, content_entry(old.hash));
+    store.apply_verified(created.clone()).unwrap();
+    let first = FileIntent {
+        object: OBJECT, event: created.id, previous: None, desired: Some(old),
+    };
+    store.stage_file(&blobs, &first).unwrap();
+    let mut empty = Target::default();
+    assert_eq!(store.recover_file(&blobs, &mut empty, OBJECT).unwrap(), Recovery::Applied);
+
+    let updated = event(2, content_entry(new.hash));
+    store.apply_verified(updated.clone()).unwrap();
+    let revision = FileIntent {
+        object: OBJECT, event: updated.id, previous: Some(old), desired: Some(new),
+    };
+    store.stage_file(&blobs, &revision).unwrap();
+    assert_eq!(store.recover_updated_file_with(&blobs, OBJECT, |path, intent| {
+        assert_eq!(path, &[String::from("song.tja")]);
+        assert_eq!(intent, &revision);
+        Ok(Target { content: Some(b"local edit".to_vec()), writes: 0 })
+    }).unwrap(), Recovery::Diverged);
+    assert_eq!(store.applied_file(OBJECT).unwrap().unwrap().event, created.id);
+    assert_eq!(store.recover_updated_file_with(&blobs, OBJECT, |path, intent| {
+        assert_eq!(path, &[String::from("song.tja")]);
+        assert_eq!(intent, &revision);
+        Ok(Target { content: Some(b"old".to_vec()), writes: 0 })
+    }).unwrap(), Recovery::Applied);
+    assert_eq!(store.applied_file(OBJECT).unwrap().unwrap().contents, Some(new));
+
+    let deleted = Event {
+        id: EventId { peer: PEER, sequence: 3 },
+        context: [(PEER, 2)].into(),
+        object: OBJECT,
+        change: Change::Revise { base: updated.id, entry: None },
+    };
+    store.apply_verified(deleted.clone()).unwrap();
+    let tombstone = FileIntent {
+        object: OBJECT, event: deleted.id, previous: Some(new), desired: None,
+    };
+    store.stage_file(&blobs, &tombstone).unwrap();
+    assert_eq!(store.recover_deleted_file_with(&blobs, OBJECT, |path, intent| {
+        assert_eq!(path, &[String::from("song.tja")]);
+        assert_eq!(intent, &tombstone);
+        Ok(Target { content: Some(b"new".to_vec()), writes: 0 })
+    }).unwrap(), Recovery::Applied);
+    assert_eq!(store.applied_file(OBJECT).unwrap().unwrap().contents, None);
+}
+
+#[test]
 fn resumes_after_filesystem_write_when_sql_completion_failed() {
     let f = Fixture::new();
     let mut store = f.open();

@@ -29,7 +29,7 @@
 
 ## 実装分割
 
-- Rust の `FileTarget` に iOS 専用の条件付き移動・削除・置換アダプターを追加する。Windows のハンドルベースの実装を Unix の単純なパス操作に置き換えただけでは安全条件を満たさない。
+- `recover_updated_file_with` と `recover_deleted_file_with` は、署名済み head・適用済み版・元のパスと親の整合性を共通コアで検証した後、OS別の `FileTarget` を作る。Windows はこの経路で従来のハンドルベース処理を実行する。iOS にはファイル調整の下で最後の照合と置換・削除を行う専用アダプターを追加する。Unix の単純なパス操作への置換では安全条件を満たさない。
 - Rust FFI から呼び出す Swift 側のファイル調整層で、反映対象のパスを調整する。同期の通信や SQLite トランザクションを調整コールバック内で長時間保持しない。
 - `recover_updated_file`、`recover_moved_file`、`recover_deleted_file` の検証と復旧の共通部分を iOS から利用し、`sync.rs` の iOS 保留分岐を実行経路へ変更する。
 - 変更されたローカルファイル、移動先衝突、権限拒否、ストレージ不足、各永続化境界での強制終了を検証する。iPhone 11 の Files アプリからの編集とバックグラウンド復帰も実機で確認する。

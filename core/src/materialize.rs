@@ -208,6 +208,22 @@ impl Store {
         root: &Path,
         object: ObjectId,
     ) -> Result<Recovery, MaterializeError> {
+        self.recover_updated_file_with(blobs, object, |path, intent| {
+            let components: Vec<_> = path.iter().map(String::as_str).collect();
+            let target = NewFileTarget::existing(&open_root(root)?, &components)?;
+            Ok(UpdateTarget { target, intent: intent.clone() })
+        })
+    }
+
+    /// Validate the signed head and recorded local version before creating an
+    /// OS-specific target for the exact applied path. The adapter must recheck
+    /// the old bytes while it holds its filesystem coordination guard.
+    pub fn recover_updated_file_with<T: FileTarget>(
+        &mut self,
+        blobs: &BlobStore,
+        object: ObjectId,
+        make_target: impl FnOnce(&[String], &FileIntent) -> io::Result<T>,
+    ) -> Result<Recovery, MaterializeError> {
         let (tx, replica) = self.begin_indexed_write()?;
         let Some((intent, path)) = load_intent(&tx, object)? else {
             return Ok(Recovery::NonePending);
@@ -230,12 +246,7 @@ impl Store {
         {
             return Ok(Recovery::Superseded);
         }
-        let components: Vec<_> = path.iter().map(String::as_str).collect();
-        let target = NewFileTarget::existing(&open_root(root)?, &components)?;
-        let mut target = UpdateTarget {
-            target,
-            intent: &intent,
-        };
+        let mut target = make_target(&path, &intent)?;
         reconcile(tx, blobs, &mut target, &intent, Some(path), true)
     }
 
@@ -426,7 +437,7 @@ impl Store {
         if desired != previous {
             let mut target = UpdateTarget {
                 target,
-                intent: &intent,
+                intent: intent.clone(),
             };
             return reconcile(tx, blobs, &mut target, &intent, Some(path), true);
         }
@@ -444,6 +455,21 @@ impl Store {
         blobs: &BlobStore,
         root: &Path,
         object: ObjectId,
+    ) -> Result<Recovery, MaterializeError> {
+        self.recover_deleted_file_with(blobs, object, |path, _intent| {
+            let components: Vec<_> = path.iter().map(String::as_str).collect();
+            NewFileTarget::existing(&open_root(root)?, &components)
+        })
+    }
+
+    /// Verify a tombstone against the applied file and original parent before
+    /// handing the exact path to a platform adapter. The adapter must keep a
+    /// coordination guard across its final content check and deletion.
+    pub fn recover_deleted_file_with<T: FileTarget>(
+        &mut self,
+        blobs: &BlobStore,
+        object: ObjectId,
+        make_target: impl FnOnce(&[String], &FileIntent) -> io::Result<T>,
     ) -> Result<Recovery, MaterializeError> {
         let (tx, replica) = self.begin_indexed_write()?;
         let Some((intent, path)) = load_intent(&tx, object)? else {
@@ -484,8 +510,7 @@ impl Store {
         if entry.name != *name || !parent_matches || !projection.vacant(entry.parent, name) {
             return Ok(Recovery::Superseded);
         }
-        let components: Vec<_> = path.iter().map(String::as_str).collect();
-        let mut target = NewFileTarget::existing(&open_root(root)?, &components)?;
+        let mut target = make_target(&path, &intent)?;
         reconcile(tx, blobs, &mut target, &intent, Some(path), true)
     }
 }
@@ -504,15 +529,15 @@ fn same_name_slot(before: &[String], after: &[String]) -> bool {
 }
 
 #[cfg(windows)]
-struct UpdateTarget<'a> {
+struct UpdateTarget {
     target: NewFileTarget,
-    intent: &'a FileIntent,
+    intent: FileIntent,
 }
 
 #[cfg(windows)]
-impl FileTarget for UpdateTarget<'_> {
+impl FileTarget for UpdateTarget {
     fn inspect(&mut self, _: ObjectId) -> io::Result<Option<Blob>> {
-        self.target.update_status(self.intent)
+        self.target.update_status(&self.intent)
     }
 
     fn replace_if_current(
