@@ -144,6 +144,14 @@ int32_t p2p_sync_writer_refresh_tree(const uint8_t *config, size_t config_len,
                                      const uint8_t *source, size_t source_len,
                                      p2p_sync_originals_callback callback, void *context);
 
+/* Fetch signed peer changes and verified contents into a writer's serving
+   cache. Peer endpoints come from the selected direct.json. On success,
+   events_added receives the number of newly imported events. */
+int32_t p2p_sync_writer_catch_up(const uint8_t *config, size_t config_len,
+                                const uint8_t *state, size_t state_len,
+                                const uint8_t *peers, size_t peers_len,
+                                uint64_t *events_added);
+
 #ifdef __cplusplus
 }
 #endif

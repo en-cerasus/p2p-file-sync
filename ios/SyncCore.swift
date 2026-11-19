@@ -160,6 +160,26 @@ enum SyncCore {
         return try JSONDecoder().decode(WriterSummary.self, from: json)
     }
 
+    static func catchUpWriter(configuration: URL, state: URL, peers: URL) throws -> UInt64 {
+        let config = Array(configuration.path.utf8)
+        let storage = Array(state.path.utf8)
+        let peerConfig = Array(peers.path.utf8)
+        var added: UInt64 = 0
+        let status = config.withUnsafeBufferPointer { configBytes in
+            storage.withUnsafeBufferPointer { stateBytes in
+                peerConfig.withUnsafeBufferPointer { peerBytes in
+                    p2p_sync_writer_catch_up(
+                        configBytes.baseAddress, configBytes.count,
+                        stateBytes.baseAddress, stateBytes.count,
+                        peerBytes.baseAddress, peerBytes.count, &added
+                    )
+                }
+            }
+        }
+        guard status == P2P_SYNC_OK else { throw CoreError.writerFailed(status) }
+        return added
+    }
+
     private struct WriterServeContext {
         let cancellation: Cancellation
         let onReady: @Sendable (String) -> Void

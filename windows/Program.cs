@@ -41,6 +41,7 @@ internal sealed class SyncWindow : Window
     private readonly Button writerSourceButton = new() { Content = "共有元フォルダーを選択" };
     private readonly TextBlock writerSourceLabel = new() { TextWrapping = TextWrapping.Wrap };
     private readonly Button refreshWriterButton = new() { Content = "共有元を登録・更新", Margin = new Thickness(0, 12, 0, 0) };
+    private readonly Button catchUpWriterButton = new() { Content = "他のピアから取得", Margin = new Thickness(0, 12, 0, 0) };
     private readonly Button loadWriterHistoryButton = new() { Content = "復元できる履歴を確認", Margin = new Thickness(0, 12, 0, 0) };
     private readonly ListBox writerHistoryList = new() { MaxHeight = 240 };
     private readonly Button restoreHistoryButton = new() { Content = "選択した履歴を復元", Margin = new Thickness(0, 8, 0, 0) };
@@ -85,7 +86,7 @@ internal sealed class SyncWindow : Window
         Height = 760;
         MinHeight = 440;
         var panel = new StackPanel { Margin = new Thickness(24) };
-        foreach (var action in new[] { refreshWriterButton, startServerButton, stopServerButton,
+        foreach (var action in new[] { refreshWriterButton, catchUpWriterButton, startServerButton, stopServerButton,
             loadWriterHistoryButton, restoreHistoryButton, deleteHistoryButton,
             deleteAllHistoryButton, loadWriterConflictsButton, resolveConflictButton })
         {
@@ -111,6 +112,7 @@ internal sealed class SyncWindow : Window
         AddPicker(panel, writerStateButton, writerStateLabel, "状態フォルダーが未選択です");
         AddPicker(panel, writerSourceButton, writerSourceLabel, "共有元フォルダーが未選択です");
         panel.Children.Add(refreshWriterButton);
+        panel.Children.Add(catchUpWriterButton);
         panel.Children.Add(startServerButton);
         panel.Children.Add(stopServerButton);
         panel.Children.Add(serverStatus);
@@ -212,6 +214,7 @@ internal sealed class SyncWindow : Window
             }
         });
         refreshWriterButton.Click += async (_, _) => await RefreshWriterTree();
+        catchUpWriterButton.Click += async (_, _) => await CatchUpWriter();
         loadWriterHistoryButton.Click += async (_, _) => await LoadWriterHistory();
         writerHistoryList.SelectionChanged += (_, _) => UpdateControls();
         restoreHistoryButton.Click += async (_, _) => await RestoreWriterHistory();
@@ -379,6 +382,8 @@ internal sealed class SyncWindow : Window
         writerSourceButton.IsEnabled = !syncing && !writerServing;
         refreshWriterButton.IsEnabled = !syncing && !writerServing && writerConfiguration is not null
             && writerState is not null && writerSource is not null;
+        catchUpWriterButton.IsEnabled = !syncing && !writerServing && writerConfiguration is not null
+            && writerState is not null;
         startServerButton.IsEnabled = !syncing && !writerServing && writerConfiguration is not null && writerState is not null;
         stopServerButton.IsEnabled = writerServing && serverCancellation?.IsCancellationRequested == false;
         trayStartServer.Enabled = startServerButton.IsEnabled;
@@ -490,6 +495,42 @@ internal sealed class SyncWindow : Window
         catch (Exception error) when (error is JsonException or DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
         {
             writerStatus.Text = "共有元の登録・更新処理を読み込めませんでした。";
+        }
+        finally
+        {
+            syncing = false;
+            UpdateControls();
+        }
+    }
+
+    private async Task CatchUpWriter()
+    {
+        if (closing || syncing || writerServing || writerConfiguration is not string config
+            || writerState is not string state)
+        {
+            return;
+        }
+        syncing = true;
+        writerStatus.Text = "他のピアから取得しています…";
+        UpdateControls();
+        try
+        {
+            var peers = Path.Combine(Path.GetDirectoryName(config)!, "direct.json");
+            var fetched = await Task.Run(() => SyncCore.CatchUpWriter(config, state, peers));
+            writerStatus.Text = fetched.Status == 0
+                ? $"他のピアから変更 {fetched.EventsAdded} 件を取得しました。"
+                : SyncCore.ErrorMessage(fetched.Status);
+            if (fetched.Status == 0)
+            {
+                writerHistoryList.ItemsSource = null;
+                writerConflictList.ItemsSource = null;
+                writerCandidateList.ItemsSource = null;
+                historyStatus.Text = conflictStatus.Text = "";
+            }
+        }
+        catch (Exception error) when (error is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
+        {
+            writerStatus.Text = "ピアからの取得処理を読み込めませんでした。";
         }
         finally
         {
@@ -967,6 +1008,17 @@ internal static class SyncCore
             (0, JsonSerializer.Deserialize<TreeSummary>(json) ?? new TreeSummary(0, 0, 0));
     }
 
+    internal static (int Status, ulong EventsAdded) CatchUpWriter(string config, string state, string peers)
+    {
+        var configBytes = Encoding.UTF8.GetBytes(config);
+        var stateBytes = Encoding.UTF8.GetBytes(state);
+        var peerBytes = Encoding.UTF8.GetBytes(peers);
+        var status = WriterCatchUpNative(configBytes, (nuint)configBytes.Length,
+            stateBytes, (nuint)stateBytes.Length,
+            peerBytes, (nuint)peerBytes.Length, out var added);
+        return (status, added);
+    }
+
     internal static string ErrorMessage(int status) => status switch
     {
         1 or 2 => "接続設定または保存先を確認してください。",
@@ -1023,4 +1075,9 @@ internal static class SyncCore
     private static extern int WriterRefreshTreeNative(
         byte[] config, nuint configLength, byte[] state, nuint stateLength,
         byte[] source, nuint sourceLength, OriginalsCallback callback, IntPtr context);
+
+    [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_writer_catch_up", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int WriterCatchUpNative(
+        byte[] config, nuint configLength, byte[] state, nuint stateLength,
+        byte[] peers, nuint peersLength, out ulong eventsAdded);
 }

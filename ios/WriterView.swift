@@ -11,6 +11,7 @@ struct WriterView: View {
     @State private var configFolder: URL?
     @State private var pickingFolder = false
     @State private var refreshing = false
+    @State private var catchingUp = false
     @State private var serving = false
     @State private var cancellation: SyncCore.Cancellation?
     @State private var sourceFolder: URL?
@@ -21,7 +22,7 @@ struct WriterView: View {
         Form {
             Section("書き込みピア") {
                 Button("配信設定フォルダーを選択") { pickingFolder = true }
-                    .disabled(serving || refreshing)
+                    .disabled(serving || refreshing || catchingUp)
                 Text(configFolder?.lastPathComponent ?? "設定フォルダーが未選択です")
                     .foregroundStyle(.secondary)
             }
@@ -30,17 +31,20 @@ struct WriterView: View {
                 Text("Filesアプリでこのフォルダーに譜面・音源を入れます。")
                     .font(.caption).foregroundStyle(.secondary)
                 Button("新規・変更ファイルを登録") { Task { await refresh() } }
-                    .disabled(configFolder == nil || sourceFolder == nil || refreshing || serving)
+                    .disabled(configFolder == nil || sourceFolder == nil || refreshing || catchingUp || serving)
                 if refreshing { ProgressView("共有元を確認しています…") }
                 if !result.isEmpty { Text(result) }
             }
             Section("配信") {
+                Button("他のピアから取得") { Task { await catchUp() } }
+                    .disabled(configFolder == nil || serving || refreshing || catchingUp)
+                if catchingUp { ProgressView("ピアから取得しています…") }
                 Button("配信を開始") { startServer() }
-                    .disabled(configFolder == nil || serving || refreshing || phase != .active)
+                    .disabled(configFolder == nil || serving || refreshing || catchingUp || phase != .active)
                 Button("配信を停止") { stopServer() }
                     .disabled(!serving || cancellation?.isCancelled() == true)
                 Text(serverStatus).foregroundStyle(.secondary)
-                Text("共有元の登録・更新は配信を停止してから行います。配信は画面を開いている間に動作し、アプリがバックグラウンドへ移ると停止します。")
+                Text("取得と共有元の登録・更新は配信を停止してから行います。配信は画面を開いている間に動作し、アプリがバックグラウンドへ移ると停止します。")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -82,7 +86,7 @@ struct WriterView: View {
     }
 
     private func selectConfigFolder(_ url: URL) {
-        guard !serving, !refreshing else { return }
+        guard !serving, !refreshing, !catchingUp else { return }
         do {
             guard url.startAccessingSecurityScopedResource() else { throw WriterFailure.permissionUnavailable }
             defer { url.stopAccessingSecurityScopedResource() }
@@ -117,7 +121,7 @@ struct WriterView: View {
     private enum WriterFailure: Error { case permissionUnavailable }
 
     private func refresh() async {
-        guard !refreshing, !serving, let configFolder, let sourceFolder else { return }
+        guard !refreshing, !catchingUp, !serving, let configFolder, let sourceFolder else { return }
         refreshing = true
         result = ""
         defer { refreshing = false }
@@ -137,8 +141,32 @@ struct WriterView: View {
         }
     }
 
+    private func catchUp() async {
+        guard !catchingUp, !refreshing, !serving, let configFolder else { return }
+        catchingUp = true
+        result = ""
+        defer { catchingUp = false }
+        do {
+            let state = try stateFolder()
+            let added = try await Task.detached(priority: .utility) {
+                guard configFolder.startAccessingSecurityScopedResource() else {
+                    throw WriterFailure.permissionUnavailable
+                }
+                defer { configFolder.stopAccessingSecurityScopedResource() }
+                return try SyncCore.catchUpWriter(
+                    configuration: configFolder.appendingPathComponent("server.json"),
+                    state: state,
+                    peers: configFolder.appendingPathComponent("direct.json")
+                )
+            }.value
+            result = "他のピアから変更 \(added) 件を取得しました。"
+        } catch {
+            result = writerError(error)
+        }
+    }
+
     private func startServer() {
-        guard !serving, !refreshing, phase == .active, let configFolder else { return }
+        guard !serving, !refreshing, !catchingUp, phase == .active, let configFolder else { return }
         let state: URL
         do { state = try stateFolder() }
         catch { serverStatus = "配信状態を開けませんでした。"; return }

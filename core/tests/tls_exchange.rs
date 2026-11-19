@@ -1168,7 +1168,7 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
 fn generated_writers_use_distinct_credentials_and_share_their_changes() {
     use p2p_sync_core::{
         host::{pull_from_config, Sender},
-        p2p_sync_writer_conflicts, p2p_sync_writer_resolve,
+        p2p_sync_writer_catch_up, p2p_sync_writer_conflicts, p2p_sync_writer_resolve,
     };
 
     let temporary = tempfile::tempdir().unwrap();
@@ -1223,6 +1223,19 @@ fn generated_writers_use_distinct_credentials_and_share_their_changes() {
     }]);
     peer_settings["address"] = "127.0.0.1:0".into();
     std::fs::write(&peer_config, peer_settings.to_string()).unwrap();
+    let catch_up = || {
+        let config = second_config.to_str().unwrap().as_bytes();
+        let state = second_state.to_str().unwrap().as_bytes();
+        let peers = peer_config.to_str().unwrap().as_bytes();
+        let mut count = 0;
+        let status = unsafe {
+            p2p_sync_writer_catch_up(
+                config.as_ptr(), config.len(), state.as_ptr(), state.len(),
+                peers.as_ptr(), peers.len(), &mut count,
+            )
+        };
+        (status, count)
+    };
     let left_file = root.join("left.tja");
     let right_file = root.join("right.tja");
     std::fs::write(&left_file, b"left edit").unwrap();
@@ -1233,9 +1246,9 @@ fn generated_writers_use_distinct_credentials_and_share_their_changes() {
             first.revise("first.tja", Some(&left_file)).unwrap();
             first.serve(first_listener.accept().unwrap().0).unwrap();
         });
-        assert_eq!(second.catch_up(&peer_config).unwrap(), 1);
+        assert_eq!(catch_up(), (0, 1));
         let right = second.revise("first.tja", Some(&right_file)).unwrap();
-        assert_eq!(second.catch_up(&peer_config).unwrap(), 1);
+        assert_eq!(catch_up(), (0, 1));
         serving.join().unwrap();
         right
     });

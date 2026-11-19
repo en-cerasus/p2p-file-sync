@@ -622,6 +622,47 @@ pub unsafe extern "C" fn p2p_sync_writer_refresh_tree(
     }
 }
 
+/// Fetch signed peer events and verified contents into this writer's cache.
+///
+/// # Safety
+/// Path pointers must remain readable for the call. `events_added` must
+/// point to writable storage for one u64.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_writer_catch_up(
+    config: *const u8,
+    config_len: usize,
+    state: *const u8,
+    state_len: usize,
+    peers: *const u8,
+    peers_len: usize,
+    events_added: *mut u64,
+) -> i32 {
+    if events_added.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    unsafe { *events_added = 0 };
+    let Some((config, state)) = (unsafe { writer_paths(config, config_len, state, state_len) })
+    else {
+        return INVALID_ARGUMENT;
+    };
+    let Some(peers) = (unsafe { borrowed_text(peers, peers_len, 32_768) }) else {
+        return INVALID_ARGUMENT;
+    };
+    match std::panic::catch_unwind(|| {
+        let mut writer = host::Sender::open(config, state).map_err(host_error_code)?;
+        writer
+            .catch_up(std::path::Path::new(peers))
+            .map_err(host_error_code)
+    }) {
+        Ok(Ok(count)) => {
+            unsafe { *events_added = count as u64 };
+            OK
+        }
+        Ok(Err(code)) => code,
+        Err(_) => 6,
+    }
+}
+
 /// Resolve a conflict by choosing one reviewed head. `reviewed` is a JSON
 /// array of all candidate IDs shown to the user; a changed set is rejected.
 ///
