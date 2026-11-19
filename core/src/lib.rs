@@ -997,6 +997,42 @@ pub unsafe extern "C" fn p2p_sync_ios_pending_v1(
     }
 }
 
+/// Refresh iOS receiver protection, conflict, and history information after
+/// coordinated local file recovery. The sync counters in output are zero.
+///
+/// # Safety
+/// Paths are readable UTF-8, output is writable, and callback is valid.
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_ios_snapshot_v1(
+    config: *const u8, config_len: usize,
+    state: *const u8, state_len: usize,
+    destination: *const u8, destination_len: usize,
+    output: *mut host::PullSummaryV3,
+    callback: Option<OriginalsCallback>, context: *mut std::ffi::c_void,
+) -> i32 {
+    if output.is_null() { return INVALID_ARGUMENT }
+    let Some(callback) = callback else { return INVALID_ARGUMENT };
+    let Some([config, state, destination]) = (unsafe {
+        receiver_paths([(config, config_len), (state, state_len), (destination, destination_len)])
+    }) else { return INVALID_ARGUMENT };
+    let result = std::panic::catch_unwind(|| {
+        let (summary, details) = host::local_receiver_details(config, state, destination)
+            .map_err(host_error_code)?;
+        let bytes = serde_json::to_vec(&details).map_err(|_| 6)?;
+        Ok((summary, bytes))
+    });
+    match result {
+        Ok(Ok((summary, bytes))) => {
+            callback(context, bytes.as_ptr(), bytes.len());
+            unsafe { output.write(summary) };
+            OK
+        }
+        Ok(Err(code)) => code,
+        Err(_) => 6,
+    }
+}
+
 /// Apply one previously listed item while Swift holds NSFileCoordinator write
 /// access to both its source and destination URLs. The reviewed JSON must be
 /// byte-for-byte semantically equal to the current staged item.

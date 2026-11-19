@@ -114,6 +114,13 @@ int32_t p2p_sync_ios_apply_v1(const uint8_t *config, size_t config_len,
                                const uint8_t *destination, size_t destination_len,
                                const uint8_t *reviewed, size_t reviewed_len,
                                int32_t *outcome);
+/* Recompute protected-original counts and details after local recovery.
+   The sync counters in output are zero; callback JSON matches pull_v6. */
+int32_t p2p_sync_ios_snapshot_v1(const uint8_t *config, size_t config_len,
+                                  const uint8_t *state, size_t state_len,
+                                  const uint8_t *destination, size_t destination_len,
+                                  p2p_sync_pull_summary_v3 *output,
+                                  p2p_sync_originals_callback details, void *context);
 
 /* Writer-only archive operations. History callback receives a JSON array
    with archive, current_heads, path, bytes and archived_at. The restore

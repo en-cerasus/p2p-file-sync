@@ -1080,6 +1080,20 @@ pub fn apply_local_file(configuration: &Path, state: &Path, destination: &Path,
     Ok(outcome)
 }
 
+#[cfg(target_os = "ios")]
+pub fn local_receiver_details(configuration: &Path, state: &Path, destination: &Path)
+    -> Result<(PullSummaryV3, crate::archive::SyncDetails), HostError> {
+    let layout = local_receiver_layout(configuration, state, destination)?;
+    let (mut store, completed, _) = open_local_receiver(configuration, layout)?;
+    let (protected, details) = receiver_details(&mut store, &completed)?;
+    Ok((PullSummaryV3 {
+        sync: PullSummaryV2::default(),
+        protected_files: protected.files,
+        protected_bytes: protected.bytes,
+        protected_missing: protected.missing,
+    }, details))
+}
+
 fn generation_marker_bytes(generation: u64, digest: [u8; 32]) -> [u8; 40] {
     let mut marker = [0; 40];
     marker[..8].copy_from_slice(&generation.to_be_bytes());
@@ -1461,17 +1475,7 @@ pub(crate) fn pull_with_originals(
             _ => summary.files_blocked += 1,
         }
     }
-    store.refresh().map_err(HostError::Store)?;
-    let originals = store
-        .protected_originals(&completed)
-        .map_err(HostError::Io)?;
-    let protected = crate::archive::ProtectedStorage::from_originals(&originals);
-    let conflicts = store.file_conflicts(&completed).map_err(HostError::Io)?;
-    let history = store
-        .archives(std::time::SystemTime::now())
-        .map_err(HostError::Store)?;
-    let (history_bytes, history_missing) =
-        crate::archive::history_storage(&history, &completed).map_err(HostError::Io)?;
+    let (protected, details) = receiver_details(&mut store, &completed)?;
     Ok((
         PullSummaryV3 {
             sync: summary,
@@ -1479,14 +1483,22 @@ pub(crate) fn pull_with_originals(
             protected_bytes: protected.bytes,
             protected_missing: protected.missing,
         },
-        crate::archive::SyncDetails {
-            originals,
-            conflicts,
-            history,
-            history_bytes,
-            history_missing,
-        },
+        details,
     ))
+}
+
+fn receiver_details(store: &mut Store, completed: &BlobStore)
+    -> Result<(crate::archive::ProtectedStorage, crate::archive::SyncDetails), HostError> {
+    store.refresh().map_err(HostError::Store)?;
+    let originals = store.protected_originals(completed).map_err(HostError::Io)?;
+    let protected = crate::archive::ProtectedStorage::from_originals(&originals);
+    let conflicts = store.file_conflicts(completed).map_err(HostError::Io)?;
+    let history = store.archives(std::time::SystemTime::now()).map_err(HostError::Store)?;
+    let (history_bytes, history_missing) =
+        crate::archive::history_storage(&history, completed).map_err(HostError::Io)?;
+    Ok((protected, crate::archive::SyncDetails {
+        originals, conflicts, history, history_bytes, history_missing,
+    }))
 }
 
 fn build_roster(

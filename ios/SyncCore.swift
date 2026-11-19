@@ -27,6 +27,7 @@ enum SyncCore {
         case writerFailed(Int32)
         case missingWriterReport
         case pendingFailed(Int32)
+        case snapshotFailed(Int32)
         case coordinatedPathChanged
         case missingPendingDestination
     }
@@ -220,6 +221,36 @@ enum SyncCore {
             }
         }
         return counts
+    }
+
+    private static func receiverSnapshot(configuration: URL, state: URL, destination: URL)
+        throws -> (p2p_sync_pull_summary_v3, SyncDetails) {
+        let config = Array(configuration.path.utf8)
+        let storage = Array(state.path.utf8)
+        let output = Array(destination.path.utf8)
+        var summary = p2p_sync_pull_summary_v3()
+        var context = PullContext(cancellation: Cancellation(), json: nil)
+        let status = withUnsafeMutablePointer(to: &context) { pointer in
+            config.withUnsafeBufferPointer { configBytes in
+                storage.withUnsafeBufferPointer { stateBytes in
+                    output.withUnsafeBufferPointer { outputBytes in
+                        p2p_sync_ios_snapshot_v1(
+                            configBytes.baseAddress, configBytes.count,
+                            stateBytes.baseAddress, stateBytes.count,
+                            outputBytes.baseAddress, outputBytes.count, &summary,
+                            { context, data, length in
+                                guard let context, let data else { return }
+                                context.assumingMemoryBound(to: PullContext.self).pointee.json =
+                                    Data(bytes: data, count: length)
+                            }, UnsafeMutableRawPointer(pointer)
+                        )
+                    }
+                }
+            }
+        }
+        guard status == P2P_SYNC_OK else { throw CoreError.snapshotFailed(status) }
+        guard let json = context.json else { throw CoreError.missingOriginalsReport }
+        return (summary, try JSONDecoder().decode(SyncDetails.self, from: json))
     }
 
     struct FileConflict: Decodable, Identifiable, Sendable {
@@ -655,11 +686,7 @@ enum SyncCore {
                             storageBytes.baseAddress, storageBytes.count,
                             outputBytes.baseAddress, outputBytes.count,
                             &summary,
-                            { context, data, length in
-                                guard let context, let data else { return }
-                                context.assumingMemoryBound(to: PullContext.self).pointee.json =
-                                    Data(bytes: data, count: length)
-                            },
+                            nil,
                             UnsafeMutableRawPointer(context),
                             { context in
                                 guard let context else { return 0 }
@@ -672,10 +699,10 @@ enum SyncCore {
             }
         }
         guard status == P2P_SYNC_OK else { throw CoreError.pullFailed(status) }
-        guard let json = callbacks.json else { throw CoreError.missingOriginalsReport }
-        let details = try JSONDecoder().decode(SyncDetails.self, from: json)
         let recovered = try recoverPending(configuration: configuration, state: state,
                                            destination: destination, cancellation: cancellation)
+        let (snapshot, details) = try receiverSnapshot(configuration: configuration,
+                                                       state: state, destination: destination)
         let publishedLocally = recovered.updated + recovered.removed
         return PullSummary(
             eventsAdded: summary.sync.events_added, filesPublished: summary.sync.files_published,
@@ -684,8 +711,8 @@ enum SyncCore {
                               recovered.blocked + resumed.blocked),
             filesUpdated: summary.sync.files_updated + resumed.updated + recovered.updated,
             filesRemoved: summary.sync.files_removed + resumed.removed + recovered.removed,
-            protectedFiles: summary.protected_files, protectedBytes: summary.protected_bytes,
-            protectedMissing: summary.protected_missing,
+            protectedFiles: snapshot.protected_files, protectedBytes: snapshot.protected_bytes,
+            protectedMissing: snapshot.protected_missing,
             originals: details.originals,
             conflicts: details.conflicts,
             history: details.history,
