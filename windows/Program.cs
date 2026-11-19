@@ -34,6 +34,13 @@ internal sealed class SyncWindow : Window
     private readonly Expander conflicts = new() { Header = "未解決の競合", Visibility = Visibility.Collapsed };
     private readonly ListBox historyList = new() { MaxHeight = 240 };
     private readonly Expander history = new() { Header = "48時間の履歴", Visibility = Visibility.Collapsed };
+    private readonly Button writerConfigButton = new() { Content = "書き込みピア設定を選択" };
+    private readonly TextBlock writerConfigLabel = new() { TextWrapping = TextWrapping.Wrap };
+    private readonly Button writerStateButton = new() { Content = "書き込みピアの状態フォルダーを選択" };
+    private readonly TextBlock writerStateLabel = new() { TextWrapping = TextWrapping.Wrap };
+    private readonly Button loadWriterHistoryButton = new() { Content = "復元できる履歴を確認", Margin = new Thickness(0, 12, 0, 0) };
+    private readonly ListBox writerHistoryList = new() { MaxHeight = 240 };
+    private readonly Button restoreHistoryButton = new() { Content = "選択した履歴を復元", Margin = new Thickness(0, 8, 0, 0) };
     private readonly CheckBox autoSync = new()
     {
         Content = "10 秒ごとに自動同期",
@@ -47,6 +54,8 @@ internal sealed class SyncWindow : Window
     private bool closing;
     private string? configuration;
     private string? destination;
+    private string? writerConfiguration;
+    private string? writerState;
 
     public SyncWindow()
     {
@@ -70,6 +79,12 @@ internal sealed class SyncWindow : Window
         panel.Children.Add(conflicts);
         history.Content = historyList;
         panel.Children.Add(history);
+        panel.Children.Add(new TextBlock { Text = "履歴の復元", FontSize = 18, Margin = new Thickness(0, 20, 0, 0) });
+        AddPicker(panel, writerConfigButton, writerConfigLabel, "書き込みピア設定が未選択です");
+        AddPicker(panel, writerStateButton, writerStateLabel, "状態フォルダーが未選択です");
+        panel.Children.Add(loadWriterHistoryButton);
+        panel.Children.Add(writerHistoryList);
+        panel.Children.Add(restoreHistoryButton);
         Content = panel;
         RestorePreferences();
         var trayMenu = new System.Windows.Forms.ContextMenuStrip();
@@ -109,6 +124,31 @@ internal sealed class SyncWindow : Window
                 destinationLabel.Text = destination;
             }
         });
+        writerConfigButton.Click += (_, _) => ChoosePath(() =>
+        {
+            var picker = new OpenFileDialog { Filter = "配信設定 (*.json)|*.json", CheckFileExists = true };
+            if (picker.ShowDialog(this) == true)
+            {
+                writerConfiguration = picker.FileName;
+                writerConfigLabel.Text = writerConfiguration;
+                writerHistoryList.ItemsSource = null;
+                SavePreferences();
+            }
+        });
+        writerStateButton.Click += (_, _) => ChoosePath(() =>
+        {
+            var picker = new OpenFolderDialog { Title = "書き込みピアの状態フォルダー" };
+            if (picker.ShowDialog(this) == true)
+            {
+                writerState = picker.FolderName;
+                writerStateLabel.Text = writerState;
+                writerHistoryList.ItemsSource = null;
+                SavePreferences();
+            }
+        });
+        loadWriterHistoryButton.Click += async (_, _) => await LoadWriterHistory();
+        writerHistoryList.SelectionChanged += (_, _) => UpdateControls();
+        restoreHistoryButton.Click += async (_, _) => await RestoreWriterHistory();
         syncButton.Click += async (_, _) => await RunSync();
         cancelButton.Click += (_, _) =>
         {
@@ -179,7 +219,8 @@ internal sealed class SyncWindow : Window
         }
     }
 
-    private sealed record Preferences(string? Configuration, string? Destination, bool AutomaticSync);
+    private sealed record Preferences(string? Configuration, string? Destination, bool AutomaticSync,
+        string? WriterConfiguration, string? WriterState);
 
     private static string PreferencesPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "P2PSync", "preferences.json");
@@ -199,8 +240,12 @@ internal sealed class SyncWindow : Window
             }
             configuration = File.Exists(preferences.Configuration) ? preferences.Configuration : null;
             destination = Directory.Exists(preferences.Destination) ? preferences.Destination : null;
+            writerConfiguration = File.Exists(preferences.WriterConfiguration) ? preferences.WriterConfiguration : null;
+            writerState = Directory.Exists(preferences.WriterState) ? preferences.WriterState : null;
             configLabel.Text = configuration ?? "接続設定をもう一度選択してください";
             destinationLabel.Text = destination ?? "保存先をもう一度選択してください";
+            writerConfigLabel.Text = writerConfiguration ?? "書き込みピア設定を選択してください";
+            writerStateLabel.Text = writerState ?? "書き込みピアの状態フォルダーを選択してください";
             autoSync.IsChecked = preferences.AutomaticSync;
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
@@ -215,7 +260,8 @@ internal sealed class SyncWindow : Window
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(PreferencesPath)!);
-            var preferences = new Preferences(configuration, destination, autoSync.IsChecked == true);
+            var preferences = new Preferences(configuration, destination, autoSync.IsChecked == true,
+                writerConfiguration, writerState);
             using (var file = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
                 JsonSerializer.Serialize(file, preferences);
@@ -248,6 +294,10 @@ internal sealed class SyncWindow : Window
         }
         bool ready = configuration is not null && destination is not null;
         configButton.IsEnabled = destinationButton.IsEnabled = !syncing;
+        writerConfigButton.IsEnabled = writerStateButton.IsEnabled = !syncing;
+        loadWriterHistoryButton.IsEnabled = !syncing && writerConfiguration is not null && writerState is not null;
+        restoreHistoryButton.IsEnabled = loadWriterHistoryButton.IsEnabled
+            && writerHistoryList.SelectedItem is SyncCore.WriterHistoryEntry { CurrentHeads.Length: 1 };
         syncButton.IsEnabled = ready && !syncing;
         traySync.Enabled = ready && !syncing;
         tray.Text = syncing ? "P2P Sync - 同期中" : "P2P Sync";
@@ -321,6 +371,72 @@ internal sealed class SyncWindow : Window
             UpdateControls();
         }
     }
+
+    private async Task LoadWriterHistory()
+    {
+        if (closing || syncing || writerConfiguration is not string config || writerState is not string state)
+        {
+            return;
+        }
+        syncing = true;
+        UpdateControls();
+        try
+        {
+            var loaded = await Task.Run(() => SyncCore.WriterHistory(config, state));
+            if (loaded.Status == 0)
+            {
+                writerHistoryList.ItemsSource = loaded.Entries;
+                result.Text = $"書き込みピアの履歴 {loaded.Entries.Length} 件を読み込みました。";
+            }
+            else
+            {
+                result.Text = SyncCore.ErrorMessage(loaded.Status);
+            }
+        }
+        catch (Exception error) when (error is JsonException or DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
+        {
+            result.Text = "書き込みピアの履歴を読み込めませんでした。";
+        }
+        finally
+        {
+            syncing = false;
+            UpdateControls();
+        }
+    }
+
+    private async Task RestoreWriterHistory()
+    {
+        if (closing || syncing || writerConfiguration is not string config || writerState is not string state
+            || writerHistoryList.SelectedItem is not SyncCore.WriterHistoryEntry entry
+            || entry.CurrentHeads.Length != 1)
+        {
+            return;
+        }
+        var name = entry.Path is null ? "パス不明" : string.Join("/", entry.Path);
+        if (MessageBox.Show(this,
+            $"{name} の履歴を新しい同期変更として復元します。\n現在の版が変わっていれば復元は拒否されます。",
+            "履歴の復元", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+        {
+            return;
+        }
+        syncing = true;
+        UpdateControls();
+        try
+        {
+            var status = await Task.Run(() => SyncCore.RestoreWriterHistory(config, state, entry.Archive, entry.CurrentHeads[0]));
+            result.Text = status == 0 ? "履歴を新しい同期変更として復元しました。" : SyncCore.ErrorMessage(status);
+            writerHistoryList.ItemsSource = null;
+        }
+        catch (Exception error) when (error is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
+        {
+            result.Text = "復元処理を読み込めませんでした。";
+        }
+        finally
+        {
+            syncing = false;
+            UpdateControls();
+        }
+    }
 }
 
 internal static class SyncCore
@@ -381,6 +497,19 @@ internal static class SyncCore
         [property: JsonPropertyName("content")] HistoryContent Content,
         [property: JsonPropertyName("archived_at")] long ArchivedAt);
 
+    internal sealed record WriterHistoryEntry(
+        [property: JsonPropertyName("archive")] string Archive,
+        [property: JsonPropertyName("current_heads")] string[] CurrentHeads,
+        [property: JsonPropertyName("path")] string[]? Path,
+        [property: JsonPropertyName("bytes")] ulong Bytes,
+        [property: JsonPropertyName("archived_at")] long ArchivedAt)
+    {
+        public override string ToString() =>
+            $"{(Path is null ? "パス不明" : string.Join("/", Path))} · {Bytes:N0} バイト\n" +
+            $"{DateTimeOffset.FromUnixTimeSeconds(ArchivedAt).ToLocalTime():g}" +
+            (CurrentHeads.Length == 1 ? "" : " · 現在の版が競合中");
+    }
+
     private sealed record SyncDetails(
         [property: JsonPropertyName("originals")] ProtectedOriginal[] Originals,
         [property: JsonPropertyName("conflicts")] FileConflict[] Conflicts,
@@ -415,6 +544,33 @@ internal static class SyncCore
             (status, summary, details.Originals, details.Conflicts, details.History, details.HistoryBytes, details.HistoryMissing);
     }
 
+    internal static (int Status, WriterHistoryEntry[] Entries) WriterHistory(string config, string state)
+    {
+        var configBytes = Encoding.UTF8.GetBytes(config);
+        var stateBytes = Encoding.UTF8.GetBytes(state);
+        byte[]? json = null;
+        var status = WriterHistoryNative(configBytes, (nuint)configBytes.Length,
+            stateBytes, (nuint)stateBytes.Length, (_, data, length) =>
+            {
+                if (length > int.MaxValue) return;
+                json = new byte[(int)length];
+                Marshal.Copy(data, json, 0, json.Length);
+            }, IntPtr.Zero);
+        return status != 0 || json is null ? (status == 0 ? 6 : status, []) :
+            (0, JsonSerializer.Deserialize<WriterHistoryEntry[]>(json) ?? []);
+    }
+
+    internal static int RestoreWriterHistory(string config, string state, string archive, string reviewed)
+    {
+        var configBytes = Encoding.UTF8.GetBytes(config);
+        var stateBytes = Encoding.UTF8.GetBytes(state);
+        var archiveBytes = Encoding.UTF8.GetBytes(archive);
+        var reviewedBytes = Encoding.UTF8.GetBytes(reviewed);
+        return WriterRestoreNative(configBytes, (nuint)configBytes.Length,
+            stateBytes, (nuint)stateBytes.Length, archiveBytes, (nuint)archiveBytes.Length,
+            reviewedBytes, (nuint)reviewedBytes.Length);
+    }
+
     internal static string ErrorMessage(int status) => status switch
     {
         1 or 2 => "接続設定または保存先を確認してください。",
@@ -436,4 +592,14 @@ internal static class SyncCore
         byte[] config, nuint configLength, byte[] state, nuint stateLength,
         byte[] destination, nuint destinationLength, out PullSummary summary,
         OriginalsCallback originals, IntPtr context, CancellationCallback cancellation);
+
+    [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_writer_history", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int WriterHistoryNative(
+        byte[] config, nuint configLength, byte[] state, nuint stateLength,
+        OriginalsCallback callback, IntPtr context);
+
+    [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_writer_restore", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int WriterRestoreNative(
+        byte[] config, nuint configLength, byte[] state, nuint stateLength,
+        byte[] archive, nuint archiveLength, byte[] reviewed, nuint reviewedLength);
 }

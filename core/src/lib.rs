@@ -307,6 +307,130 @@ pub unsafe extern "C" fn p2p_sync_pull_v6(
     }
 }
 
+/// Read a writer's current archive choices as a JSON array. Copy callback
+/// bytes before returning; this call must run off the UI thread.
+///
+/// # Safety
+/// Both pointer/length pairs must be readable UTF-8 paths for this call.
+/// The callback must not unwind or retain the borrowed buffer.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_writer_history(
+    config: *const u8,
+    config_len: usize,
+    state: *const u8,
+    state_len: usize,
+    callback: Option<OriginalsCallback>,
+    context: *mut std::ffi::c_void,
+) -> i32 {
+    let Some(callback) = callback else {
+        return INVALID_ARGUMENT;
+    };
+    let Some((config, state)) = (unsafe { writer_paths(config, config_len, state, state_len) })
+    else {
+        return INVALID_ARGUMENT;
+    };
+    let result = std::panic::catch_unwind(|| {
+        let mut writer = host::Sender::open(config, state).map_err(host_error_code)?;
+        serde_json::to_vec(&writer.history().map_err(host_error_code)?).map_err(|_| 6)
+    });
+    match result {
+        Ok(Ok(bytes)) => {
+            callback(context, bytes.as_ptr(), bytes.len());
+            OK
+        }
+        Ok(Err(code)) => code,
+        Err(_) => 6,
+    }
+}
+
+/// Restore one reviewed archive as a new signed writer revision. The chosen
+/// archive and current event IDs use `<64-hex-peer>:<sequence>`.
+///
+/// # Safety
+/// Every pointer/length pair must remain readable for the call.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_writer_restore(
+    config: *const u8,
+    config_len: usize,
+    state: *const u8,
+    state_len: usize,
+    archive: *const u8,
+    archive_len: usize,
+    reviewed: *const u8,
+    reviewed_len: usize,
+) -> i32 {
+    let Some((config, state)) = (unsafe { writer_paths(config, config_len, state, state_len) })
+    else {
+        return INVALID_ARGUMENT;
+    };
+    let (Some(archive), Some(reviewed)) = (
+        unsafe { borrowed_text(archive, archive_len, 128) },
+        unsafe { borrowed_text(reviewed, reviewed_len, 128) },
+    ) else {
+        return INVALID_ARGUMENT;
+    };
+    let (Some(archive), Some(reviewed)) = (parse_event_id(archive), parse_event_id(reviewed))
+    else {
+        return INVALID_ARGUMENT;
+    };
+    match std::panic::catch_unwind(|| {
+        let mut writer = host::Sender::open(config, state).map_err(host_error_code)?;
+        writer
+            .restore_archive(archive, reviewed)
+            .map_err(host_error_code)
+    }) {
+        Ok(Ok(_)) => OK,
+        Ok(Err(code)) => code,
+        Err(_) => 6,
+    }
+}
+
+unsafe fn borrowed_text<'a>(pointer: *const u8, length: usize, maximum: usize) -> Option<&'a str> {
+    if pointer.is_null() || length == 0 || length > maximum {
+        return None;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(pointer, length) };
+    std::str::from_utf8(bytes)
+        .ok()
+        .filter(|text| !text.contains('\0'))
+}
+
+unsafe fn writer_paths<'a>(
+    config: *const u8,
+    config_len: usize,
+    state: *const u8,
+    state_len: usize,
+) -> Option<(&'a std::path::Path, &'a std::path::Path)> {
+    Some((
+        std::path::Path::new(unsafe { borrowed_text(config, config_len, 32_768) }?),
+        std::path::Path::new(unsafe { borrowed_text(state, state_len, 32_768) }?),
+    ))
+}
+
+fn parse_event_id(value: &str) -> Option<replica::EventId> {
+    let (peer, sequence) = value.split_once(':')?;
+    if peer.len() != 64 || !peer.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut decoded = [0; 32];
+    for (index, byte) in decoded.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&peer[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(replica::EventId {
+        peer: decoded,
+        sequence: sequence.parse().ok().filter(|&n| n != 0)?,
+    })
+}
+
+fn host_error_code(error: host::HostError) -> i32 {
+    match error {
+        host::HostError::Configuration | host::HostError::InactiveGeneration => 2,
+        host::HostError::Io(_) | host::HostError::Store(_) => 3,
+        host::HostError::Tls(_) => 4,
+        _ => 5,
+    }
+}
+
 unsafe fn pull_to_output<T: From<host::PullSummaryV3>>(
     paths: [(*const u8, usize); 3],
     output: *mut T,

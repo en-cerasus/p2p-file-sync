@@ -96,6 +96,18 @@ int32_t p2p_sync_pull_v6(const uint8_t *config, size_t config_len,
                          p2p_sync_originals_callback details, void *context,
                          p2p_sync_cancel_callback cancellation);
 
+/* Writer-only archive operations. History callback receives a JSON array
+   with archive, current_heads, path, bytes and archived_at. The restore
+   call accepts archive and reviewed-current IDs as 64-hex-peer:sequence.
+   It records a new signed revision only when the reviewed head is current. */
+int32_t p2p_sync_writer_history(const uint8_t *config, size_t config_len,
+                                const uint8_t *state, size_t state_len,
+                                p2p_sync_originals_callback callback, void *context);
+int32_t p2p_sync_writer_restore(const uint8_t *config, size_t config_len,
+                                const uint8_t *state, size_t state_len,
+                                const uint8_t *archive, size_t archive_len,
+                                const uint8_t *reviewed, size_t reviewed_len);
+
 #ifdef __cplusplus
 }
 #endif

@@ -268,6 +268,68 @@ fn encode_hex(bytes: &[u8]) -> String {
 }
 
 #[test]
+fn writer_ffi_history_restores_only_the_reviewed_current_version() {
+    use p2p_sync_core::{host::Sender, p2p_sync_writer_history, p2p_sync_writer_restore};
+    let root = tempfile::tempdir().unwrap();
+    let setup = root.path().join("setup");
+    assert!(std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
+        .arg("setup")
+        .arg(&setup)
+        .args(["127.0.0.1:8765", "127.0.0.1:8765"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let config = setup.join("sender/server.json");
+    let state = root.path().join("writer-state");
+    let source = root.path().join("song.tja");
+    std::fs::write(&source, b"first").unwrap();
+    let mut writer = Sender::open(&config, &state).unwrap();
+    writer.publish(&source).unwrap();
+    std::fs::write(&source, b"second").unwrap();
+    writer.revise("song.tja", Some(&source)).unwrap();
+    drop(writer);
+    extern "C" fn capture(context: *mut std::ffi::c_void, data: *const u8, length: usize) {
+        unsafe {
+            (*context.cast::<Vec<u8>>())
+                .extend_from_slice(std::slice::from_raw_parts(data, length));
+        }
+    }
+    let config_bytes = config.to_str().unwrap().as_bytes();
+    let state_bytes = state.to_str().unwrap().as_bytes();
+    let mut json = Vec::new();
+    let status = unsafe {
+        p2p_sync_writer_history(
+            config_bytes.as_ptr(),
+            config_bytes.len(),
+            state_bytes.as_ptr(),
+            state_bytes.len(),
+            Some(capture),
+            (&mut json as *mut Vec<u8>).cast(),
+        )
+    };
+    assert_eq!(status, 0);
+    let history: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    let archive = history[0]["archive"].as_str().unwrap().as_bytes();
+    let current = history[0]["current_heads"][0].as_str().unwrap().as_bytes();
+    let restore = |reviewed: &[u8]| unsafe {
+        p2p_sync_writer_restore(
+            config_bytes.as_ptr(),
+            config_bytes.len(),
+            state_bytes.as_ptr(),
+            state_bytes.len(),
+            archive.as_ptr(),
+            archive.len(),
+            reviewed.as_ptr(),
+            reviewed.len(),
+        )
+    };
+    assert_eq!(restore(current), 0);
+    assert_ne!(restore(current), 0);
+    assert_eq!(restore(b"invalid"), 1);
+}
+
+#[test]
 fn local_receiver_confirmations_can_join_a_serving_cache() {
     use p2p_sync_core::{
         auth::{PeerSigningKey, Role, Roster},
