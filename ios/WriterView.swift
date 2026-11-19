@@ -22,14 +22,18 @@ struct WriterView: View {
     @State private var serverStatus = "配信停止中"
     @State private var protectedReport: SyncCore.WriterProtectedReport?
     @State private var historyEntries: [SyncCore.WriterHistoryEntry] = []
+    @State private var missingFiles: [SyncCore.MissingSourceFile] = []
+    @State private var missingLoaded = false
     @State private var conflictEntries: [SyncCore.WriterConflict] = []
     @State private var historyLoaded = false
     @State private var conflictsLoaded = false
     @State private var pendingHistory: SyncCore.WriterHistoryEntry?
     @State private var pendingDeletion: SyncCore.WriterHistoryEntry?
+    @State private var pendingMissing: SyncCore.MissingSourceFile?
     @State private var pendingChoice: (SyncCore.WriterConflict, SyncCore.WriterConflictVersion)?
     @State private var confirmRestore = false
     @State private var confirmDelete = false
+    @State private var confirmMissing = false
     @State private var confirmResolve = false
 
     var body: some View {
@@ -47,6 +51,23 @@ struct WriterView: View {
                 Button("新規・変更ファイルを登録") { Task { await refresh() } }
                     .disabled(configFolder == nil || sourceFolder == nil || refreshing || catchingUp || inspecting || serving)
                 if refreshing { ProgressView("共有元を確認しています…") }
+            }
+            Section("共有元から消えたファイル") {
+                Button("削除候補を確認") { Task { await loadMissingFiles() } }
+                    .disabled(configFolder == nil || sourceFolder == nil || serving || refreshing || catchingUp || inspecting)
+                if missingLoaded && missingFiles.isEmpty { Text("削除候補はありません。") }
+                ForEach(missingFiles) { file in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(file.path.joined(separator: "/"))
+                        Button("この削除を同期", role: .destructive) {
+                            pendingMissing = file
+                            confirmMissing = true
+                        }
+                        .disabled(serving || refreshing || catchingUp || inspecting)
+                    }
+                }
+                Text("この端末が最後に変更したファイルだけを表示します。親フォルダーを開けない場合は削除候補に含めません。")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("配信") {
                 Button("他のピアから取得") { Task { await catchUp() } }
@@ -174,6 +195,13 @@ struct WriterView: View {
         } message: {
             Text("この履歴は復元に使えなくなります。未同期ピアのために保護中の共通原本は保持されます。")
         }
+        .confirmationDialog("削除を同期", isPresented: $confirmMissing, titleVisibility: .visible) {
+            Button("この削除を他のピアへ同期", role: .destructive) {
+                if let pendingMissing { Task { await deleteMissingFile(pendingMissing) } }
+            }
+        } message: {
+            Text("表示した版と共有元のファイル不在を再確認してから記録します。共有元のファイルはこの操作で削除しません。")
+        }
         .confirmationDialog("競合の解決", isPresented: $confirmResolve, titleVisibility: .visible) {
             Button("選択した版を採用") {
                 if let pendingChoice { Task { await resolveConflict(pendingChoice.0, choice: pendingChoice.1) } }
@@ -241,10 +269,48 @@ struct WriterView: View {
 
     private func invalidateLists() {
         protectedReport = nil
+        missingFiles = []
+        missingLoaded = false
         historyEntries = []
         conflictEntries = []
         historyLoaded = false
         conflictsLoaded = false
+    }
+
+    private func loadMissingFiles() async {
+        guard !serving, !refreshing, !catchingUp, !inspecting, let sourceFolder,
+              configFolder != nil else { return }
+        inspecting = true
+        defer { inspecting = false }
+        do {
+            missingFiles = try await runWriter { config, state in
+                try SyncCore.writerMissingFiles(configuration: config, state: state, source: sourceFolder)
+            }
+            missingLoaded = true
+            result = "削除候補 \(missingFiles.count) 件を読み込みました。"
+        } catch {
+            missingFiles = []
+            missingLoaded = false
+            result = writerError(error)
+        }
+    }
+
+    private func deleteMissingFile(_ file: SyncCore.MissingSourceFile) async {
+        guard !serving, !refreshing, !catchingUp, !inspecting, let sourceFolder,
+              missingFiles.contains(where: { $0.id == file.id }) else { return }
+        inspecting = true
+        defer { inspecting = false }
+        do {
+            try await runWriter { config, state in
+                try SyncCore.deleteMissingSourceFile(configuration: config, state: state,
+                                                     source: sourceFolder, file: file)
+            }
+            invalidateLists()
+            result = "削除を同期変更として記録しました。"
+        } catch {
+            invalidateLists()
+            result = writerError(error)
+        }
     }
 
     private func loadProtection() async {

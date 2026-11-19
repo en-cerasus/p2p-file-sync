@@ -127,6 +127,12 @@ enum SyncCore {
         let skipped: UInt64
     }
 
+    struct MissingSourceFile: Decodable, Identifiable, Sendable {
+        let path: [String]
+        let head: String
+        var id: String { head }
+    }
+
     struct WriterProtectedReport: Decodable, Sendable {
         let files: UInt64
         let bytes: UInt64
@@ -331,6 +337,59 @@ enum SyncCore {
         guard status == P2P_SYNC_OK else { throw CoreError.writerFailed(status) }
         guard let json = report.json else { throw CoreError.missingWriterReport }
         return try JSONDecoder().decode(WriterSummary.self, from: json)
+    }
+
+    static func writerMissingFiles(configuration: URL, state: URL, source: URL) throws -> [MissingSourceFile] {
+        let config = Array(configuration.path.utf8)
+        let storage = Array(state.path.utf8)
+        let input = Array(source.path.utf8)
+        var report = WriterReportContext(json: nil)
+        let status = withUnsafeMutablePointer(to: &report) { context in
+            config.withUnsafeBufferPointer { configBytes in
+                storage.withUnsafeBufferPointer { stateBytes in
+                    input.withUnsafeBufferPointer { sourceBytes in
+                        p2p_sync_writer_missing_files(
+                            configBytes.baseAddress, configBytes.count,
+                            stateBytes.baseAddress, stateBytes.count,
+                            sourceBytes.baseAddress, sourceBytes.count,
+                            { context, data, length in
+                                guard let context, let data else { return }
+                                context.assumingMemoryBound(to: WriterReportContext.self).pointee.json =
+                                    Data(bytes: data, count: length)
+                            }, UnsafeMutableRawPointer(context))
+                    }
+                }
+            }
+        }
+        guard status == P2P_SYNC_OK else { throw CoreError.writerFailed(status) }
+        guard let json = report.json else { throw CoreError.missingWriterReport }
+        return try JSONDecoder().decode([MissingSourceFile].self, from: json)
+    }
+
+    static func deleteMissingSourceFile(configuration: URL, state: URL, source: URL,
+                                        file: MissingSourceFile) throws {
+        let config = Array(configuration.path.utf8)
+        let storage = Array(state.path.utf8)
+        let input = Array(source.path.utf8)
+        let path = Array(file.path.joined(separator: "/").utf8)
+        let head = Array(file.head.utf8)
+        let status = config.withUnsafeBufferPointer { configBytes in
+            storage.withUnsafeBufferPointer { stateBytes in
+                input.withUnsafeBufferPointer { sourceBytes in
+                    path.withUnsafeBufferPointer { pathBytes in
+                        head.withUnsafeBufferPointer { headBytes in
+                            p2p_sync_writer_delete_missing_file(
+                                configBytes.baseAddress, configBytes.count,
+                                stateBytes.baseAddress, stateBytes.count,
+                                sourceBytes.baseAddress, sourceBytes.count,
+                                pathBytes.baseAddress, pathBytes.count,
+                                headBytes.baseAddress, headBytes.count)
+                        }
+                    }
+                }
+            }
+        }
+        guard status == P2P_SYNC_OK else { throw CoreError.writerFailed(status) }
     }
 
     private struct WriterCatchUpContext {
