@@ -30,10 +30,14 @@ struct WriterView: View {
     @State private var pendingHistory: SyncCore.WriterHistoryEntry?
     @State private var pendingDeletion: SyncCore.WriterHistoryEntry?
     @State private var pendingMissing: SyncCore.MissingSourceFile?
+    @State private var pickingMoveDestination = false
+    @State private var moveCandidate: SyncCore.MissingSourceFile?
+    @State private var pendingMove: (SyncCore.MissingSourceFile, URL)?
     @State private var pendingChoice: (SyncCore.WriterConflict, SyncCore.WriterConflictVersion)?
     @State private var confirmRestore = false
     @State private var confirmDelete = false
     @State private var confirmMissing = false
+    @State private var confirmMove = false
     @State private var confirmResolve = false
 
     var body: some View {
@@ -62,6 +66,11 @@ struct WriterView: View {
                         Button("この削除を同期", role: .destructive) {
                             pendingMissing = file
                             confirmMissing = true
+                        }
+                        .disabled(serving || refreshing || catchingUp || inspecting)
+                        Button("移動後のファイルを選択") {
+                            moveCandidate = file
+                            pickingMoveDestination = true
                         }
                         .disabled(serving || refreshing || catchingUp || inspecting)
                     }
@@ -181,6 +190,17 @@ struct WriterView: View {
             case .failure: result = "配信設定フォルダーを開けませんでした。"
             }
         }
+        .fileImporter(isPresented: $pickingMoveDestination, allowedContentTypes: [.item]) { selection in
+            switch selection {
+            case .success(let url):
+                if let moveCandidate {
+                    pendingMove = (moveCandidate, url)
+                    confirmMove = true
+                }
+            case .failure:
+                result = "移動後のファイルを開けませんでした。"
+            }
+        }
         .confirmationDialog("履歴を復元", isPresented: $confirmRestore, titleVisibility: .visible) {
             Button("新しい同期変更として復元") {
                 if let pendingHistory { Task { await restoreHistory(pendingHistory) } }
@@ -201,6 +221,13 @@ struct WriterView: View {
             }
         } message: {
             Text("表示した版と共有元のファイル不在を再確認してから記録します。共有元のファイルはこの操作で削除しません。")
+        }
+        .confirmationDialog("移動を同期", isPresented: $confirmMove, titleVisibility: .visible) {
+            Button("同じファイルとして移動を記録") {
+                if let pendingMove { Task { await relocateMissingFile(pendingMove.0, destination: pendingMove.1) } }
+            }
+        } message: {
+            Text("P2PShared 内の移動後のファイルを選んでください。旧名が空き、内容が保存済みの版と一致する場合だけ記録します。実ファイルは移動しません。")
         }
         .confirmationDialog("競合の解決", isPresented: $confirmResolve, titleVisibility: .visible) {
             Button("選択した版を採用") {
@@ -307,6 +334,27 @@ struct WriterView: View {
             }
             invalidateLists()
             result = "削除を同期変更として記録しました。"
+        } catch {
+            invalidateLists()
+            result = writerError(error)
+        }
+    }
+
+    private func relocateMissingFile(_ file: SyncCore.MissingSourceFile, destination: URL) async {
+        guard !serving, !refreshing, !catchingUp, !inspecting, let sourceFolder,
+              missingFiles.contains(where: { $0.id == file.id }) else { return }
+        inspecting = true
+        defer { inspecting = false }
+        do {
+            try await runWriter { config, state in
+                let access = destination.startAccessingSecurityScopedResource()
+                defer { if access { destination.stopAccessingSecurityScopedResource() } }
+                try SyncCore.relocateMissingSourceFile(configuration: config, state: state,
+                                                       source: sourceFolder, file: file,
+                                                       destination: destination)
+            }
+            invalidateLists()
+            result = "同じファイルIDで移動を記録しました。"
         } catch {
             invalidateLists()
             result = writerError(error)

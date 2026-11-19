@@ -392,6 +392,36 @@ enum SyncCore {
         guard status == P2P_SYNC_OK else { throw CoreError.writerFailed(status) }
     }
 
+    static func relocateMissingSourceFile(configuration: URL, state: URL, source: URL,
+                                          file: MissingSourceFile, destination: URL) throws {
+        let config = Array(configuration.path.utf8)
+        let storage = Array(state.path.utf8)
+        let input = Array(source.path.utf8)
+        let path = Array(file.path.joined(separator: "/").utf8)
+        let head = Array(file.head.utf8)
+        let target = Array(destination.path.utf8)
+        let status = config.withUnsafeBufferPointer { configBytes in
+            storage.withUnsafeBufferPointer { stateBytes in
+                input.withUnsafeBufferPointer { sourceBytes in
+                    path.withUnsafeBufferPointer { pathBytes in
+                        head.withUnsafeBufferPointer { headBytes in
+                            target.withUnsafeBufferPointer { targetBytes in
+                                p2p_sync_writer_relocate_missing_file(
+                                    configBytes.baseAddress, configBytes.count,
+                                    stateBytes.baseAddress, stateBytes.count,
+                                    sourceBytes.baseAddress, sourceBytes.count,
+                                    pathBytes.baseAddress, pathBytes.count,
+                                    headBytes.baseAddress, headBytes.count,
+                                    targetBytes.baseAddress, targetBytes.count)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        guard status == P2P_SYNC_OK else { throw CoreError.writerFailed(status) }
+    }
+
     private struct WriterCatchUpContext {
         let cancellation: Cancellation
     }
