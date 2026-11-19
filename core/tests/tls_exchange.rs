@@ -1109,6 +1109,24 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
     let new_file = path.join("after-migration.tja");
     std::fs::write(&new_file, b"new generation").unwrap();
     upgraded.publish(&new_file).unwrap();
+    let marker = server_state
+        .join(legacy["share"].as_str().unwrap().to_ascii_lowercase())
+        .join("active-generation");
+    let active_marker = std::fs::read(&marker).unwrap();
+    std::fs::remove_file(&marker).unwrap();
+    assert!(matches!(
+        old_sender.bind(),
+        Err(p2p_sync_core::host::HostError::InactiveGeneration)
+    ));
+    assert!(matches!(
+        upgraded.bind(),
+        Err(p2p_sync_core::host::HostError::InactiveGeneration)
+    ));
+    assert!(matches!(
+        Sender::open(&server_config, &server_state),
+        Err(p2p_sync_core::host::HostError::InactiveGeneration)
+    ));
+    std::fs::write(&marker, active_marker).unwrap();
     let listener = upgraded.bind().unwrap();
     config["address"] = listener.local_addr().unwrap().to_string().into();
     config["generation"] = 2.into();

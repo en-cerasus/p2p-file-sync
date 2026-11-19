@@ -259,6 +259,7 @@ impl Sender {
             &self.generation_marker,
             self.roster.membership().generation,
             self.baseline_digest,
+            false,
         )
     }
 
@@ -757,6 +758,7 @@ fn check_generation(
     marker: &Path,
     generation: u64,
     digest: Option<[u8; 32]>,
+    allow_new_marker: bool,
 ) -> Result<(), HostError> {
     match read_bounded(marker, 40) {
         Ok(active)
@@ -766,7 +768,28 @@ fn check_generation(
             Ok(())
         }
         Ok(_) => Err(HostError::InactiveGeneration),
-        Err(HostError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(HostError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = marker.parent().ok_or(HostError::Configuration)?;
+            // A removed marker must not reactivate an older generation while
+            // a newer generation's state is still present on this device.
+            for child in fs::read_dir(parent).map_err(HostError::Io)? {
+                let child = child.map_err(HostError::Io)?;
+                if child.file_type().map_err(HostError::Io)?.is_dir()
+                    && child
+                        .file_name()
+                        .to_str()
+                        .and_then(|name| name.parse::<u64>().ok())
+                        .is_some_and(|value| value > generation)
+                {
+                    return Err(HostError::InactiveGeneration);
+                }
+            }
+            if digest.is_some() && !allow_new_marker {
+                Err(HostError::InactiveGeneration)
+            } else {
+                Ok(())
+            }
+        }
         Err(error) => Err(error),
     }
 }
@@ -778,7 +801,7 @@ fn activate_generation(
     generation: u64,
     digest: Option<[u8; 32]>,
 ) -> Result<(), HostError> {
-    check_generation(marker, generation, digest)?;
+    check_generation(marker, generation, digest, true)?;
     let Some(digest) = digest else { return Ok(()) };
     let parent = marker.parent().ok_or(HostError::Configuration)?;
     let name = marker
@@ -794,7 +817,7 @@ fn activate_generation(
             Ok(())
         }
         Err(HostError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            check_generation(marker, generation, Some(digest))
+            check_generation(marker, generation, Some(digest), false)
         }
         Err(error) => Err(error),
     }
