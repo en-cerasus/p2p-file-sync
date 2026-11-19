@@ -56,6 +56,82 @@ fn membership() -> Membership {
 }
 
 #[test]
+fn signed_deletion_witness_rejects_an_older_database() {
+    let folder = tempfile::tempdir().unwrap();
+    let database = folder.path().join("sync.db");
+    let backup = folder.path().join("before-deletion.db");
+    let witness = folder.path().join("witness");
+    let key = PeerSigningKey::from_bytes(&[77; 32]);
+    let peer = key.verifying_key().to_bytes();
+    let roster = Roster::new([4; 16], 1, [(peer, Role::Writer)].into());
+    let created = Event {
+        id: EventId { peer, sequence: 1 },
+        context: VersionVector::new(),
+        object: OBJECT,
+        change: Change::Create(entry(5)),
+    };
+    let deleted = Event {
+        id: EventId { peer, sequence: 2 },
+        context: [(peer, 1)].into(),
+        object: OBJECT,
+        change: Change::Revise { base: created.id, entry: None },
+    };
+    {
+        let mut store = Store::open(&database, roster.membership().clone()).unwrap();
+        store.enable_tombstone_witness(&witness).unwrap();
+        roster.receive(&mut store, &roster.sign_event(&key, &created).unwrap()).unwrap();
+    }
+    std::fs::copy(&database, &backup).unwrap();
+    {
+        let mut store = Store::open(&database, roster.membership().clone()).unwrap();
+        store.enable_tombstone_witness(&witness).unwrap();
+        roster.receive(&mut store, &roster.sign_event(&key, &deleted).unwrap()).unwrap();
+    }
+    assert_eq!(std::fs::read_dir(&witness).unwrap().filter(|entry| {
+        entry.as_ref().unwrap().file_name().to_string_lossy().ends_with(".witness")
+    }).count(), 1);
+    std::fs::copy(&backup, &database).unwrap();
+    let mut restored = Store::open(&database, roster.membership().clone()).unwrap();
+    assert!(matches!(restored.enable_tombstone_witness(&witness), Err(StoreError::RollbackDetected)));
+}
+
+#[test]
+fn interrupted_deletion_commit_stops_reopening_until_recovery() {
+    let folder = tempfile::tempdir().unwrap();
+    let database = folder.path().join("sync.db");
+    let witness = folder.path().join("witness");
+    let key = PeerSigningKey::from_bytes(&[78; 32]);
+    let peer = key.verifying_key().to_bytes();
+    let roster = Roster::new([4; 16], 1, [(peer, Role::Writer)].into());
+    let created = Event {
+        id: EventId { peer, sequence: 1 },
+        context: VersionVector::new(),
+        object: OBJECT,
+        change: Change::Create(entry(5)),
+    };
+    let deleted = Event {
+        id: EventId { peer, sequence: 2 },
+        context: [(peer, 1)].into(),
+        object: OBJECT,
+        change: Change::Revise { base: created.id, entry: None },
+    };
+    let mut store = Store::open(&database, roster.membership().clone()).unwrap();
+    store.enable_tombstone_witness(&witness).unwrap();
+    roster.receive(&mut store, &roster.sign_event(&key, &created).unwrap()).unwrap();
+    let fault = Connection::open(&database).unwrap();
+    fault.execute_batch("CREATE TRIGGER interrupt_delete BEFORE INSERT ON journal
+                        WHEN (SELECT COUNT(*) FROM journal) > 0
+                        BEGIN SELECT RAISE(ABORT, 'injected commit failure'); END;").unwrap();
+    assert!(roster.receive(&mut store, &roster.sign_event(&key, &deleted).unwrap()).is_err());
+    drop(store);
+    assert_eq!(std::fs::read_dir(&witness).unwrap().filter(|entry| {
+        entry.as_ref().unwrap().file_name().to_string_lossy().ends_with(".witness")
+    }).count(), 1);
+    let mut reopened = Store::open(&database, roster.membership().clone()).unwrap();
+    assert!(matches!(reopened.enable_tombstone_witness(&witness), Err(StoreError::RollbackDetected)));
+}
+
+#[test]
 fn signed_confirmations_survive_reopening_for_later_peer_exchange() {
     let db = Database::new();
     let writer = PeerSigningKey::from_bytes(&[51; 32]);

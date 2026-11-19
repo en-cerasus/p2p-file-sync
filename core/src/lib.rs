@@ -978,6 +978,7 @@ fn parse_event_id(value: &str) -> Option<replica::EventId> {
 fn host_error_code(error: host::HostError) -> i32 {
     match error {
         host::HostError::Configuration | host::HostError::InactiveGeneration => 2,
+        host::HostError::Store(store::StoreError::RollbackDetected) => 8,
         host::HostError::Io(_) | host::HostError::Store(_) => 3,
         host::HostError::Tls(_) => 4,
         host::HostError::Direct(direct::DirectError::Cancelled) => 7,

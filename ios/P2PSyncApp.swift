@@ -327,6 +327,7 @@ struct DirectSyncView: View {
             case 3: result = "設定ファイルや保存領域にアクセスできませんでした。"
             case 4: result = "TLS 証明書または秘密鍵を読み込めませんでした。"
             case 7: result = "同期を中断しました。次回は保存済みのデータを再利用します。"
+            case 8: result = "古い同期状態が復元された可能性があります。共有元を変更せず、状態の復旧が必要です。"
             default: result = "同期に失敗しました。接続先、証明書、同期先を確認してください。"
             }
         } catch is DecodingError {

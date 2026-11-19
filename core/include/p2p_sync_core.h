@@ -12,6 +12,7 @@ extern "C" {
 #define P2P_SYNC_OK 0
 #define P2P_SYNC_INVALID_ARGUMENT 1
 #define P2P_SYNC_CANCELLED 7
+#define P2P_SYNC_ROLLBACK_DETECTED 8
 
 uint32_t p2p_sync_abi_version(void);
 
@@ -27,7 +28,8 @@ typedef struct {
 } p2p_sync_pull_summary;
 
 /* Blocking call. Output is written only on success. Return codes 2–6
-   indicate configuration, local storage, TLS setup, sync, or internal error. */
+   indicate configuration, local storage, TLS setup, sync, or internal error.
+   Code 8 means a deletion witness is absent from the restored local DB. */
 int32_t p2p_sync_pull(const uint8_t *config, size_t config_len,
                       const uint8_t *state, size_t state_len,
                       const uint8_t *destination, size_t destination_len,

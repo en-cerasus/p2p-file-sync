@@ -663,6 +663,38 @@ fn writer_ffi_refreshes_only_a_safe_selected_source() {
 }
 
 #[test]
+fn writer_open_rejects_database_restored_before_a_signed_deletion() {
+    use p2p_sync_core::{host::{HostError, Sender}, store::StoreError};
+    let root = tempfile::tempdir().unwrap();
+    let setup = root.path().join("setup");
+    assert!(std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
+        .arg("setup")
+        .arg(&setup)
+        .args(["127.0.0.1:8780", "127.0.0.1:8780"])
+        .output().unwrap().status.success());
+    let config = setup.join("sender/server.json");
+    let state = root.path().join("state");
+    let source = root.path().join("song.tja");
+    std::fs::write(&source, b"kept original").unwrap();
+    {
+        Sender::open(&config, &state).unwrap().publish(&source).unwrap();
+    }
+    let settings: serde_json::Value = serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+    let database = state.join(settings["share"].as_str().unwrap()).join("1/sync.db");
+    let backup = root.path().join("before-deletion.db");
+    std::fs::copy(&database, &backup).unwrap();
+    {
+        Sender::open(&config, &state).unwrap().revise("song.tja", None).unwrap();
+    }
+    std::fs::copy(&backup, &database).unwrap();
+    assert!(matches!(
+        Sender::open(&config, &state),
+        Err(HostError::Store(StoreError::RollbackDetected))
+    ));
+    assert_eq!(std::fs::read(&source).unwrap(), b"kept original");
+}
+
+#[test]
 fn local_receiver_confirmations_can_join_a_serving_cache() {
     use p2p_sync_core::{
         auth::{PeerSigningKey, Role, Roster},

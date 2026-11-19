@@ -584,6 +584,7 @@ struct WriterView: View {
             case .writerFailed(let code) where code == 4: return "証明書または秘密鍵を読み込めませんでした。"
             case .writerFailed(let code) where code == 5: return "表示後に状態が変わったか、本体が不足しています。再読み込みしてください。"
             case .writerFailed(let code) where code == 7: return "取得を中断しました。次回は保存済みのデータを再利用します。"
+            case .writerFailed(let code) where code == 8: return "古い同期状態が復元された可能性があります。共有元を変更せず、状態の復旧が必要です。"
             default: return "配信処理に失敗しました。"
             }
         }

@@ -1,6 +1,8 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::Path,
+    fs::{self, File, OpenOptions},
+    io::{self, Read, Write},
+    path::{Path, PathBuf},
     time::SystemTime,
 };
 
@@ -40,6 +42,7 @@ pub enum StoreError {
     NonMember,
     InvalidConfirmation,
     InvalidRecord,
+    RollbackDetected,
     OversizedRecord,
     Rejected(Reject),
 }
@@ -77,6 +80,7 @@ pub struct Store {
     pub(crate) connection: Connection,
     membership: Membership,
     index: Index,
+    tombstone_witness: Option<PathBuf>,
 }
 
 impl Store {
@@ -232,7 +236,44 @@ impl Store {
             connection,
             membership,
             index,
+            tombstone_witness: None,
         })
+    }
+
+    /// Bind a host database to a deletion witness outside its generation
+    /// directory. Existing witnesses must all be present in this database;
+    /// otherwise an older database was restored or a commit was interrupted.
+    /// In either case, stop local publication until state is recovered.
+    pub fn enable_tombstone_witness(&mut self, path: impl AsRef<Path>) -> Result<(), StoreError> {
+        fs::create_dir_all(path.as_ref()).map_err(StoreError::Io)?;
+        let path = path.as_ref().canonicalize().map_err(StoreError::Io)?;
+        let _lock = lock_witness(&path)?;
+        self.refresh()?;
+        let mut expected = BTreeMap::new();
+        for &id in &self.index.event_order {
+            let event = self.index.replica.get(id).ok_or(StoreError::InvalidRecord)?;
+            if event.change.entry().is_none() {
+                let wire = self.index.signed_events.get(&id).ok_or(StoreError::InvalidRecord)?;
+                expected.insert(tombstone_witness_name(wire), wire.clone());
+            }
+        }
+        for entry in fs::read_dir(&path).map_err(StoreError::Io)? {
+            let entry = entry.map_err(StoreError::Io)?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { return Err(StoreError::RollbackDetected) };
+            if !name.ends_with(".witness") {
+                continue;
+            }
+            let Some(wire) = expected.get(name) else { return Err(StoreError::RollbackDetected) };
+            if read_witness(&entry.path())?.as_slice() != wire.as_slice() {
+                return Err(StoreError::RollbackDetected);
+            }
+        }
+        for (name, wire) in expected {
+            write_witness(&path, &name, &wire)?;
+        }
+        self.tombstone_witness = Some(path);
+        Ok(())
     }
 
     pub(crate) fn membership(&self) -> &Membership {
@@ -372,6 +413,11 @@ impl Store {
         wire: Option<Vec<u8>>,
         previous: Option<AppliedFile>,
     ) -> Result<Apply, StoreError> {
+        let _witness_lock = if event.change.entry().is_none() {
+            self.tombstone_witness.as_ref().map(|path| lock_witness(path)).transpose()?
+        } else {
+            None
+        };
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -406,6 +452,12 @@ impl Store {
             } else {
                 None
             };
+            if event.change.entry().is_none() {
+                if let Some(path) = &self.tombstone_witness {
+                    let signed = wire.as_ref().ok_or(StoreError::InvalidRecord)?;
+                    write_witness(path, &tombstone_witness_name(signed), signed)?;
+                }
+            }
             let record = match wire {
                 Some(wire) => Record::SignedEvent { event, wire },
                 None => Record::Event(event),
@@ -708,6 +760,63 @@ const LAST_EVENT: EventId = EventId {
     peer: [255; 32],
     sequence: u64::MAX,
 };
+
+fn tombstone_witness_name(wire: &[u8]) -> String {
+    let digest = crate::sha256(wire);
+    let mut name = String::with_capacity(32 * 2 + ".witness".len());
+    for byte in digest {
+        name.push_str(&format!("{byte:02x}"));
+    }
+    name.push_str(".witness");
+    name
+}
+
+fn lock_witness(directory: &Path) -> Result<File, StoreError> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(directory.join("witness.lock"))
+        .map_err(StoreError::Io)?;
+    file.lock().map_err(StoreError::Io)?;
+    Ok(file)
+}
+
+fn read_witness(path: &Path) -> Result<Vec<u8>, StoreError> {
+    let file = File::open(path).map_err(StoreError::Io)?;
+    if file.metadata().map_err(StoreError::Io)?.len() > MAX_RECORD_BYTES as u64 {
+        return Err(StoreError::RollbackDetected);
+    }
+    let mut wire = Vec::new();
+    file.take(MAX_RECORD_BYTES as u64 + 1)
+        .read_to_end(&mut wire)
+        .map_err(StoreError::Io)?;
+    if wire.len() > MAX_RECORD_BYTES {
+        return Err(StoreError::RollbackDetected);
+    }
+    Ok(wire)
+}
+
+fn write_witness(directory: &Path, name: &str, wire: &[u8]) -> Result<(), StoreError> {
+    let path = directory.join(name);
+    let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            return if read_witness(&path)?.as_slice() == wire {
+                Ok(())
+            } else {
+                Err(StoreError::RollbackDetected)
+            };
+        }
+        Err(error) => return Err(StoreError::Io(error)),
+    };
+    file.write_all(wire).map_err(StoreError::Io)?;
+    file.sync_all().map_err(StoreError::Io)?;
+    #[cfg(unix)]
+    File::open(directory).and_then(|dir| dir.sync_all()).map_err(StoreError::Io)?;
+    Ok(())
+}
 
 fn append(connection: &Connection, record: &Record) -> Result<i64, StoreError> {
     connection.execute(

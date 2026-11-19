@@ -195,13 +195,18 @@ impl Sender {
         fs::create_dir_all(&root).map_err(HostError::Io)?;
         let completed = BlobStore::open(root.join("files")).map_err(HostError::Io)?;
         let config_directory = configuration.parent().ok_or(HostError::Configuration)?;
-        let (store, baseline_digest) = open_host_store(
+        let (mut store, baseline_digest) = open_host_store(
             &root,
             &completed,
             &roster,
             config_directory,
             config.migration.as_ref(),
         )?;
+        store
+            .enable_tombstone_witness(
+                share_root.join("witness").join(config.generation.to_string()).join("sender"),
+            )
+            .map_err(HostError::Store)?;
         let server = Server::with_baseline(
             roots,
             credentials,
@@ -1199,9 +1204,10 @@ pub(crate) fn pull_with_originals(
         .map(|byte| format!("{byte:02x}"))
         .collect();
     let share_root = state_root.join(config.share.to_ascii_lowercase());
+    let witness = share_root.join("witness").join(config.generation.to_string()).join(&destination_id);
     let state_root = share_root
         .join(config.generation.to_string())
-        .join(destination_id);
+        .join(&destination_id);
     fs::create_dir_all(&state_root).map_err(HostError::Io)?;
     let chunks = BlobStore::open(state_root.join("chunks")).map_err(HostError::Io)?;
     let completed = BlobStore::open(state_root.join("files")).map_err(HostError::Io)?;
@@ -1213,6 +1219,7 @@ pub(crate) fn pull_with_originals(
         configuration_directory,
         config.migration.as_ref(),
     )?;
+    store.enable_tombstone_witness(witness).map_err(HostError::Store)?;
     let client = Client::with_baseline(
         roots,
         credentials,
