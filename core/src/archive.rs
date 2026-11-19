@@ -4,7 +4,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{params, Connection, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -102,6 +102,44 @@ pub struct ConflictVersion {
 }
 
 impl Store {
+    fn retained_recovery_contents(&self) -> Result<BTreeSet<ContentHash>, StoreError> {
+        let mut retained: BTreeSet<_> =
+            self.active_protections().map(Protection::content).collect();
+        retained.extend(self.replica().objects().flat_map(|object| {
+            self.replica()
+                .heads(object)
+                .filter_map(|event| match event.change.entry()?.kind {
+                    EntryKind::File(hash) => Some(hash),
+                    EntryKind::Directory => None,
+                })
+        }));
+        // Applied and staged revisions can still need their bodies after
+        // every peer has confirmed the latest event.
+        {
+            let mut statement = self
+                .connection
+                .prepare("SELECT payload FROM applied_file")?;
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                let applied: AppliedFile = decode(&decode_column(row, 0)?)?;
+                if let Some(blob) = applied.contents {
+                    retained.insert(blob.hash);
+                }
+            }
+        }
+        {
+            let mut statement = self.connection.prepare("SELECT payload FROM file_intent")?;
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                let intent: FileIntent = decode(&decode_column(row, 0)?)?;
+                for blob in [intent.previous, intent.desired].into_iter().flatten() {
+                    retained.insert(blob.hash);
+                }
+            }
+        }
+        Ok(retained)
+    }
+
     pub fn file_conflicts(&self, blobs: &BlobStore) -> io::Result<Vec<FileConflict>> {
         let replica = self.replica();
         replica
@@ -157,6 +195,14 @@ pub struct ArchivedFile {
     pub replaced_by: EventId,
     pub content: Blob,
     pub path: Option<Vec<String>>,
+    pub archived_at: i64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ArchiveSelection {
+    pub id: i64,
+    pub event: EventId,
+    pub replaced_by: EventId,
     pub archived_at: i64,
 }
 
@@ -257,6 +303,37 @@ impl Store {
     pub fn archives(&self, now: SystemTime) -> Result<Vec<ArchivedFile>, StoreError> {
         archives_on(&self.connection, now)
     }
+
+    pub fn archive_choices(
+        &self,
+        now: SystemTime,
+    ) -> Result<Vec<(ArchiveSelection, ArchivedFile)>, StoreError> {
+        let threshold = unix_seconds(now)?.saturating_sub(RETENTION_SECONDS);
+        let mut statement = self.connection.prepare(
+            "SELECT id, object, recorded_at, payload FROM file_archive
+             WHERE recorded_at > ?1 ORDER BY recorded_at DESC, id DESC",
+        )?;
+        let mut rows = statement.query([threshold])?;
+        let mut entries = Vec::new();
+        while let Some(row) = rows.next()? {
+            let record: ArchivedFile = decode(&decode_column(row, 3)?)?;
+            if row.get::<_, Vec<u8>>(1)? != record.object
+                || row.get::<_, i64>(2)? != record.archived_at
+            {
+                return Err(StoreError::InvalidRecord);
+            }
+            entries.push((
+                ArchiveSelection {
+                    id: row.get(0)?,
+                    event: record.event,
+                    replaced_by: record.replaced_by,
+                    archived_at: record.archived_at,
+                },
+                record,
+            ));
+        }
+        Ok(entries)
+    }
 }
 
 pub(crate) fn archives_on(
@@ -292,6 +369,81 @@ impl Store {
         )?)
     }
 
+    /// Remove explicitly selected history entries. This never removes a
+    /// body still needed by a head, protected original, local recovery or
+    /// another archive entry. Caller holds the state-directory write lock.
+    pub(crate) fn delete_archives(
+        &mut self,
+        blobs: &BlobStore,
+        selected: &[ArchiveSelection],
+        now: SystemTime,
+    ) -> Result<usize, StoreError> {
+        self.refresh()?;
+        let threshold = unix_seconds(now)?.saturating_sub(RETENTION_SECONDS);
+        let mut ids = BTreeSet::new();
+        let mut possible_blobs = BTreeSet::new();
+        for selection in selected {
+            if selection.id <= 0 || !ids.insert(selection.id) {
+                return Err(StoreError::InvalidRecord);
+            }
+            let row = self
+                .connection
+                .query_row(
+                    "SELECT object, recorded_at, payload FROM file_archive WHERE id = ?1",
+                    [selection.id],
+                    |row| {
+                        Ok((
+                            row.get::<_, Vec<u8>>(0)?,
+                            row.get::<_, i64>(1)?,
+                            decode_column(row, 2)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((object, recorded_at, payload)) = row else {
+                return Err(StoreError::InvalidRecord);
+            };
+            let archive: ArchivedFile = decode(&payload)?;
+            if object != archive.object
+                || recorded_at != archive.archived_at
+                || recorded_at <= threshold
+                || selection.event != archive.event
+                || selection.replaced_by != archive.replaced_by
+                || selection.archived_at != archive.archived_at
+            {
+                return Err(StoreError::InvalidRecord);
+            }
+            possible_blobs.insert(archive.content.hash);
+        }
+        let mut retained = self.retained_recovery_contents()?;
+        {
+            let mut statement = self
+                .connection
+                .prepare("SELECT id, object, recorded_at, payload FROM file_archive")?;
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                let archive: ArchivedFile = decode(&decode_column(row, 3)?)?;
+                if row.get::<_, Vec<u8>>(1)? != archive.object
+                    || row.get::<_, i64>(2)? != archive.archived_at
+                {
+                    return Err(StoreError::InvalidRecord);
+                }
+                if !ids.contains(&row.get::<_, i64>(0)?) {
+                    retained.insert(archive.content.hash);
+                }
+            }
+        }
+        let tx = self.connection.transaction()?;
+        for id in ids {
+            tx.execute("DELETE FROM file_archive WHERE id = ?1", [id])?;
+        }
+        tx.commit()?;
+        for hash in possible_blobs.difference(&retained) {
+            blobs.remove_archived(*hash).map_err(StoreError::Io)?;
+        }
+        Ok(selected.len())
+    }
+
     /// The sender holds its state-directory lock for the duration of the
     /// sweep, excluding any operation that writes blobs or publishes events.
     pub(crate) fn sweep_sender_archives(
@@ -301,42 +453,7 @@ impl Store {
     ) -> Result<(), StoreError> {
         self.refresh()?;
         let threshold = unix_seconds(now)?.saturating_sub(RETENTION_SECONDS);
-        let mut retained: BTreeSet<_> =
-            self.active_protections().map(Protection::content).collect();
-        retained.extend(self.replica().objects().flat_map(|object| {
-            self.replica()
-                .heads(object)
-                .filter_map(|event| match event.change.entry()?.kind {
-                    EntryKind::File(hash) => Some(hash),
-                    EntryKind::Directory => None,
-                })
-        }));
-        // A receiver can still be applying a revision after the sender has
-        // advanced its head and all peers have confirmed the newer event.
-        // Its on-disk old version and staged replacement must survive until
-        // reconciliation either commits or explicitly abandons the intent.
-        {
-            let mut statement = self
-                .connection
-                .prepare("SELECT payload FROM applied_file")?;
-            let mut rows = statement.query([])?;
-            while let Some(row) = rows.next()? {
-                let applied: AppliedFile = decode(&decode_column(row, 0)?)?;
-                if let Some(blob) = applied.contents {
-                    retained.insert(blob.hash);
-                }
-            }
-        }
-        {
-            let mut statement = self.connection.prepare("SELECT payload FROM file_intent")?;
-            let mut rows = statement.query([])?;
-            while let Some(row) = rows.next()? {
-                let intent: FileIntent = decode(&decode_column(row, 0)?)?;
-                for blob in [intent.previous, intent.desired].into_iter().flatten() {
-                    retained.insert(blob.hash);
-                }
-            }
-        }
+        let mut retained = self.retained_recovery_contents()?;
         let mut expired = BTreeMap::<ContentHash, Vec<i64>>::new();
         {
             let mut statement = self
@@ -620,6 +737,64 @@ mod tests {
         );
         assert_eq!(
             blobs.open_verified(pending_blob).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn manual_history_deletion_reclaims_only_last_unreferenced_copy() {
+        let folder = tempfile::tempdir().unwrap();
+        let blobs = BlobStore::open(folder.path().join("files")).unwrap();
+        let key = PeerSigningKey::from_bytes(&[9; 32]);
+        let writer = key.verifying_key().to_bytes();
+        let roster = Roster::new([2; 16], 1, [(writer, Role::Writer)].into());
+        let mut store = Store::open(":memory:", roster.membership().clone()).unwrap();
+        let blob = Blob {
+            hash: sha256(b"shared"),
+            length: 6,
+        };
+        blobs.put(blob, &b"shared"[..]).unwrap();
+        let tx = store.connection.transaction().unwrap();
+        for (index, object) in [[3; 16], [4; 16]].into_iter().enumerate() {
+            let event = EventId {
+                peer: writer,
+                sequence: index as u64 + 1,
+            };
+            let successor = EventId {
+                peer: writer,
+                sequence: index as u64 + 3,
+            };
+            record_archive(
+                &tx,
+                object,
+                AppliedFile {
+                    event,
+                    contents: Some(blob),
+                    path: Some(vec![format!("{index}.tja")]),
+                },
+                successor,
+                None,
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+        let choices = store.archive_choices(SystemTime::now()).unwrap();
+        assert_eq!(choices.len(), 2);
+        let mut stale = choices[0].0;
+        stale.archived_at = 0;
+        assert!(store
+            .delete_archives(&blobs, &[choices[0].0, stale], SystemTime::now())
+            .is_err());
+        assert_eq!(store.archive_choices(SystemTime::now()).unwrap().len(), 2);
+        store
+            .delete_archives(&blobs, &[choices[0].0], SystemTime::now())
+            .unwrap();
+        blobs.open_verified(blob).unwrap();
+        store
+            .delete_archives(&blobs, &[choices[1].0], SystemTime::now())
+            .unwrap();
+        assert_eq!(
+            blobs.open_verified(blob).unwrap_err().kind(),
             io::ErrorKind::NotFound
         );
     }

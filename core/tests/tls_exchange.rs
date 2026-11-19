@@ -330,6 +330,100 @@ fn writer_ffi_history_restores_only_the_reviewed_current_version() {
 }
 
 #[test]
+fn writer_ffi_deletes_selected_history_but_keeps_unconfirmed_original() {
+    use p2p_sync_core::{host::Sender, p2p_sync_writer_delete_history, p2p_sync_writer_history};
+    let root = tempfile::tempdir().unwrap();
+    let setup = root.path().join("setup");
+    assert!(std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
+        .arg("setup")
+        .arg(&setup)
+        .args(["127.0.0.1:8766", "127.0.0.1:8766"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let config = setup.join("sender/server.json");
+    let state = root.path().join("writer-state");
+    let source = root.path().join("song.tja");
+    std::fs::write(&source, b"first").unwrap();
+    let mut writer = Sender::open(&config, &state).unwrap();
+    writer.publish(&source).unwrap();
+    for content in [b"second".as_slice(), b"third".as_slice()] {
+        std::fs::write(&source, content).unwrap();
+        writer.revise("song.tja", Some(&source)).unwrap();
+    }
+    drop(writer);
+    extern "C" fn capture(context: *mut std::ffi::c_void, data: *const u8, length: usize) {
+        unsafe {
+            (*context.cast::<Vec<u8>>())
+                .extend_from_slice(std::slice::from_raw_parts(data, length));
+        }
+    }
+    let config_bytes = config.to_str().unwrap().as_bytes();
+    let state_bytes = state.to_str().unwrap().as_bytes();
+    let history = || {
+        let mut json = Vec::new();
+        assert_eq!(
+            unsafe {
+                p2p_sync_writer_history(
+                    config_bytes.as_ptr(),
+                    config_bytes.len(),
+                    state_bytes.as_ptr(),
+                    state_bytes.len(),
+                    Some(capture),
+                    (&mut json as *mut Vec<u8>).cast(),
+                )
+            },
+            0
+        );
+        serde_json::from_slice::<Vec<serde_json::Value>>(&json).unwrap()
+    };
+    let delete = |selection: &[u8]| unsafe {
+        p2p_sync_writer_delete_history(
+            config_bytes.as_ptr(),
+            config_bytes.len(),
+            state_bytes.as_ptr(),
+            state_bytes.len(),
+            selection.as_ptr(),
+            selection.len(),
+        )
+    };
+    let before = history();
+    assert_eq!(before.len(), 2);
+    assert_eq!(delete(b"[]"), 1);
+    let token = |entry: &serde_json::Value| {
+        serde_json::json!({
+            "id": entry["id"], "archive": entry["archive"],
+            "replaced_by": entry["replaced_by"], "archived_at": entry["archived_at"],
+        })
+    };
+    let mut stale = token(&before[0]);
+    stale["archived_at"] = 0.into();
+    assert_eq!(delete(&serde_json::to_vec(&[stale]).unwrap()), 5);
+    assert_eq!(history().len(), 2);
+    let first = token(&before[0]);
+    assert_eq!(delete(&serde_json::to_vec(&[first.clone()]).unwrap()), 0);
+    assert_eq!(history().len(), 1);
+    assert_eq!(delete(&serde_json::to_vec(&[first]).unwrap()), 5);
+    assert_eq!(
+        delete(&serde_json::to_vec(&[token(&before[1])]).unwrap()),
+        0
+    );
+    assert!(history().is_empty());
+    let settings: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+    let share = settings["share"].as_str().unwrap().to_ascii_lowercase();
+    let original = state
+        .join(share)
+        .join("1/files")
+        .join(encode_hex(&sha256(b"first")));
+    assert!(
+        original.is_file(),
+        "unconfirmed common original must survive history deletion"
+    );
+}
+
+#[test]
 fn local_receiver_confirmations_can_join_a_serving_cache() {
     use p2p_sync_core::{
         auth::{PeerSigningKey, Role, Roster},

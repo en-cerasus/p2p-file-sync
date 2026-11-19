@@ -396,7 +396,7 @@ impl Sender {
         self.store.refresh().map_err(HostError::Store)?;
         let history = self
             .store
-            .archives(std::time::SystemTime::now())
+            .archive_choices(std::time::SystemTime::now())
             .map_err(HostError::Store)?;
         let format_id = |id: EventId| {
             let peer: String = id.peer.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -405,7 +405,7 @@ impl Sender {
         Ok(serde_json::Value::Array(
             history
                 .into_iter()
-                .map(|archive| {
+                .map(|(selection, archive)| {
                     let current: Vec<_> = self
                         .store
                         .replica()
@@ -414,6 +414,8 @@ impl Sender {
                         .collect();
                     serde_json::json!({
                         "archive": format_id(archive.event),
+                        "id": selection.id,
+                        "replaced_by": format_id(archive.replaced_by),
                         "current_heads": current,
                         "path": archive.path,
                         "bytes": archive.content.length,
@@ -422,6 +424,16 @@ impl Sender {
                 })
                 .collect(),
         ))
+    }
+
+    pub fn delete_history(
+        &mut self,
+        selected: &[crate::archive::ArchiveSelection],
+    ) -> Result<usize, HostError> {
+        let _lock = self.lock_state()?;
+        self.store
+            .delete_archives(&self.completed, selected, std::time::SystemTime::now())
+            .map_err(HostError::Store)
     }
 
     pub fn restore_archive(

@@ -385,6 +385,72 @@ pub unsafe extern "C" fn p2p_sync_writer_restore(
     }
 }
 
+#[derive(serde::Deserialize)]
+struct ArchiveDeleteRequest {
+    id: i64,
+    archive: String,
+    replaced_by: String,
+    archived_at: i64,
+}
+
+/// Delete selected writer-history entries without removing any body still
+/// referenced by a protected original, active version or recovery operation.
+/// `selection` is a JSON array of the listing's id, archive, replaced_by and
+/// archived_at fields. A changed or expired entry rejects the whole request.
+///
+/// # Safety
+/// Every pointer/length pair must remain readable for the call.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_writer_delete_history(
+    config: *const u8,
+    config_len: usize,
+    state: *const u8,
+    state_len: usize,
+    selection: *const u8,
+    selection_len: usize,
+) -> i32 {
+    let Some((config, state)) = (unsafe { writer_paths(config, config_len, state, state_len) })
+    else {
+        return INVALID_ARGUMENT;
+    };
+    let Some(selection) = (unsafe { borrowed_text(selection, selection_len, 65_536) }) else {
+        return INVALID_ARGUMENT;
+    };
+    let Ok(requests) = serde_json::from_str::<Vec<ArchiveDeleteRequest>>(selection) else {
+        return INVALID_ARGUMENT;
+    };
+    if requests.is_empty() || requests.len() > 256 {
+        return INVALID_ARGUMENT;
+    }
+    let Some(selected) = requests
+        .into_iter()
+        .map(|request| {
+            Some(archive::ArchiveSelection {
+                id: request.id,
+                event: parse_event_id(&request.archive)?,
+                replaced_by: parse_event_id(&request.replaced_by)?,
+                archived_at: request.archived_at,
+            })
+        })
+        .collect::<Option<Vec<_>>>()
+    else {
+        return INVALID_ARGUMENT;
+    };
+    match std::panic::catch_unwind(|| {
+        let mut writer = host::Sender::open(config, state).map_err(host_error_code)?;
+        writer
+            .delete_history(&selected)
+            .map_err(|error| match error {
+                host::HostError::Store(store::StoreError::InvalidRecord) => 5,
+                other => host_error_code(other),
+            })
+    }) {
+        Ok(Ok(_)) => OK,
+        Ok(Err(code)) => code,
+        Err(_) => 6,
+    }
+}
+
 /// List the writer's unresolved conflicts as groups of candidate revisions.
 /// The callback receives a JSON array with versions (id, name, kind).
 ///

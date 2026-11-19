@@ -107,6 +107,13 @@ int32_t p2p_sync_writer_restore(const uint8_t *config, size_t config_len,
                                 const uint8_t *state, size_t state_len,
                                 const uint8_t *archive, size_t archive_len,
                                 const uint8_t *reviewed, size_t reviewed_len);
+/* Delete selected history entries. Selection is a nonempty JSON array of
+   id, archive, replaced_by and archived_at from the listing. Protected
+   originals, current versions, pending recovery and other archives retain
+   their content. Stale selections reject the whole request. */
+int32_t p2p_sync_writer_delete_history(const uint8_t *config, size_t config_len,
+                                       const uint8_t *state, size_t state_len,
+                                       const uint8_t *selection, size_t selection_len);
 
 /* Conflict listing returns groups with versions (id, name, kind). Resolve
    accepts the chosen ID and a JSON array of every reviewed candidate ID.

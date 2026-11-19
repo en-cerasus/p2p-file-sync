@@ -41,6 +41,8 @@ internal sealed class SyncWindow : Window
     private readonly Button loadWriterHistoryButton = new() { Content = "復元できる履歴を確認", Margin = new Thickness(0, 12, 0, 0) };
     private readonly ListBox writerHistoryList = new() { MaxHeight = 240 };
     private readonly Button restoreHistoryButton = new() { Content = "選択した履歴を復元", Margin = new Thickness(0, 8, 0, 0) };
+    private readonly Button deleteHistoryButton = new() { Content = "選択した履歴を削除", Margin = new Thickness(0, 8, 0, 0) };
+    private readonly Button deleteAllHistoryButton = new() { Content = "表示中の履歴をすべて削除", Margin = new Thickness(0, 8, 0, 0) };
     private readonly Button loadWriterConflictsButton = new() { Content = "競合を確認", Margin = new Thickness(0, 16, 0, 0) };
     private readonly ListBox writerConflictList = new() { MaxHeight = 180 };
     private readonly ListBox writerCandidateList = new() { MaxHeight = 180 };
@@ -90,6 +92,8 @@ internal sealed class SyncWindow : Window
         panel.Children.Add(loadWriterHistoryButton);
         panel.Children.Add(writerHistoryList);
         panel.Children.Add(restoreHistoryButton);
+        panel.Children.Add(deleteHistoryButton);
+        panel.Children.Add(deleteAllHistoryButton);
         panel.Children.Add(new TextBlock { Text = "競合の解決", FontSize = 18, Margin = new Thickness(0, 20, 0, 0) });
         panel.Children.Add(loadWriterConflictsButton);
         panel.Children.Add(writerConflictList);
@@ -164,6 +168,8 @@ internal sealed class SyncWindow : Window
         loadWriterHistoryButton.Click += async (_, _) => await LoadWriterHistory();
         writerHistoryList.SelectionChanged += (_, _) => UpdateControls();
         restoreHistoryButton.Click += async (_, _) => await RestoreWriterHistory();
+        deleteHistoryButton.Click += async (_, _) => await DeleteWriterHistory(false);
+        deleteAllHistoryButton.Click += async (_, _) => await DeleteWriterHistory(true);
         loadWriterConflictsButton.Click += async (_, _) => await LoadWriterConflicts();
         writerConflictList.SelectionChanged += (_, _) =>
         {
@@ -322,6 +328,10 @@ internal sealed class SyncWindow : Window
         loadWriterConflictsButton.IsEnabled = loadWriterHistoryButton.IsEnabled;
         restoreHistoryButton.IsEnabled = loadWriterHistoryButton.IsEnabled
             && writerHistoryList.SelectedItem is SyncCore.WriterHistoryEntry { CurrentHeads.Length: 1 };
+        deleteHistoryButton.IsEnabled = loadWriterHistoryButton.IsEnabled
+            && writerHistoryList.SelectedItem is SyncCore.WriterHistoryEntry;
+        deleteAllHistoryButton.IsEnabled = loadWriterHistoryButton.IsEnabled
+            && writerHistoryList.ItemsSource is SyncCore.WriterHistoryEntry[] { Length: > 0 };
         resolveConflictButton.IsEnabled = loadWriterConflictsButton.IsEnabled
             && writerConflictList.SelectedItem is SyncCore.WriterConflict { Versions.Length: >= 2 } conflict
             && !conflict.Versions.Any(version => version.Kind == "directory")
@@ -466,6 +476,47 @@ internal sealed class SyncWindow : Window
         }
     }
 
+    private async Task DeleteWriterHistory(bool all)
+    {
+        if (closing || syncing || writerConfiguration is not string config || writerState is not string state)
+        {
+            return;
+        }
+        var selected = all
+            ? (writerHistoryList.ItemsSource as SyncCore.WriterHistoryEntry[] ?? [])
+            : writerHistoryList.SelectedItem is SyncCore.WriterHistoryEntry entry ? [entry] : [];
+        if (selected.Length == 0 || MessageBox.Show(this,
+            $"履歴 {selected.Length} 件を削除します。復元には使えなくなります。\n未同期ピアのために保護中の原本は残ります。",
+            "履歴の削除", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+        {
+            return;
+        }
+        syncing = true;
+        UpdateControls();
+        try
+        {
+            var status = await Task.Run(() => SyncCore.DeleteWriterHistory(config, state, selected));
+            if (status == 0)
+            {
+                writerHistoryList.ItemsSource = null;
+                result.Text = $"履歴 {selected.Length} 件を削除しました。保護中の原本は保持されます。履歴を再読み込みしてください。";
+            }
+            else
+            {
+                result.Text = status == 5 ? "履歴が変更されました。再読み込みして選び直してください。" : SyncCore.ErrorMessage(status);
+            }
+        }
+        catch (Exception error) when (error is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
+        {
+            result.Text = "履歴の削除処理を読み込めませんでした。";
+        }
+        finally
+        {
+            syncing = false;
+            UpdateControls();
+        }
+    }
+
     private async Task LoadWriterConflicts()
     {
         if (closing || syncing || writerConfiguration is not string config || writerState is not string state)
@@ -597,7 +648,9 @@ internal static class SyncCore
         [property: JsonPropertyName("archived_at")] long ArchivedAt);
 
     internal sealed record WriterHistoryEntry(
+        [property: JsonPropertyName("id")] long Id,
         [property: JsonPropertyName("archive")] string Archive,
+        [property: JsonPropertyName("replaced_by")] string ReplacedBy,
         [property: JsonPropertyName("current_heads")] string[] CurrentHeads,
         [property: JsonPropertyName("path")] string[]? Path,
         [property: JsonPropertyName("bytes")] ulong Bytes,
@@ -687,6 +740,21 @@ internal static class SyncCore
             reviewedBytes, (nuint)reviewedBytes.Length);
     }
 
+    internal static int DeleteWriterHistory(string config, string state, WriterHistoryEntry[] entries)
+    {
+        var configBytes = Encoding.UTF8.GetBytes(config);
+        var stateBytes = Encoding.UTF8.GetBytes(state);
+        var selected = JsonSerializer.SerializeToUtf8Bytes(entries.Select(entry => new
+        {
+            id = entry.Id,
+            archive = entry.Archive,
+            replaced_by = entry.ReplacedBy,
+            archived_at = entry.ArchivedAt,
+        }).ToArray());
+        return WriterDeleteHistoryNative(configBytes, (nuint)configBytes.Length,
+            stateBytes, (nuint)stateBytes.Length, selected, (nuint)selected.Length);
+    }
+
     internal static (int Status, WriterConflict[] Entries) WriterConflicts(string config, string state)
     {
         var configBytes = Encoding.UTF8.GetBytes(config);
@@ -745,6 +813,11 @@ internal static class SyncCore
     private static extern int WriterRestoreNative(
         byte[] config, nuint configLength, byte[] state, nuint stateLength,
         byte[] archive, nuint archiveLength, byte[] reviewed, nuint reviewedLength);
+
+    [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_writer_delete_history", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int WriterDeleteHistoryNative(
+        byte[] config, nuint configLength, byte[] state, nuint stateLength,
+        byte[] selection, nuint selectionLength);
 
     [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_writer_conflicts", CallingConvention = CallingConvention.Cdecl)]
     private static extern int WriterConflictsNative(
