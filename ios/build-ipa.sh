@@ -19,7 +19,7 @@ xcrun --sdk iphoneos swiftc -parse-as-library \
     -target arm64-apple-ios17.0 -sdk "$SDKROOT" \
     -I "$module" target/aarch64-apple-ios/release/libp2p_sync_core.a \
     -Xlinker -no_adhoc_codesign \
-    ios/SyncCore.swift ios/P2PSyncApp.swift -o "$app/P2PSync"
+    ios/SyncCore.swift ios/P2PSyncApp.swift ios/WriterView.swift -o "$app/P2PSync"
 test "$(xcrun lipo -archs "$app/P2PSync")" = arm64
 xcrun vtool -show-build "$app/P2PSync"
 

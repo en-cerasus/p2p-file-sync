@@ -10,7 +10,12 @@ struct P2PSyncApp: App {
 
     var body: some Scene {
         WindowGroup {
-            NavigationStack { DirectSyncView() }
+            TabView {
+                NavigationStack { DirectSyncView() }
+                    .tabItem { Label("受信", systemImage: "arrow.down.circle") }
+                NavigationStack { WriterView() }
+                    .tabItem { Label("配信", systemImage: "arrow.up.circle") }
+            }
         }
         .onChange(of: phase) { _, newPhase in
             if newPhase == .background {

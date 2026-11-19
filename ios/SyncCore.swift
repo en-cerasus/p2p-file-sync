@@ -24,6 +24,8 @@ enum SyncCore {
         case hashingFailed(Int32)
         case pullFailed(Int32)
         case missingOriginalsReport
+        case writerFailed(Int32)
+        case missingWriterReport
     }
 
     static var abiVersion: UInt32 { p2p_sync_abi_version() }
@@ -117,6 +119,81 @@ enum SyncCore {
     private struct PullContext {
         let cancellation: Cancellation
         var json: Data?
+    }
+
+    struct WriterSummary: Decodable, Sendable {
+        let files: UInt64
+        let directories: UInt64
+        let skipped: UInt64
+    }
+
+    private struct WriterReportContext {
+        var json: Data?
+    }
+
+    static func refreshWriter(configuration: URL, state: URL, source: URL) throws -> WriterSummary {
+        let config = Array(configuration.path.utf8)
+        let storage = Array(state.path.utf8)
+        let input = Array(source.path.utf8)
+        var report = WriterReportContext(json: nil)
+        let status = withUnsafeMutablePointer(to: &report) { context in
+            config.withUnsafeBufferPointer { configBytes in
+                storage.withUnsafeBufferPointer { stateBytes in
+                    input.withUnsafeBufferPointer { sourceBytes in
+                        p2p_sync_writer_refresh_tree(
+                            configBytes.baseAddress, configBytes.count,
+                            stateBytes.baseAddress, stateBytes.count,
+                            sourceBytes.baseAddress, sourceBytes.count,
+                            { context, data, length in
+                                guard let context, let data else { return }
+                                context.assumingMemoryBound(to: WriterReportContext.self).pointee.json =
+                                    Data(bytes: data, count: length)
+                            },
+                            UnsafeMutableRawPointer(context)
+                        )
+                    }
+                }
+            }
+        }
+        guard status == P2P_SYNC_OK else { throw CoreError.writerFailed(status) }
+        guard let json = report.json else { throw CoreError.missingWriterReport }
+        return try JSONDecoder().decode(WriterSummary.self, from: json)
+    }
+
+    private struct WriterServeContext {
+        let cancellation: Cancellation
+        let onReady: @Sendable (String) -> Void
+    }
+
+    static func serveWriter(configuration: URL, state: URL, cancellation: Cancellation,
+                            onReady: @escaping @Sendable (String) -> Void) throws {
+        let config = Array(configuration.path.utf8)
+        let storage = Array(state.path.utf8)
+        var callbacks = WriterServeContext(cancellation: cancellation, onReady: onReady)
+        let status = withUnsafeMutablePointer(to: &callbacks) { context in
+            config.withUnsafeBufferPointer { configBytes in
+                storage.withUnsafeBufferPointer { stateBytes in
+                    p2p_sync_writer_serve(
+                        configBytes.baseAddress, configBytes.count,
+                        stateBytes.baseAddress, stateBytes.count,
+                        { context, data, length in
+                            guard let context, let data else { return }
+                            let callbacks = context.assumingMemoryBound(to: WriterServeContext.self).pointee
+                            if let address = String(data: Data(bytes: data, count: length), encoding: .utf8) {
+                                callbacks.onReady(address)
+                            }
+                        },
+                        { context in
+                            guard let context else { return 0 }
+                            return context.assumingMemoryBound(to: WriterServeContext.self)
+                                .pointee.cancellation.isCancelled() ? 1 : 0
+                        },
+                        UnsafeMutableRawPointer(context)
+                    )
+                }
+            }
+        }
+        guard status == 7 else { throw CoreError.writerFailed(status) }
     }
 
     static func pull(configuration: URL, state: URL, destination: URL,
