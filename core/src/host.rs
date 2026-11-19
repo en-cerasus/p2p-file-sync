@@ -452,6 +452,11 @@ impl Sender {
         let (name, parents) = components.split_last().ok_or(HostError::Configuration)?;
         let parent = publish_directory_path(&root, parents, &mut self.store, &self.roster, &self.signer)
             .map_err(HostError::Publish)?;
+        if !old.name_is_vacant().map_err(HostError::Io)?
+            || target.inspect(object).map_err(HostError::Io)? != Some(expected)
+        {
+            return Err(HostError::Publish(PublishError::StaleBase));
+        }
         relocate_file(&mut self.store, &self.roster, &self.signer, current, parent, name)
             .map_err(HostError::Publish)
     }
