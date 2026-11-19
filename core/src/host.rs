@@ -984,7 +984,8 @@ fn open_local_receiver(
 }
 
 #[cfg(target_os = "ios")]
-fn pending_local_file(store: &Store, intent: &crate::materialize::FileIntent)
+fn pending_local_file(store: &Store, intent: &crate::materialize::FileIntent,
+                      staged_path: Option<Vec<String>>)
     -> Result<Option<PendingLocalFile>, HostError> {
     let applied = store.applied_file(intent.object).map_err(HostError::Materialize)?;
     let Some(applied) = applied.filter(|entry| entry.contents == intent.previous) else {
@@ -994,10 +995,7 @@ fn pending_local_file(store: &Store, intent: &crate::materialize::FileIntent)
     let (kind, destination) = if intent.desired.is_none() {
         (PendingLocalKind::Delete, None)
     } else {
-        let Ok(path) = Projection::new(store.replica()).path(intent.object) else {
-            return Ok(None);
-        };
-        let path: Vec<String> = path.into_iter().map(str::to_owned).collect();
+        let Some(path) = staged_path else { return Ok(None) };
         if path == source {
             (PendingLocalKind::Update, Some(path))
         } else {
@@ -1013,9 +1011,9 @@ fn pending_local_file(store: &Store, intent: &crate::materialize::FileIntent)
 pub fn pending_local_files(configuration: &Path, state: &Path, destination: &Path)
     -> Result<Vec<PendingLocalFile>, HostError> {
     let (store, _, _) = open_local_receiver(configuration, state, destination)?;
-    let pending = store.pending_files().map_err(HostError::Materialize)?;
+    let pending = store.pending_files_with_paths().map_err(HostError::Materialize)?;
     let files: Result<Vec<_>, _> = pending.iter()
-        .map(|intent| pending_local_file(&store, intent)).collect();
+        .map(|(intent, path)| pending_local_file(&store, intent, path.clone())).collect();
     Ok(files?.into_iter().flatten().collect())
 }
 
@@ -1028,10 +1026,10 @@ pub fn apply_local_file(configuration: &Path, state: &Path, destination: &Path,
     use crate::local_target::{AppleExistingTarget, AppleMoveTarget};
     let (mut store, blobs, root) = open_local_receiver(configuration, state, destination)?;
     let object = hex::<16>(&reviewed.object)?;
-    let intent = store.pending_files().map_err(HostError::Materialize)?
-        .into_iter().find(|intent| intent.object == object)
+    let (intent, path) = store.pending_files_with_paths().map_err(HostError::Materialize)?
+        .into_iter().find(|(intent, _)| intent.object == object)
         .ok_or(HostError::Configuration)?;
-    if pending_local_file(&store, &intent)?.as_ref() != Some(reviewed) {
+    if pending_local_file(&store, &intent, path)?.as_ref() != Some(reviewed) {
         return Err(HostError::Configuration);
     }
     let result = match reviewed.kind {
@@ -1049,7 +1047,11 @@ pub fn apply_local_file(configuration: &Path, state: &Path, destination: &Path,
             AppleMoveTarget::open(&open_root(&root)?, &before, &after, intent)
         }),
     };
-    result.map_err(HostError::Materialize)
+    let outcome = result.map_err(HostError::Materialize)?;
+    if outcome == crate::materialize::Recovery::Superseded {
+        store.retire_superseded_apple(&blobs, &root, object).map_err(HostError::Materialize)?;
+    }
+    Ok(outcome)
 }
 
 fn generation_marker_bytes(generation: u64, digest: [u8; 32]) -> [u8; 40] {

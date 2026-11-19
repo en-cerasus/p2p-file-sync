@@ -34,6 +34,24 @@ impl AppleExistingTarget {
         Ok(Self { target: NewFileTarget::existing(root, components)?, intent: intent.clone() })
     }
 
+    /// A stale operation may have already moved the old file to its reserved
+    /// name. Put it back before dropping the intent, without replacing an
+    /// intervening local file.
+    pub(crate) fn restore_original_if_staged(&self) -> io::Result<bool> {
+        let Some(previous) = self.intent.previous else { return Ok(false) };
+        if self.target.inspect_name(&self.target.name)? == Some(previous) {
+            return Ok(true);
+        }
+        let backup = update_backup(&self.intent);
+        if self.target.inspect_name(&self.target.name)?.is_none()
+            && self.target.inspect_name(&backup)? == Some(previous)
+        {
+            return rename_exclusive(&self.target.parent, &backup,
+                                    &self.target.parent, &self.target.name);
+        }
+        Ok(false)
+    }
+
     fn status(&self) -> io::Result<Option<Blob>> {
         let current = self.target.inspect_name(&self.target.name)?;
         let backup = update_backup(&self.intent);

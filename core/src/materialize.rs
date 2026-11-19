@@ -138,9 +138,15 @@ impl Store {
     }
 
     pub fn pending_files(&self) -> Result<Vec<FileIntent>, MaterializeError> {
+        Ok(self.pending_files_with_paths()?.into_iter().map(|(intent, _)| intent).collect())
+    }
+
+    /// Include the path saved with the intent. A newer signed head may have a
+    /// different path, so recovery must coordinate the saved path instead.
+    pub fn pending_files_with_paths(&self) -> Result<Vec<(FileIntent, Option<Vec<String>>)>, MaterializeError> {
         let mut statement = self
             .connection
-            .prepare("SELECT object, payload FROM file_intent ORDER BY object")?;
+            .prepare("SELECT object, payload, path FROM file_intent ORDER BY object")?;
         let mut rows = statement.query([])?;
         let mut intents = Vec::new();
         while let Some(row) = rows.next()? {
@@ -149,7 +155,8 @@ impl Store {
             if object != intent.object {
                 return Err(MaterializeError::InvalidIntent);
             }
-            intents.push(intent);
+            let path: Option<Vec<u8>> = row.get(2)?;
+            intents.push((intent, path.as_deref().map(decode).transpose()?));
         }
         Ok(intents)
     }
@@ -372,6 +379,63 @@ impl Store {
             record_applied(&tx, &intent, Some(path))?;
         }
         remove_intent(&tx, object)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Retire an Apple intent only while Swift coordinates both saved names.
+    /// This keeps a newer head from being blocked by a stale pending change.
+    #[cfg(target_vendor = "apple")]
+    pub fn retire_superseded_apple(
+        &mut self, blobs: &BlobStore, root: &Path, object: ObjectId,
+    ) -> Result<bool, MaterializeError> {
+        use crate::local_target::AppleExistingTarget;
+        let (tx, replica) = self.begin_indexed_write()?;
+        let Some((intent, Some(path))) = load_intent(&tx, object)? else { return Ok(false) };
+        if matches_head(replica, &intent) { return Ok(false) }
+        let mut heads = replica.heads(object);
+        let Some(head) = heads.next() else { return Ok(false) };
+        if heads.any(|other| other.change.entry() != head.change.entry()) {
+            return Ok(false);
+        }
+        let Some(applied) = read_applied(&tx, object)? else { return Ok(false) };
+        let (Some(previous), Some(old_path)) = (intent.previous, applied.path) else {
+            return Ok(false);
+        };
+        if applied.contents != Some(previous) { return Ok(false) }
+        if intent.desired.is_none() && old_path != path { return Ok(false) }
+        for blob in [intent.previous, intent.desired].into_iter().flatten() {
+            blobs.open_verified(blob)?;
+        }
+        let root = open_root(root)?;
+        if old_path != path {
+            if same_name_slot(&old_path, &path) { return Ok(false) }
+            let before: Vec<_> = old_path.iter().map(String::as_str).collect();
+            let after: Vec<_> = path.iter().map(String::as_str).collect();
+            let mut old = NewFileTarget::existing(&root, &before)?;
+            let mut new = NewFileTarget::existing(&root, &after)?;
+            if old.inspect(object)? == Some(previous) && new.name_is_vacant()? {
+                remove_intent(&tx, object)?;
+            } else if old.name_is_vacant()? && new.inspect(object)? == intent.desired {
+                record_applied(&tx, &intent, Some(path))?;
+                remove_intent(&tx, object)?;
+            } else {
+                return Ok(false);
+            }
+        } else {
+            let components: Vec<_> = path.iter().map(String::as_str).collect();
+            let mut target = AppleExistingTarget::open(&root, &components, &intent)?;
+            let restored = target.restore_original_if_staged()?;
+            let current = target.inspect(object)?;
+            if restored && current == Some(previous) {
+                remove_intent(&tx, object)?;
+            } else if current == intent.desired && current.is_some() {
+                record_applied(&tx, &intent, Some(path))?;
+                remove_intent(&tx, object)?;
+            } else {
+                return Ok(false);
+            }
+        }
         tx.commit()?;
         Ok(true)
     }

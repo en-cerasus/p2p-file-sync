@@ -785,6 +785,48 @@ fn obsolete_pending_update_is_retired_only_for_a_known_disk_version() {
     }
 }
 
+#[cfg(target_vendor = "apple")]
+#[test]
+fn apple_stale_update_restores_reserved_original_before_retirement() {
+    use sha2::{Digest, Sha256};
+    for moved_to_backup in [false, true] {
+        let f = Fixture::new();
+        let root = f.folder.path().join("destination");
+        std::fs::create_dir(&root).unwrap();
+        let mut store = f.open();
+        let first = FileIntent { previous: None, ..f.intent.clone() };
+        store.stage_file(&f.blobs, &first).unwrap();
+        store.recover_new_file(&f.blobs, &root, OBJECT).unwrap();
+
+        let pending_blob = metadata(b"pending");
+        f.blobs.put(pending_blob, &b"pending"[..]).unwrap();
+        let pending_event = event(3, content_entry(pending_blob.hash));
+        store.apply_verified(pending_event.clone()).unwrap();
+        let pending = FileIntent {
+            object: OBJECT,
+            event: pending_event.id,
+            previous: first.desired,
+            desired: Some(pending_blob),
+        };
+        store.stage_file(&f.blobs, &pending).unwrap();
+        let newest = event(4, content_entry(metadata(b"newest").hash));
+        store.apply_verified(newest).unwrap();
+        let file = root.join("song.tja");
+        if moved_to_backup {
+            let mut digest = Sha256::new();
+            digest.update(OBJECT);
+            digest.update(pending.event.peer);
+            digest.update(pending.event.sequence.to_be_bytes());
+            let backup = root.join(format!(".p2p-update-{:x}", digest.finalize()));
+            std::fs::rename(&file, backup).unwrap();
+        }
+        assert!(store.retire_superseded_apple(&f.blobs, &root, OBJECT).unwrap());
+        assert_eq!(std::fs::read(&file).unwrap(), b"new");
+        assert!(store.pending_files().unwrap().is_empty());
+        assert_eq!(store.applied_file(OBJECT).unwrap().unwrap().event.sequence, 2);
+    }
+}
+
 #[cfg(windows)]
 #[test]
 fn superseded_update_restores_known_backup_and_then_applies_newest_version() {
