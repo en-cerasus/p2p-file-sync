@@ -542,7 +542,8 @@ mod tests {
         let key = PeerSigningKey::from_bytes(&[9; 32]);
         let writer = key.verifying_key().to_bytes();
         let roster = Roster::new([2; 16], 1, [(writer, Role::Writer)].into());
-        let mut store = Store::open(":memory:", roster.membership().clone()).unwrap();
+        let state = folder.path().join("state.sqlite");
+        let mut store = Store::open(&state, roster.membership().clone()).unwrap();
         let applied_blob = Blob {
             hash: sha256(b"applied"),
             length: 7,
@@ -597,6 +598,8 @@ mod tests {
         .unwrap();
         tx.commit().unwrap();
 
+        drop(store);
+        let mut store = Store::open(&state, roster.membership().clone()).unwrap();
         let expired = SystemTime::now() + Duration::from_secs(RETENTION_SECONDS as u64 + 1);
         store.sweep_sender_archives(&blobs, expired).unwrap();
         blobs.open_verified(applied_blob).unwrap();
