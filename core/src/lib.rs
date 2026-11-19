@@ -385,6 +385,132 @@ pub unsafe extern "C" fn p2p_sync_writer_restore(
     }
 }
 
+/// List the writer's unresolved conflicts as groups of candidate revisions.
+/// The callback receives a JSON array with versions (id, name, kind).
+///
+/// # Safety
+/// Paths and callback follow p2p_sync_writer_history.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_writer_conflicts(
+    config: *const u8,
+    config_len: usize,
+    state: *const u8,
+    state_len: usize,
+    callback: Option<OriginalsCallback>,
+    context: *mut std::ffi::c_void,
+) -> i32 {
+    let Some(callback) = callback else {
+        return INVALID_ARGUMENT;
+    };
+    let Some((config, state)) = (unsafe { writer_paths(config, config_len, state, state_len) })
+    else {
+        return INVALID_ARGUMENT;
+    };
+    let result = std::panic::catch_unwind(|| {
+        let mut writer = host::Sender::open(config, state).map_err(host_error_code)?;
+        let groups: Vec<_> = writer
+            .conflicts()
+            .map_err(host_error_code)?
+            .into_iter()
+            .map(|heads| {
+                let versions: Vec<_> = heads
+                    .into_iter()
+                    .map(|event| {
+                        let (name, kind) = match event.change.entry() {
+                            None => (None, "deleted"),
+                            Some(entry) => (
+                                Some(entry.name.as_str()),
+                                match entry.kind {
+                                    replica::EntryKind::File(_) => "file",
+                                    replica::EntryKind::Directory => "directory",
+                                },
+                            ),
+                        };
+                        serde_json::json!({
+                            "id": format_event_id(event.id),
+                            "name": name,
+                            "kind": kind,
+                        })
+                    })
+                    .collect();
+                serde_json::json!({ "versions": versions })
+            })
+            .collect();
+        serde_json::to_vec(&groups).map_err(|_| 6)
+    });
+    match result {
+        Ok(Ok(bytes)) => {
+            callback(context, bytes.as_ptr(), bytes.len());
+            OK
+        }
+        Ok(Err(code)) => code,
+        Err(_) => 6,
+    }
+}
+
+/// Resolve a conflict by choosing one reviewed head. `reviewed` is a JSON
+/// array of all candidate IDs shown to the user; a changed set is rejected.
+///
+/// # Safety
+/// Every pointer/length pair must remain readable for the call.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_writer_resolve(
+    config: *const u8,
+    config_len: usize,
+    state: *const u8,
+    state_len: usize,
+    choice: *const u8,
+    choice_len: usize,
+    reviewed: *const u8,
+    reviewed_len: usize,
+) -> i32 {
+    let Some((config, state)) = (unsafe { writer_paths(config, config_len, state, state_len) })
+    else {
+        return INVALID_ARGUMENT;
+    };
+    let (Some(choice), Some(reviewed)) =
+        (unsafe { borrowed_text(choice, choice_len, 128) }, unsafe {
+            borrowed_text(reviewed, reviewed_len, 65_536)
+        })
+    else {
+        return INVALID_ARGUMENT;
+    };
+    let Some(choice) = parse_event_id(choice) else {
+        return INVALID_ARGUMENT;
+    };
+    let Ok(reviewed) = serde_json::from_str::<Vec<String>>(reviewed) else {
+        return INVALID_ARGUMENT;
+    };
+    if reviewed.len() < 2 || reviewed.len() > 256 {
+        return INVALID_ARGUMENT;
+    }
+    let Some(ids) = reviewed
+        .iter()
+        .map(|id| parse_event_id(id))
+        .collect::<Option<std::collections::BTreeSet<_>>>()
+    else {
+        return INVALID_ARGUMENT;
+    };
+    if ids.len() != reviewed.len() || !ids.contains(&choice) {
+        return INVALID_ARGUMENT;
+    }
+    match std::panic::catch_unwind(|| {
+        let mut writer = host::Sender::open(config, state).map_err(host_error_code)?;
+        writer
+            .resolve_conflict(choice, ids)
+            .map_err(host_error_code)
+    }) {
+        Ok(Ok(_)) => OK,
+        Ok(Err(code)) => code,
+        Err(_) => 6,
+    }
+}
+
+fn format_event_id(id: replica::EventId) -> String {
+    let peer: String = id.peer.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("{peer}:{}", id.sequence)
+}
+
 unsafe fn borrowed_text<'a>(pointer: *const u8, length: usize, maximum: usize) -> Option<&'a str> {
     if pointer.is_null() || length == 0 || length > maximum {
         return None;

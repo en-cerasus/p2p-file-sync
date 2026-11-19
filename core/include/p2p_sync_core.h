@@ -108,6 +108,18 @@ int32_t p2p_sync_writer_restore(const uint8_t *config, size_t config_len,
                                 const uint8_t *archive, size_t archive_len,
                                 const uint8_t *reviewed, size_t reviewed_len);
 
+/* Conflict listing returns groups with versions (id, name, kind). Resolve
+   accepts the chosen ID and a JSON array of every reviewed candidate ID.
+   It records a signed resolution only if the complete candidate set remains
+   current. Directory conflicts cannot currently be resolved. */
+int32_t p2p_sync_writer_conflicts(const uint8_t *config, size_t config_len,
+                                  const uint8_t *state, size_t state_len,
+                                  p2p_sync_originals_callback callback, void *context);
+int32_t p2p_sync_writer_resolve(const uint8_t *config, size_t config_len,
+                                const uint8_t *state, size_t state_len,
+                                const uint8_t *choice, size_t choice_len,
+                                const uint8_t *reviewed, size_t reviewed_len);
+
 #ifdef __cplusplus
 }
 #endif

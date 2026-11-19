@@ -916,7 +916,10 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
 
 #[test]
 fn generated_writers_use_distinct_credentials_and_share_their_changes() {
-    use p2p_sync_core::host::{pull_from_config, Sender};
+    use p2p_sync_core::{
+        host::{pull_from_config, Sender},
+        p2p_sync_writer_conflicts, p2p_sync_writer_resolve,
+    };
 
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path();
@@ -941,7 +944,9 @@ fn generated_writers_use_distinct_credentials_and_share_their_changes() {
         path
     };
     let mut first = Sender::open(&config("sender"), &root.join("first")).unwrap();
-    let mut second = Sender::open(&config("writer-2"), &root.join("second")).unwrap();
+    let second_config = config("writer-2");
+    let second_state = root.join("second");
+    let mut second = Sender::open(&second_config, &second_state).unwrap();
     let first_file = root.join("first.tja");
     let second_file = root.join("second.tja");
     std::fs::write(&first_file, b"writer one").unwrap();
@@ -987,7 +992,59 @@ fn generated_writers_use_distinct_credentials_and_share_their_changes() {
     let conflicts = second.conflicts().unwrap();
     assert_eq!(conflicts.len(), 1);
     assert_eq!(conflicts[0].len(), 2);
-    let reviewed = conflicts[0].iter().map(|event| event.id).collect();
+    let config_bytes = second_config.to_str().unwrap().as_bytes();
+    let state_bytes = second_state.to_str().unwrap().as_bytes();
+    extern "C" fn capture(context: *mut std::ffi::c_void, data: *const u8, length: usize) {
+        unsafe {
+            (*context.cast::<Vec<u8>>())
+                .extend_from_slice(std::slice::from_raw_parts(data, length));
+        }
+    }
+    let mut json = Vec::new();
+    assert_eq!(
+        unsafe {
+            p2p_sync_writer_conflicts(
+                config_bytes.as_ptr(),
+                config_bytes.len(),
+                state_bytes.as_ptr(),
+                state_bytes.len(),
+                Some(capture),
+                (&mut json as *mut Vec<u8>).cast(),
+            )
+        },
+        0
+    );
+    let listed: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    let versions = listed[0]["versions"].as_array().unwrap();
+    assert_eq!(versions.len(), 2);
+    let reviewed: Vec<&str> = versions
+        .iter()
+        .map(|version| version["id"].as_str().unwrap())
+        .collect();
+    let chosen = format!("{}:{}", encode_hex(&right.peer), right.sequence);
+    assert!(reviewed.contains(&chosen.as_str()));
+    let reviewed_json = serde_json::to_vec(&reviewed).unwrap();
+    let resolve = |reviewed: &[u8]| unsafe {
+        p2p_sync_writer_resolve(
+            config_bytes.as_ptr(),
+            config_bytes.len(),
+            state_bytes.as_ptr(),
+            state_bytes.len(),
+            chosen.as_ptr(),
+            chosen.len(),
+            reviewed.as_ptr(),
+            reviewed.len(),
+        )
+    };
+    assert_eq!(resolve(b"[]"), 1);
+    assert_eq!(
+        resolve(
+            serde_json::to_string(&[reviewed[0], reviewed[0]])
+                .unwrap()
+                .as_bytes()
+        ),
+        1
+    );
     let second_listener = second.bind().unwrap();
     let receiver = setup.join("receiver/direct.json");
     let mut json: serde_json::Value =
@@ -1002,7 +1059,8 @@ fn generated_writers_use_distinct_credentials_and_share_their_changes() {
     std::thread::scope(|threads| {
         let serving = threads.spawn(move || {
             second.serve(second_listener.accept().unwrap().0).unwrap();
-            second.resolve_conflict(right, reviewed).unwrap();
+            assert_eq!(resolve(&reviewed_json), 0);
+            assert_ne!(resolve(&reviewed_json), 0);
             second.serve(second_listener.accept().unwrap().0).unwrap();
         });
         let report = pull_from_config(&receiver, &root.join("receiver"), &destination).unwrap();

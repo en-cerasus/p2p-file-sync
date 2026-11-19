@@ -41,6 +41,10 @@ internal sealed class SyncWindow : Window
     private readonly Button loadWriterHistoryButton = new() { Content = "復元できる履歴を確認", Margin = new Thickness(0, 12, 0, 0) };
     private readonly ListBox writerHistoryList = new() { MaxHeight = 240 };
     private readonly Button restoreHistoryButton = new() { Content = "選択した履歴を復元", Margin = new Thickness(0, 8, 0, 0) };
+    private readonly Button loadWriterConflictsButton = new() { Content = "競合を確認", Margin = new Thickness(0, 16, 0, 0) };
+    private readonly ListBox writerConflictList = new() { MaxHeight = 180 };
+    private readonly ListBox writerCandidateList = new() { MaxHeight = 180 };
+    private readonly Button resolveConflictButton = new() { Content = "選択した版を採用", Margin = new Thickness(0, 8, 0, 0) };
     private readonly CheckBox autoSync = new()
     {
         Content = "10 秒ごとに自動同期",
@@ -62,7 +66,8 @@ internal sealed class SyncWindow : Window
         Title = "P2P Sync";
         Width = 560;
         MinWidth = 420;
-        SizeToContent = SizeToContent.Height;
+        Height = 760;
+        MinHeight = 440;
         var panel = new StackPanel { Margin = new Thickness(24) };
         panel.Children.Add(new TextBlock { Text = "直接同期", FontSize = 24, FontWeight = FontWeights.SemiBold });
         AddPicker(panel, configButton, configLabel, "接続設定が未選択です");
@@ -85,7 +90,13 @@ internal sealed class SyncWindow : Window
         panel.Children.Add(loadWriterHistoryButton);
         panel.Children.Add(writerHistoryList);
         panel.Children.Add(restoreHistoryButton);
-        Content = panel;
+        panel.Children.Add(new TextBlock { Text = "競合の解決", FontSize = 18, Margin = new Thickness(0, 20, 0, 0) });
+        panel.Children.Add(loadWriterConflictsButton);
+        panel.Children.Add(writerConflictList);
+        panel.Children.Add(new TextBlock { Text = "採用する版", Margin = new Thickness(0, 8, 0, 0) });
+        panel.Children.Add(writerCandidateList);
+        panel.Children.Add(resolveConflictButton);
+        Content = new ScrollViewer { Content = panel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         RestorePreferences();
         var trayMenu = new System.Windows.Forms.ContextMenuStrip();
         trayMenu.Items.Add("画面を開く", null, (_, _) => ShowWindow());
@@ -132,6 +143,8 @@ internal sealed class SyncWindow : Window
                 writerConfiguration = picker.FileName;
                 writerConfigLabel.Text = writerConfiguration;
                 writerHistoryList.ItemsSource = null;
+                writerConflictList.ItemsSource = null;
+                writerCandidateList.ItemsSource = null;
                 SavePreferences();
             }
         });
@@ -143,12 +156,22 @@ internal sealed class SyncWindow : Window
                 writerState = picker.FolderName;
                 writerStateLabel.Text = writerState;
                 writerHistoryList.ItemsSource = null;
+                writerConflictList.ItemsSource = null;
+                writerCandidateList.ItemsSource = null;
                 SavePreferences();
             }
         });
         loadWriterHistoryButton.Click += async (_, _) => await LoadWriterHistory();
         writerHistoryList.SelectionChanged += (_, _) => UpdateControls();
         restoreHistoryButton.Click += async (_, _) => await RestoreWriterHistory();
+        loadWriterConflictsButton.Click += async (_, _) => await LoadWriterConflicts();
+        writerConflictList.SelectionChanged += (_, _) =>
+        {
+            writerCandidateList.ItemsSource = (writerConflictList.SelectedItem as SyncCore.WriterConflict)?.Versions;
+            UpdateControls();
+        };
+        writerCandidateList.SelectionChanged += (_, _) => UpdateControls();
+        resolveConflictButton.Click += async (_, _) => await ResolveWriterConflict();
         syncButton.Click += async (_, _) => await RunSync();
         cancelButton.Click += (_, _) =>
         {
@@ -296,8 +319,13 @@ internal sealed class SyncWindow : Window
         configButton.IsEnabled = destinationButton.IsEnabled = !syncing;
         writerConfigButton.IsEnabled = writerStateButton.IsEnabled = !syncing;
         loadWriterHistoryButton.IsEnabled = !syncing && writerConfiguration is not null && writerState is not null;
+        loadWriterConflictsButton.IsEnabled = loadWriterHistoryButton.IsEnabled;
         restoreHistoryButton.IsEnabled = loadWriterHistoryButton.IsEnabled
             && writerHistoryList.SelectedItem is SyncCore.WriterHistoryEntry { CurrentHeads.Length: 1 };
+        resolveConflictButton.IsEnabled = loadWriterConflictsButton.IsEnabled
+            && writerConflictList.SelectedItem is SyncCore.WriterConflict { Versions.Length: >= 2 } conflict
+            && !conflict.Versions.Any(version => version.Kind == "directory")
+            && writerCandidateList.SelectedItem is SyncCore.WriterConflictVersion;
         syncButton.IsEnabled = ready && !syncing;
         traySync.Enabled = ready && !syncing;
         tray.Text = syncing ? "P2P Sync - 同期中" : "P2P Sync";
@@ -437,6 +465,77 @@ internal sealed class SyncWindow : Window
             UpdateControls();
         }
     }
+
+    private async Task LoadWriterConflicts()
+    {
+        if (closing || syncing || writerConfiguration is not string config || writerState is not string state)
+        {
+            return;
+        }
+        syncing = true;
+        UpdateControls();
+        try
+        {
+            var loaded = await Task.Run(() => SyncCore.WriterConflicts(config, state));
+            if (loaded.Status == 0)
+            {
+                writerConflictList.ItemsSource = loaded.Entries;
+                writerCandidateList.ItemsSource = null;
+                result.Text = $"書き込みピアの未解決の競合 {loaded.Entries.Length} 件を読み込みました。";
+            }
+            else
+            {
+                result.Text = SyncCore.ErrorMessage(loaded.Status);
+            }
+        }
+        catch (Exception error) when (error is JsonException or DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
+        {
+            result.Text = "書き込みピアの競合を読み込めませんでした。";
+        }
+        finally
+        {
+            syncing = false;
+            UpdateControls();
+        }
+    }
+
+    private async Task ResolveWriterConflict()
+    {
+        if (closing || syncing || writerConfiguration is not string config || writerState is not string state
+            || writerConflictList.SelectedItem is not SyncCore.WriterConflict conflict
+            || writerCandidateList.SelectedItem is not SyncCore.WriterConflictVersion choice
+            || conflict.Versions.Length < 2 || conflict.Versions.Any(version => version.Kind == "directory")
+            || !conflict.Versions.Contains(choice))
+        {
+            return;
+        }
+        if (MessageBox.Show(this,
+            $"{choice} を採用します。表示された {conflict.Versions.Length} 件の候補が変わっていれば解決は拒否されます。",
+            "競合の解決", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+        {
+            return;
+        }
+        syncing = true;
+        UpdateControls();
+        try
+        {
+            var status = await Task.Run(() => SyncCore.ResolveWriterConflict(config, state,
+                choice.Id, conflict.Versions.Select(version => version.Id).ToArray()));
+            result.Text = status == 0 ? "選択した版を採用する同期変更を記録しました。" :
+                status == 5 ? "競合候補が変わったか、採用版の本体を確認できません。競合を読み直してください。" : SyncCore.ErrorMessage(status);
+            writerConflictList.ItemsSource = null;
+            writerCandidateList.ItemsSource = null;
+        }
+        catch (Exception error) when (error is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
+        {
+            result.Text = "競合解決処理を読み込めませんでした。";
+        }
+        finally
+        {
+            syncing = false;
+            UpdateControls();
+        }
+    }
 }
 
 internal static class SyncCore
@@ -510,6 +609,23 @@ internal static class SyncCore
             (CurrentHeads.Length == 1 ? "" : " · 現在の版が競合中");
     }
 
+    internal sealed record WriterConflictVersion(
+        [property: JsonPropertyName("id")] string Id,
+        [property: JsonPropertyName("name")] string? Name,
+        [property: JsonPropertyName("kind")] string Kind)
+    {
+        public override string ToString() =>
+            $"{Name ?? "削除"} · {Id[..12]} · {(Kind == "deleted" ? "削除" : Kind == "directory" ? "フォルダー" : "ファイル")}";
+    }
+
+    internal sealed record WriterConflict(
+        [property: JsonPropertyName("versions")] WriterConflictVersion[] Versions)
+    {
+        public override string ToString() =>
+            string.Join(" / ", Versions.Select(version => version.Name ?? "削除")) +
+            $" · {Versions.Length} 件の候補";
+    }
+
     private sealed record SyncDetails(
         [property: JsonPropertyName("originals")] ProtectedOriginal[] Originals,
         [property: JsonPropertyName("conflicts")] FileConflict[] Conflicts,
@@ -571,6 +687,33 @@ internal static class SyncCore
             reviewedBytes, (nuint)reviewedBytes.Length);
     }
 
+    internal static (int Status, WriterConflict[] Entries) WriterConflicts(string config, string state)
+    {
+        var configBytes = Encoding.UTF8.GetBytes(config);
+        var stateBytes = Encoding.UTF8.GetBytes(state);
+        byte[]? json = null;
+        var status = WriterConflictsNative(configBytes, (nuint)configBytes.Length,
+            stateBytes, (nuint)stateBytes.Length, (_, data, length) =>
+            {
+                if (length > int.MaxValue) return;
+                json = new byte[(int)length];
+                Marshal.Copy(data, json, 0, json.Length);
+            }, IntPtr.Zero);
+        return status != 0 || json is null ? (status == 0 ? 6 : status, []) :
+            (0, JsonSerializer.Deserialize<WriterConflict[]>(json) ?? []);
+    }
+
+    internal static int ResolveWriterConflict(string config, string state, string choice, string[] reviewed)
+    {
+        var configBytes = Encoding.UTF8.GetBytes(config);
+        var stateBytes = Encoding.UTF8.GetBytes(state);
+        var choiceBytes = Encoding.UTF8.GetBytes(choice);
+        var reviewedBytes = JsonSerializer.SerializeToUtf8Bytes(reviewed);
+        return WriterResolveNative(configBytes, (nuint)configBytes.Length,
+            stateBytes, (nuint)stateBytes.Length, choiceBytes, (nuint)choiceBytes.Length,
+            reviewedBytes, (nuint)reviewedBytes.Length);
+    }
+
     internal static string ErrorMessage(int status) => status switch
     {
         1 or 2 => "接続設定または保存先を確認してください。",
@@ -602,4 +745,14 @@ internal static class SyncCore
     private static extern int WriterRestoreNative(
         byte[] config, nuint configLength, byte[] state, nuint stateLength,
         byte[] archive, nuint archiveLength, byte[] reviewed, nuint reviewedLength);
+
+    [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_writer_conflicts", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int WriterConflictsNative(
+        byte[] config, nuint configLength, byte[] state, nuint stateLength,
+        OriginalsCallback callback, IntPtr context);
+
+    [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_writer_resolve", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int WriterResolveNative(
+        byte[] config, nuint configLength, byte[] state, nuint stateLength,
+        byte[] choice, nuint choiceLength, byte[] reviewed, nuint reviewedLength);
 }

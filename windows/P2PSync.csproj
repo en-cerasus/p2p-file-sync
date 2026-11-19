@@ -10,7 +10,7 @@
   <ItemGroup>
     <None Include="../target/release/p2p_sync_core.dll"
           Link="p2p_sync_core.dll"
-          CopyToOutputDirectory="PreserveNewest"
-          CopyToPublishDirectory="PreserveNewest" />
+          CopyToOutputDirectory="Always"
+          CopyToPublishDirectory="Always" />
   </ItemGroup>
 </Project>
