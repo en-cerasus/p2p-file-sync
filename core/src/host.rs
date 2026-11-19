@@ -517,6 +517,17 @@ impl Sender {
 
     /// Import signed peer changes and verified content into this sender's cache.
     pub fn catch_up(&mut self, configuration: &Path) -> Result<usize, HostError> {
+        self.catch_up_cancellable(configuration, &|| false)
+    }
+
+    pub fn catch_up_cancellable(
+        &mut self,
+        configuration: &Path,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<usize, HostError> {
+        if cancelled() {
+            return Err(HostError::Direct(DirectError::Cancelled));
+        }
         let config: Config =
             serde_json::from_slice(&read_bounded(configuration, MAX_CONFIG_BYTES)?)
                 .map_err(|_| HostError::Configuration)?;
@@ -547,7 +558,10 @@ impl Sender {
         let mut first_error = None;
         let mut succeeded = false;
         for peer in &peers {
-            match direct::pull_serving_cache(
+            if cancelled() {
+                return Err(HostError::Direct(DirectError::Cancelled));
+            }
+            match direct::pull_serving_cache_cancellable(
                 &client,
                 peer,
                 Duration::from_secs(15),
@@ -555,8 +569,12 @@ impl Sender {
                 &self.roster,
                 &chunks,
                 &self.completed,
+                cancelled,
             ) {
                 Ok(_) => succeeded = true,
+                Err(DirectError::Cancelled) => {
+                    return Err(HostError::Direct(DirectError::Cancelled));
+                }
                 Err(error) => {
                     first_error.get_or_insert(error);
                 }
@@ -564,6 +582,9 @@ impl Sender {
         }
         if !succeeded {
             return Err(first_error.map_or(HostError::Configuration, HostError::Direct));
+        }
+        if cancelled() {
+            return Err(HostError::Direct(DirectError::Cancelled));
         }
         Ok(self.store.event_order().len().saturating_sub(before))
     }

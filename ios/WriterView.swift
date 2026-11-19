@@ -12,6 +12,8 @@ struct WriterView: View {
     @State private var pickingFolder = false
     @State private var refreshing = false
     @State private var catchingUp = false
+    @State private var catchUpStopping = false
+    @State private var catchUpCancellation: SyncCore.Cancellation?
     @State private var inspecting = false
     @State private var serving = false
     @State private var cancellation: SyncCore.Cancellation?
@@ -48,6 +50,11 @@ struct WriterView: View {
             Section("配信") {
                 Button("他のピアから取得") { Task { await catchUp() } }
                     .disabled(configFolder == nil || serving || refreshing || catchingUp || inspecting)
+                Button("取得を中断") {
+                    catchUpCancellation?.cancel()
+                    catchUpStopping = true
+                }
+                    .disabled(!catchingUp || catchUpStopping)
                 if catchingUp { ProgressView("ピアから取得しています…") }
                 Button("配信を開始") { startServer() }
                     .disabled(configFolder == nil || serving || refreshing || catchingUp || inspecting || phase != .active)
@@ -115,9 +122,17 @@ struct WriterView: View {
             prepareSourceFolder()
         }
         .onChange(of: phase) { _, newPhase in
-            if newPhase != .active { stopServer() }
+            if newPhase != .active {
+                stopServer()
+                catchUpCancellation?.cancel()
+                if catchingUp { catchUpStopping = true }
+            }
         }
-        .onDisappear { stopServer() }
+        .onDisappear {
+            stopServer()
+            catchUpCancellation?.cancel()
+            if catchingUp { catchUpStopping = true }
+        }
         .fileImporter(isPresented: $pickingFolder, allowedContentTypes: [.folder]) { selection in
             switch selection {
             case .success(let url): selectConfigFolder(url)
@@ -250,8 +265,15 @@ struct WriterView: View {
     private func catchUp() async {
         guard !catchingUp, !refreshing, !inspecting, !serving, let configFolder else { return }
         catchingUp = true
+        catchUpStopping = false
+        let stop = SyncCore.Cancellation()
+        catchUpCancellation = stop
         result = ""
-        defer { catchingUp = false }
+        defer {
+            catchingUp = false
+            catchUpStopping = false
+            catchUpCancellation = nil
+        }
         do {
             let state = try stateFolder()
             let added = try await Task.detached(priority: .utility) {
@@ -262,7 +284,7 @@ struct WriterView: View {
                 return try SyncCore.catchUpWriter(
                     configuration: configFolder.appendingPathComponent("server.json"),
                     state: state,
-                    peers: configFolder.appendingPathComponent("direct.json")
+                    peers: configFolder.appendingPathComponent("direct.json"), cancellation: stop
                 )
             }.value
             result = "他のピアから変更 \(added) 件を取得しました。"
@@ -410,6 +432,7 @@ struct WriterView: View {
             case .writerFailed(let code) where code == 3: return "配信状態またはファイルへアクセスできませんでした。"
             case .writerFailed(let code) where code == 4: return "証明書または秘密鍵を読み込めませんでした。"
             case .writerFailed(let code) where code == 5: return "表示後に状態が変わったか、本体が不足しています。再読み込みしてください。"
+            case .writerFailed(let code) where code == 7: return "取得を中断しました。次回は保存済みのデータを再利用します。"
             default: return "配信処理に失敗しました。"
             }
         }

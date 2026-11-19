@@ -1186,7 +1186,8 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
 fn generated_writers_use_distinct_credentials_and_share_their_changes() {
     use p2p_sync_core::{
         host::{pull_from_config, Sender},
-        p2p_sync_writer_catch_up, p2p_sync_writer_conflicts, p2p_sync_writer_resolve,
+        p2p_sync_writer_catch_up, p2p_sync_writer_catch_up_v2,
+        p2p_sync_writer_conflicts, p2p_sync_writer_resolve,
     };
 
     let temporary = tempfile::tempdir().unwrap();
@@ -1254,6 +1255,20 @@ fn generated_writers_use_distinct_credentials_and_share_their_changes() {
         };
         (status, count)
     };
+    extern "C" fn stop_now(_: *mut std::ffi::c_void) -> u8 { 1 }
+    let config_bytes = second_config.to_str().unwrap().as_bytes();
+    let state_bytes = second_state.to_str().unwrap().as_bytes();
+    let peers_bytes = peer_config.to_str().unwrap().as_bytes();
+    let mut cancelled_count = u64::MAX;
+    assert_eq!(unsafe {
+        p2p_sync_writer_catch_up_v2(
+            config_bytes.as_ptr(), config_bytes.len(),
+            state_bytes.as_ptr(), state_bytes.len(),
+            peers_bytes.as_ptr(), peers_bytes.len(),
+            &mut cancelled_count, Some(stop_now), std::ptr::null_mut(),
+        )
+    }, 7);
+    assert_eq!(cancelled_count, 0);
     let left_file = root.join("left.tja");
     let right_file = root.join("right.tja");
     std::fs::write(&left_file, b"left edit").unwrap();

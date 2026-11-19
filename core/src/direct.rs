@@ -135,7 +135,7 @@ impl<S: io::Write> io::Write for CancellableStream<'_, S> {
     }
 }
 
-pub(crate) fn pull_serving_cache(
+pub(crate) fn pull_serving_cache_cancellable(
     client: &Client,
     peer: &PeerEndpoint,
     timeout: Duration,
@@ -143,13 +143,27 @@ pub(crate) fn pull_serving_cache(
     roster: &Roster,
     chunks: &BlobStore,
     completed: &BlobStore,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<usize, DirectError> {
-    let mut connection = connect(client, peer, timeout)?;
-    let added = sync_serving_cache(&mut connection, store, roster, chunks, completed)
-        .map_err(DirectError::Sync)?;
-    exchange_confirmations(&mut connection, store, roster).map_err(DirectError::Wire)?;
-    finish_session(&mut connection).map_err(DirectError::Wire)?;
-    Ok(added)
+    if cancelled() {
+        return Err(DirectError::Cancelled);
+    }
+    let result = (|| {
+        let mut connection = CancellableStream {
+            inner: connect(client, peer, timeout)?,
+            cancelled,
+        };
+        let added = sync_serving_cache(&mut connection, store, roster, chunks, completed)
+            .map_err(DirectError::Sync)?;
+        exchange_confirmations(&mut connection, store, roster).map_err(DirectError::Wire)?;
+        finish_session(&mut connection).map_err(DirectError::Wire)?;
+        Ok(added)
+    })();
+    if cancelled() {
+        Err(DirectError::Cancelled)
+    } else {
+        Ok(result)
+    }
 }
 
 fn connect(

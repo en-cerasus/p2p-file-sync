@@ -151,6 +151,13 @@ int32_t p2p_sync_writer_catch_up(const uint8_t *config, size_t config_len,
                                 const uint8_t *state, size_t state_len,
                                 const uint8_t *peers, size_t peers_len,
                                 uint64_t *events_added);
+/* The cancellable form returns 7 when interrupted. Completed chunks and
+   accepted events remain available for the next attempt. */
+int32_t p2p_sync_writer_catch_up_v2(const uint8_t *config, size_t config_len,
+                                   const uint8_t *state, size_t state_len,
+                                   const uint8_t *peers, size_t peers_len,
+                                   uint64_t *events_added,
+                                   p2p_sync_cancel_callback cancellation, void *context);
 
 #ifdef __cplusplus
 }

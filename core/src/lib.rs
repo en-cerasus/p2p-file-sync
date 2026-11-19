@@ -637,6 +637,53 @@ pub unsafe extern "C" fn p2p_sync_writer_catch_up(
     peers_len: usize,
     events_added: *mut u64,
 ) -> i32 {
+    unsafe {
+        writer_catch_up(
+            config, config_len, state, state_len, peers, peers_len,
+            events_added, None, std::ptr::null_mut(),
+        )
+    }
+}
+
+/// Cancellable writer catch-up. Returns 7 on a requested stop.
+///
+/// # Safety
+/// Path pointers must remain readable, `events_added` must be writable, and
+/// the callback must not unwind. `context` must outlive this call.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_writer_catch_up_v2(
+    config: *const u8,
+    config_len: usize,
+    state: *const u8,
+    state_len: usize,
+    peers: *const u8,
+    peers_len: usize,
+    events_added: *mut u64,
+    cancellation: Option<CancellationCallback>,
+    context: *mut std::ffi::c_void,
+) -> i32 {
+    if cancellation.is_none() {
+        return INVALID_ARGUMENT;
+    }
+    unsafe {
+        writer_catch_up(
+            config, config_len, state, state_len, peers, peers_len,
+            events_added, cancellation, context,
+        )
+    }
+}
+
+unsafe fn writer_catch_up(
+    config: *const u8,
+    config_len: usize,
+    state: *const u8,
+    state_len: usize,
+    peers: *const u8,
+    peers_len: usize,
+    events_added: *mut u64,
+    cancellation: Option<CancellationCallback>,
+    context: *mut std::ffi::c_void,
+) -> i32 {
     if events_added.is_null() {
         return INVALID_ARGUMENT;
     }
@@ -649,9 +696,13 @@ pub unsafe extern "C" fn p2p_sync_writer_catch_up(
         return INVALID_ARGUMENT;
     };
     match std::panic::catch_unwind(|| {
+        let cancelled = || cancellation.is_some_and(|check| check(context) != 0);
+        if cancelled() {
+            return Err(7);
+        }
         let mut writer = host::Sender::open(config, state).map_err(host_error_code)?;
         writer
-            .catch_up(std::path::Path::new(peers))
+            .catch_up_cancellable(std::path::Path::new(peers), &cancelled)
             .map_err(host_error_code)
     }) {
         Ok(Ok(count)) => {
@@ -768,6 +819,7 @@ fn host_error_code(error: host::HostError) -> i32 {
         host::HostError::Configuration | host::HostError::InactiveGeneration => 2,
         host::HostError::Io(_) | host::HostError::Store(_) => 3,
         host::HostError::Tls(_) => 4,
+        host::HostError::Direct(direct::DirectError::Cancelled) => 7,
         _ => 5,
     }
 }

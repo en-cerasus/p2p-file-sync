@@ -303,19 +303,32 @@ enum SyncCore {
         return try JSONDecoder().decode(WriterSummary.self, from: json)
     }
 
-    static func catchUpWriter(configuration: URL, state: URL, peers: URL) throws -> UInt64 {
+    private struct WriterCatchUpContext {
+        let cancellation: Cancellation
+    }
+
+    static func catchUpWriter(configuration: URL, state: URL, peers: URL,
+                              cancellation: Cancellation) throws -> UInt64 {
         let config = Array(configuration.path.utf8)
         let storage = Array(state.path.utf8)
         let peerConfig = Array(peers.path.utf8)
         var added: UInt64 = 0
-        let status = config.withUnsafeBufferPointer { configBytes in
-            storage.withUnsafeBufferPointer { stateBytes in
-                peerConfig.withUnsafeBufferPointer { peerBytes in
-                    p2p_sync_writer_catch_up(
-                        configBytes.baseAddress, configBytes.count,
-                        stateBytes.baseAddress, stateBytes.count,
-                        peerBytes.baseAddress, peerBytes.count, &added
-                    )
+        var callbacks = WriterCatchUpContext(cancellation: cancellation)
+        let status = withUnsafeMutablePointer(to: &callbacks) { context in
+            config.withUnsafeBufferPointer { configBytes in
+                storage.withUnsafeBufferPointer { stateBytes in
+                    peerConfig.withUnsafeBufferPointer { peerBytes in
+                        p2p_sync_writer_catch_up_v2(
+                            configBytes.baseAddress, configBytes.count,
+                            stateBytes.baseAddress, stateBytes.count,
+                            peerBytes.baseAddress, peerBytes.count, &added,
+                            { context in
+                                guard let context else { return 0 }
+                                return context.assumingMemoryBound(to: WriterCatchUpContext.self)
+                                    .pointee.cancellation.isCancelled() ? 1 : 0
+                            }, UnsafeMutableRawPointer(context)
+                        )
+                    }
                 }
             }
         }
