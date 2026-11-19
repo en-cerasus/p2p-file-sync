@@ -53,6 +53,9 @@ internal sealed class SyncWindow : Window
     private readonly Button startServerButton = new() { Content = "配信を開始", Margin = new Thickness(0, 12, 0, 0) };
     private readonly Button stopServerButton = new() { Content = "配信を停止", Margin = new Thickness(0, 8, 0, 0) };
     private readonly TextBlock serverStatus = new() { Text = "配信停止中", TextWrapping = TextWrapping.Wrap };
+    private readonly TextBlock writerStatus = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
+    private readonly TextBlock historyStatus = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
+    private readonly TextBlock conflictStatus = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
     private readonly CheckBox autoSync = new()
     {
         Content = "10 秒ごとに自動同期",
@@ -82,6 +85,12 @@ internal sealed class SyncWindow : Window
         Height = 760;
         MinHeight = 440;
         var panel = new StackPanel { Margin = new Thickness(24) };
+        foreach (var action in new[] { refreshWriterButton, startServerButton, stopServerButton,
+            loadWriterHistoryButton, restoreHistoryButton, deleteHistoryButton,
+            deleteAllHistoryButton, loadWriterConflictsButton, resolveConflictButton })
+        {
+            action.HorizontalAlignment = HorizontalAlignment.Left;
+        }
         panel.Children.Add(new TextBlock { Text = "直接同期", FontSize = 24, FontWeight = FontWeights.SemiBold });
         AddPicker(panel, configButton, configLabel, "接続設定が未選択です");
         AddPicker(panel, destinationButton, destinationLabel, "保存先が未選択です");
@@ -97,7 +106,7 @@ internal sealed class SyncWindow : Window
         panel.Children.Add(conflicts);
         history.Content = historyList;
         panel.Children.Add(history);
-        panel.Children.Add(new TextBlock { Text = "履歴の復元", FontSize = 18, Margin = new Thickness(0, 20, 0, 0) });
+        panel.Children.Add(new TextBlock { Text = "共有・配信・履歴", FontSize = 18, Margin = new Thickness(0, 20, 0, 0) });
         AddPicker(panel, writerConfigButton, writerConfigLabel, "書き込みピア設定が未選択です");
         AddPicker(panel, writerStateButton, writerStateLabel, "状態フォルダーが未選択です");
         AddPicker(panel, writerSourceButton, writerSourceLabel, "共有元フォルダーが未選択です");
@@ -105,17 +114,21 @@ internal sealed class SyncWindow : Window
         panel.Children.Add(startServerButton);
         panel.Children.Add(stopServerButton);
         panel.Children.Add(serverStatus);
+        panel.Children.Add(writerStatus);
+        panel.Children.Add(new TextBlock { Text = "履歴", FontSize = 18, Margin = new Thickness(0, 20, 0, 0) });
         panel.Children.Add(loadWriterHistoryButton);
         panel.Children.Add(writerHistoryList);
         panel.Children.Add(restoreHistoryButton);
         panel.Children.Add(deleteHistoryButton);
         panel.Children.Add(deleteAllHistoryButton);
+        panel.Children.Add(historyStatus);
         panel.Children.Add(new TextBlock { Text = "競合の解決", FontSize = 18, Margin = new Thickness(0, 20, 0, 0) });
         panel.Children.Add(loadWriterConflictsButton);
         panel.Children.Add(writerConflictList);
         panel.Children.Add(new TextBlock { Text = "採用する版", Margin = new Thickness(0, 8, 0, 0) });
         panel.Children.Add(writerCandidateList);
         panel.Children.Add(resolveConflictButton);
+        panel.Children.Add(conflictStatus);
         Content = new ScrollViewer { Content = panel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         RestorePreferences();
         var trayMenu = new System.Windows.Forms.ContextMenuStrip();
@@ -169,6 +182,7 @@ internal sealed class SyncWindow : Window
                 writerHistoryList.ItemsSource = null;
                 writerConflictList.ItemsSource = null;
                 writerCandidateList.ItemsSource = null;
+                writerStatus.Text = historyStatus.Text = conflictStatus.Text = "";
                 SavePreferences();
             }
         });
@@ -182,6 +196,7 @@ internal sealed class SyncWindow : Window
                 writerHistoryList.ItemsSource = null;
                 writerConflictList.ItemsSource = null;
                 writerCandidateList.ItemsSource = null;
+                writerStatus.Text = historyStatus.Text = conflictStatus.Text = "";
                 SavePreferences();
             }
         });
@@ -192,6 +207,7 @@ internal sealed class SyncWindow : Window
             {
                 writerSource = picker.FolderName;
                 writerSourceLabel.Text = writerSource;
+                writerStatus.Text = "";
                 SavePreferences();
             }
         });
@@ -454,19 +470,26 @@ internal sealed class SyncWindow : Window
             return;
         }
         syncing = true;
-        result.Text = "共有元を確認しています…";
+        writerStatus.Text = "共有元を確認しています…";
         UpdateControls();
         try
         {
             var scan = await Task.Run(() => SyncCore.RefreshWriterTree(config, state, source));
-            result.Text = scan.Status == 0
+            writerStatus.Text = scan.Status == 0
                 ? $"共有元を登録・更新しました。ファイル {scan.Summary.Files} 件、フォルダー {scan.Summary.Directories} 件、対象外 {scan.Summary.Skipped} 件。見つからないファイルは削除しません。"
                 : scan.Status == 2 ? "共有元に設定ファイルや状態フォルダーが含まれています。別のフォルダーを選択してください。"
                 : SyncCore.ErrorMessage(scan.Status);
+            if (scan.Status == 0)
+            {
+                writerHistoryList.ItemsSource = null;
+                writerConflictList.ItemsSource = null;
+                writerCandidateList.ItemsSource = null;
+                historyStatus.Text = conflictStatus.Text = "";
+            }
         }
         catch (Exception error) when (error is JsonException or DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
         {
-            result.Text = "共有元の登録・更新処理を読み込めませんでした。";
+            writerStatus.Text = "共有元の登録・更新処理を読み込めませんでした。";
         }
         finally
         {
@@ -539,16 +562,17 @@ internal sealed class SyncWindow : Window
             if (loaded.Status == 0)
             {
                 writerHistoryList.ItemsSource = loaded.Entries;
-                result.Text = $"書き込みピアの履歴 {loaded.Entries.Length} 件を読み込みました。";
+                historyStatus.Text = $"書き込みピアの履歴 {loaded.Entries.Length} 件を読み込みました。";
             }
             else
             {
-                result.Text = SyncCore.ErrorMessage(loaded.Status);
+                writerHistoryList.ItemsSource = null;
+                historyStatus.Text = SyncCore.ErrorMessage(loaded.Status);
             }
         }
         catch (Exception error) when (error is JsonException or DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
         {
-            result.Text = "書き込みピアの履歴を読み込めませんでした。";
+            historyStatus.Text = "書き込みピアの履歴を読み込めませんでした。";
         }
         finally
         {
@@ -577,12 +601,12 @@ internal sealed class SyncWindow : Window
         try
         {
             var status = await Task.Run(() => SyncCore.RestoreWriterHistory(config, state, entry.Archive, entry.CurrentHeads[0]));
-            result.Text = status == 0 ? "履歴を新しい同期変更として復元しました。" : SyncCore.ErrorMessage(status);
+            historyStatus.Text = status == 0 ? "履歴を新しい同期変更として復元しました。" : SyncCore.ErrorMessage(status);
             writerHistoryList.ItemsSource = null;
         }
         catch (Exception error) when (error is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
         {
-            result.Text = "復元処理を読み込めませんでした。";
+            historyStatus.Text = "復元処理を読み込めませんでした。";
         }
         finally
         {
@@ -614,16 +638,16 @@ internal sealed class SyncWindow : Window
             if (status == 0)
             {
                 writerHistoryList.ItemsSource = null;
-                result.Text = $"履歴 {selected.Length} 件を削除しました。保護中の原本は保持されます。履歴を再読み込みしてください。";
+                historyStatus.Text = $"履歴 {selected.Length} 件を削除しました。保護中の原本は保持されます。履歴を再読み込みしてください。";
             }
             else
             {
-                result.Text = status == 5 ? "履歴が変更されました。再読み込みして選び直してください。" : SyncCore.ErrorMessage(status);
+                historyStatus.Text = status == 5 ? "履歴が変更されました。再読み込みして選び直してください。" : SyncCore.ErrorMessage(status);
             }
         }
         catch (Exception error) when (error is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
         {
-            result.Text = "履歴の削除処理を読み込めませんでした。";
+            historyStatus.Text = "履歴の削除処理を読み込めませんでした。";
         }
         finally
         {
@@ -647,16 +671,18 @@ internal sealed class SyncWindow : Window
             {
                 writerConflictList.ItemsSource = loaded.Entries;
                 writerCandidateList.ItemsSource = null;
-                result.Text = $"書き込みピアの未解決の競合 {loaded.Entries.Length} 件を読み込みました。";
+                conflictStatus.Text = $"書き込みピアの未解決の競合 {loaded.Entries.Length} 件を読み込みました。";
             }
             else
             {
-                result.Text = SyncCore.ErrorMessage(loaded.Status);
+                writerConflictList.ItemsSource = null;
+                writerCandidateList.ItemsSource = null;
+                conflictStatus.Text = SyncCore.ErrorMessage(loaded.Status);
             }
         }
         catch (Exception error) when (error is JsonException or DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
         {
-            result.Text = "書き込みピアの競合を読み込めませんでした。";
+            conflictStatus.Text = "書き込みピアの競合を読み込めませんでした。";
         }
         finally
         {
@@ -687,14 +713,19 @@ internal sealed class SyncWindow : Window
         {
             var status = await Task.Run(() => SyncCore.ResolveWriterConflict(config, state,
                 choice.Id, conflict.Versions.Select(version => version.Id).ToArray()));
-            result.Text = status == 0 ? "選択した版を採用する同期変更を記録しました。" :
+            conflictStatus.Text = status == 0 ? "選択した版を採用する同期変更を記録しました。" :
                 status == 5 ? "競合候補が変わったか、採用版の本体を確認できません。競合を読み直してください。" : SyncCore.ErrorMessage(status);
             writerConflictList.ItemsSource = null;
             writerCandidateList.ItemsSource = null;
+            if (status == 0)
+            {
+                writerHistoryList.ItemsSource = null;
+                historyStatus.Text = "";
+            }
         }
         catch (Exception error) when (error is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
         {
-            result.Text = "競合解決処理を読み込めませんでした。";
+            conflictStatus.Text = "競合解決処理を読み込めませんでした。";
         }
         finally
         {
