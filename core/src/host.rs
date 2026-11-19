@@ -21,6 +21,7 @@ use crate::{
         BaselineError, CheckpointDataError, GenerationBaseline, GenerationTransition,
         TransitionError, MAX_TRANSITION_BYTES,
     },
+    local_target::{open_root, NewFileTarget},
     names::collision_key,
     projection::Projection,
     publish::{
@@ -334,6 +335,71 @@ impl Sender {
             &self.completed,
         )
         .map_err(HostError::Publish)
+    }
+
+    /// List locally issued, single-headed shared files whose exact source
+    /// name is absent. A missing parent or inaccessible directory is not
+    /// evidence of a deletion. The caller must still review each candidate.
+    pub fn missing_source_files(
+        &mut self,
+        root: &Path,
+    ) -> Result<Vec<(Vec<String>, EventId)>, HostError> {
+        let _lock = self.lock_state()?;
+        let root = self.validate_source_root(root)?;
+        self.store.refresh().map_err(HostError::Store)?;
+        let directory = open_root(&root).map_err(HostError::Io)?;
+        let replica = self.store.replica();
+        let projection = Projection::new(replica);
+        let local_peer = self.signer.verifying_key().to_bytes();
+        let mut missing = Vec::new();
+        for object in replica.objects() {
+            let mut heads = replica.heads(object);
+            let Some(head) = heads.next() else { continue };
+            if heads.next().is_some()
+                || head.id.peer != local_peer
+                || !head.change.entry().is_some_and(|entry| matches!(entry.kind, EntryKind::File(_)))
+                || self.store.signed_event(head.id).is_none()
+            {
+                continue;
+            }
+            let Ok(path) = projection.path(object) else { continue };
+            let target = match NewFileTarget::existing(&directory, &path) {
+                Ok(target) => target,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(HostError::Io(error)),
+            };
+            if target.name_is_vacant().map_err(HostError::Io)? {
+                missing.push((path.into_iter().map(str::to_owned).collect(), head.id));
+            }
+        }
+        missing.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(missing)
+    }
+
+    /// Publish a tombstone only for the version and missing source name the
+    /// user reviewed. This leaves the physical source folder untouched.
+    pub fn delete_missing_source_file(
+        &mut self,
+        root: &Path,
+        shared_path: &str,
+        reviewed: EventId,
+    ) -> Result<EventId, HostError> {
+        let _lock = self.lock_state()?;
+        let root = self.validate_source_root(root)?;
+        let current = self.shared_head(shared_path, false)?;
+        if current != reviewed || current.peer != self.signer.verifying_key().to_bytes() {
+            return Err(HostError::Publish(PublishError::StaleBase));
+        }
+        let object = self.store.replica().get(current).ok_or(HostError::Publish(PublishError::StaleBase))?.object;
+        let path = Projection::new(self.store.replica()).path(object)
+            .map_err(|_| HostError::Publish(PublishError::StaleBase))?;
+        let directory = open_root(&root).map_err(HostError::Io)?;
+        let target = NewFileTarget::existing(&directory, &path).map_err(HostError::Io)?;
+        if !target.name_is_vacant().map_err(HostError::Io)? {
+            return Err(HostError::Publish(PublishError::StaleBase));
+        }
+        revise_file(None, &mut self.store, &self.roster, &self.signer, &self.completed, current)
+            .map_err(HostError::Publish)
     }
 
     /// Issue a change for a single existing, non-conflicted shared file.

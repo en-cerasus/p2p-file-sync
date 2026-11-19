@@ -525,7 +525,8 @@ fn writer_ffi_listener_serves_and_stops_on_request() {
 #[test]
 fn writer_ffi_refreshes_only_a_safe_selected_source() {
     use p2p_sync_core::{
-        host::Sender, p2p_sync_writer_protected_originals, p2p_sync_writer_refresh_tree,
+        host::Sender, p2p_sync_writer_delete_missing_file, p2p_sync_writer_missing_files,
+        p2p_sync_writer_protected_originals, p2p_sync_writer_refresh_tree,
     };
     let root = tempfile::tempdir().unwrap();
     let setup = root.path().join("setup");
@@ -592,6 +593,42 @@ fn writer_ffi_refreshes_only_a_safe_selected_source() {
     assert_eq!(writer.history().unwrap().as_array().unwrap().len(), 1);
     std::fs::remove_file(source.join("song.tja")).unwrap();
     assert_eq!(refresh(&source).0, 0);
+    let source_bytes = source.to_str().unwrap().as_bytes();
+    let mut missing_json = Vec::new();
+    assert_eq!(unsafe {
+        p2p_sync_writer_missing_files(
+            config_bytes.as_ptr(), config_bytes.len(),
+            state_bytes.as_ptr(), state_bytes.len(),
+            source_bytes.as_ptr(), source_bytes.len(),
+            Some(capture), (&mut missing_json as *mut Vec<u8>).cast(),
+        )
+    }, 0);
+    let missing: serde_json::Value = serde_json::from_slice(&missing_json).unwrap();
+    assert_eq!(missing.as_array().unwrap().len(), 1);
+    assert_eq!(missing[0]["path"], serde_json::json!(["song.tja"]));
+    let head = missing[0]["head"].as_str().unwrap();
+    let path = b"song.tja";
+    let delete = |reviewed: &str| unsafe {
+        p2p_sync_writer_delete_missing_file(
+            config_bytes.as_ptr(), config_bytes.len(),
+            state_bytes.as_ptr(), state_bytes.len(),
+            source_bytes.as_ptr(), source_bytes.len(),
+            path.as_ptr(), path.len(), reviewed.as_ptr(), reviewed.len(),
+        )
+    };
+    std::fs::write(source.join("song.tja"), b"local reappeared").unwrap();
+    assert_eq!(delete(head), 5);
+    std::fs::remove_file(source.join("song.tja")).unwrap();
+    assert_eq!(delete(&format!("{}:999", &head[..64])), 5);
+    assert_eq!(delete(head), 0);
+    assert_eq!(delete(head), 5);
+    assert!(writer.missing_source_files(&source).unwrap().is_empty());
+    std::fs::create_dir(source.join("nested")).unwrap();
+    std::fs::write(source.join("nested/other.tja"), b"nested").unwrap();
+    assert_eq!(refresh(&source).0, 0);
+    std::fs::remove_file(source.join("nested/other.tja")).unwrap();
+    std::fs::remove_dir(source.join("nested")).unwrap();
+    assert!(writer.missing_source_files(&source).unwrap().is_empty());
     assert!(writer.conflicts().unwrap().is_empty());
 }
 

@@ -149,6 +149,22 @@ int32_t p2p_sync_writer_refresh_tree(const uint8_t *config, size_t config_len,
                                      const uint8_t *source, size_t source_len,
                                      p2p_sync_originals_callback callback, void *context);
 
+/* Review locally issued files absent from an accessible source parent. The callback JSON is
+   an array of {path: [components], head: "<peer>:<sequence>"}. A missing
+   source root or parent is not treated as proof of deletion. */
+int32_t p2p_sync_writer_missing_files(const uint8_t *config, size_t config_len,
+                                      const uint8_t *state, size_t state_len,
+                                      const uint8_t *source, size_t source_len,
+                                      p2p_sync_originals_callback callback, void *context);
+
+/* Publish a tombstone only while the selected head is current and its source
+   name remains absent. This leaves the local source tree untouched. */
+int32_t p2p_sync_writer_delete_missing_file(const uint8_t *config, size_t config_len,
+                                            const uint8_t *state, size_t state_len,
+                                            const uint8_t *source, size_t source_len,
+                                            const uint8_t *shared_path, size_t shared_path_len,
+                                            const uint8_t *reviewed, size_t reviewed_len);
+
 /* Fetch signed peer changes and verified contents into a writer's serving
    cache. Peer endpoints come from the selected direct.json. On success,
    events_added receives the number of newly imported events. */

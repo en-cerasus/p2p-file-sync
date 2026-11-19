@@ -655,6 +655,89 @@ pub unsafe extern "C" fn p2p_sync_writer_refresh_tree(
     }
 }
 
+/// List reviewed deletion candidates. The callback receives a JSON array of
+/// {path: [components], head: "<peer>:<sequence>"}. Only files whose parent
+/// can be opened and whose source name is vacant are included.
+///
+/// # Safety
+/// Paths and callback follow p2p_sync_writer_refresh_tree.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_writer_missing_files(
+    config: *const u8,
+    config_len: usize,
+    state: *const u8,
+    state_len: usize,
+    source: *const u8,
+    source_len: usize,
+    callback: Option<OriginalsCallback>,
+    context: *mut std::ffi::c_void,
+) -> i32 {
+    let Some(callback) = callback else { return INVALID_ARGUMENT };
+    let Some((config, state)) = (unsafe { writer_paths(config, config_len, state, state_len) }) else {
+        return INVALID_ARGUMENT;
+    };
+    let Some(source) = (unsafe { borrowed_text(source, source_len, 32_768) }) else {
+        return INVALID_ARGUMENT;
+    };
+    let result = std::panic::catch_unwind(|| {
+        let mut writer = host::Sender::open(config, state).map_err(host_error_code)?;
+        let files: Vec<_> = writer.missing_source_files(std::path::Path::new(source))
+            .map_err(host_error_code)?
+            .into_iter()
+            .map(|(path, head)| serde_json::json!({"path": path, "head": format_event_id(head)}))
+            .collect();
+        serde_json::to_vec(&files).map_err(|_| 6)
+    });
+    match result {
+        Ok(Ok(bytes)) => {
+            callback(context, bytes.as_ptr(), bytes.len());
+            OK
+        }
+        Ok(Err(code)) => code,
+        Err(_) => 6,
+    }
+}
+
+/// Publish a deletion only if the reviewed head is still current and the
+/// source name is still absent. Does not delete any local source file.
+///
+/// # Safety
+/// Every pointer/length pair must remain readable for the call.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_writer_delete_missing_file(
+    config: *const u8,
+    config_len: usize,
+    state: *const u8,
+    state_len: usize,
+    source: *const u8,
+    source_len: usize,
+    shared_path: *const u8,
+    shared_path_len: usize,
+    reviewed: *const u8,
+    reviewed_len: usize,
+) -> i32 {
+    let Some((config, state)) = (unsafe { writer_paths(config, config_len, state, state_len) }) else {
+        return INVALID_ARGUMENT;
+    };
+    let (Some(source), Some(shared_path), Some(reviewed)) = (
+        unsafe { borrowed_text(source, source_len, 32_768) },
+        unsafe { borrowed_text(shared_path, shared_path_len, 32_768) },
+        unsafe { borrowed_text(reviewed, reviewed_len, 128) },
+    ) else {
+        return INVALID_ARGUMENT;
+    };
+    let Some(reviewed) = parse_event_id(reviewed) else { return INVALID_ARGUMENT };
+    match std::panic::catch_unwind(|| {
+        let mut writer = host::Sender::open(config, state).map_err(host_error_code)?;
+        writer.delete_missing_source_file(std::path::Path::new(source), shared_path, reviewed)
+            .map_err(host_error_code)
+    }) {
+        Ok(Ok(_)) => OK,
+        Ok(Err(code)) => code,
+        Err(_) => 6,
+    }
+}
+
 /// Fetch signed peer events and verified contents into this writer's cache.
 ///
 /// # Safety
