@@ -86,6 +86,52 @@ impl FileTarget for AppleExistingTarget {
     }
 }
 
+#[cfg(target_vendor = "apple")]
+pub(crate) struct AppleMoveTarget {
+    source: NewFileTarget,
+    destination: AppleExistingTarget,
+}
+
+#[cfg(target_vendor = "apple")]
+impl AppleMoveTarget {
+    pub(crate) fn open(root: &Dir, before: &[&str], after: &[&str], intent: &FileIntent) -> io::Result<Self> {
+        Ok(Self {
+            source: NewFileTarget::existing(root, before)?,
+            destination: AppleExistingTarget::open(root, after, intent)?,
+        })
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+impl FileTarget for AppleMoveTarget {
+    fn inspect(&mut self, object: ObjectId) -> io::Result<Option<Blob>> {
+        self.destination.inspect(object)
+    }
+
+    fn replace_if_current(&mut self, intent: &FileIntent, replacement: Option<File>) -> io::Result<bool> {
+        self.destination.replace_if_current(intent, replacement)
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+impl crate::materialize::MoveFileTarget for AppleMoveTarget {
+    fn already_moved(&mut self, previous: Blob, desired: Blob, same_slot: bool) -> io::Result<bool> {
+        if same_slot || !self.source.name_is_vacant()? { return Ok(false); }
+        let current = self.destination.status()?;
+        Ok(current == Some(previous) || current == Some(desired))
+    }
+
+    fn move_if_current(&mut self, previous: Blob, same_slot: bool) -> io::Result<bool> {
+        if same_slot || !self.destination.target.name_is_vacant()? { return Ok(false); }
+        if self.source.inspect_name(&self.source.name)? != Some(previous) { return Ok(false); }
+        if !rename_exclusive(&self.source.parent, &self.source.name,
+                             &self.destination.target.parent, &self.destination.target.name)? {
+            return Ok(false);
+        }
+        Ok(self.destination.target.inspect_name(&self.destination.target.name)? == Some(previous))
+    }
+}
+
 impl NewFileTarget {
     pub(crate) fn name_is_vacant(&self) -> io::Result<bool> {
         let key = collision_key(&self.name).map_err(|_| invalid_name())?;
@@ -525,6 +571,7 @@ pub(crate) fn open_root(path: &Path) -> io::Result<Dir> {
 #[cfg(all(test, target_vendor = "apple"))]
 mod apple_tests {
     use super::*;
+    use crate::materialize::MoveFileTarget;
     use crate::replica::EventId;
 
     fn intent(desired: Option<Blob>) -> FileIntent {
@@ -577,5 +624,32 @@ mod apple_tests {
         assert!(target.replace_if_current(&intent, None).unwrap());
         assert!(!path.exists());
         assert!(!folder.path().join(update_backup(&intent)).exists());
+    }
+
+    #[test]
+    fn apple_move_rejects_an_occupied_name_and_can_then_update() {
+        let folder = tempfile::tempdir().unwrap();
+        let root = open_root(folder.path()).unwrap();
+        let source = folder.path().join("song.tja");
+        let destination = folder.path().join("moved.tja");
+        let replacement = folder.path().join("replacement");
+        std::fs::write(&source, b"old").unwrap();
+        std::fs::write(&destination, b"local edit").unwrap();
+        std::fs::write(&replacement, b"new").unwrap();
+        let previous = Blob { hash: crate::sha256(b"old"), length: 3 };
+        let desired = Blob { hash: crate::sha256(b"new"), length: 3 };
+        let intent = intent(Some(desired));
+        let mut target = AppleMoveTarget::open(&root, &["song.tja"], &["moved.tja"], &intent).unwrap();
+        assert!(!target.move_if_current(previous, false).unwrap());
+        assert_eq!(std::fs::read(&source).unwrap(), b"old");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"local edit");
+
+        std::fs::remove_file(&destination).unwrap();
+        assert!(target.move_if_current(previous, false).unwrap());
+        assert!(target.already_moved(previous, desired, false).unwrap());
+        assert!(!source.exists());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"old");
+        assert!(target.replace_if_current(&intent, Some(File::open(&replacement).unwrap())).unwrap());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"new");
     }
 }
