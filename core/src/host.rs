@@ -1027,7 +1027,7 @@ pub fn apply_local_file(configuration: &Path, state: &Path, destination: &Path,
     -> Result<crate::materialize::Recovery, HostError> {
     use crate::local_target::{AppleExistingTarget, AppleMoveTarget};
     let (mut store, blobs, root) = open_local_receiver(configuration, state, destination)?;
-    let object = hex::<32>(&reviewed.object)?;
+    let object = hex::<16>(&reviewed.object)?;
     let intent = store.pending_files().map_err(HostError::Materialize)?
         .into_iter().find(|intent| intent.object == object)
         .ok_or(HostError::Configuration)?;

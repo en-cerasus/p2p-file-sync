@@ -669,8 +669,8 @@ enum SyncCore {
         return PullSummary(
             eventsAdded: summary.sync.events_added, filesPublished: summary.sync.files_published,
             filesPresent: summary.sync.files_present,
-            filesBlocked: summary.sync.files_blocked - min(summary.sync.files_blocked, publishedLocally)
-                + recovered.blocked,
+            filesBlocked: max(summary.sync.files_blocked - min(summary.sync.files_blocked, publishedLocally),
+                              recovered.blocked),
             filesUpdated: summary.sync.files_updated + recovered.updated,
             filesRemoved: summary.sync.files_removed + recovered.removed,
             protectedFiles: summary.protected_files, protectedBytes: summary.protected_bytes,
