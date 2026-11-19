@@ -20,6 +20,72 @@ pub(crate) struct NewFileTarget {
     name: String,
 }
 
+/// Apple filesystem operations are only safe to invoke inside a Swift
+/// NSFileCoordinator accessor for the affected application-owned URLs.
+#[cfg(target_vendor = "apple")]
+pub(crate) struct AppleExistingTarget {
+    target: NewFileTarget,
+    intent: FileIntent,
+}
+
+#[cfg(target_vendor = "apple")]
+impl AppleExistingTarget {
+    pub(crate) fn open(root: &Dir, components: &[&str], intent: &FileIntent) -> io::Result<Self> {
+        Ok(Self { target: NewFileTarget::existing(root, components)?, intent: intent.clone() })
+    }
+
+    fn status(&self) -> io::Result<Option<Blob>> {
+        let current = self.target.inspect_name(&self.target.name)?;
+        let backup = update_backup(&self.intent);
+        let saved = self.target.inspect_name(&backup)?;
+        if saved.is_some() && saved != self.intent.previous {
+            return Ok(saved);
+        }
+        if current == self.intent.desired {
+            if saved == self.intent.previous && saved.is_some() {
+                self.target.parent.remove_file(&backup)?;
+                sync_directory(&self.target.parent)?;
+            }
+            return Ok(current);
+        }
+        if current.is_none() && saved == self.intent.previous && saved.is_some() {
+            return Ok(saved);
+        }
+        Ok(current)
+    }
+
+    fn replace(&self, replacement: Option<File>) -> io::Result<bool> {
+        let Some(previous) = self.intent.previous else { return Ok(false) };
+        if self.status()? != Some(previous) { return Ok(false); }
+        let backup = update_backup(&self.intent);
+        match (self.target.inspect_name(&self.target.name)?, self.target.inspect_name(&backup)?) {
+            (Some(current), None) if current == previous => {
+                if !rename_exclusive(&self.target.parent, &self.target.name,
+                                     &self.target.parent, &backup)? {
+                    return Ok(false);
+                }
+            }
+            (None, Some(saved)) if saved == previous => {}
+            _ => return Ok(false),
+        }
+        if self.target.inspect_name(&backup)? != Some(previous) { return Ok(false); }
+        if let Some(file) = replacement {
+            if !self.target.publish_at_vacant_name(file)? { return Ok(false); }
+        }
+        Ok(self.status()? == self.intent.desired)
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+impl FileTarget for AppleExistingTarget {
+    fn inspect(&mut self, _: ObjectId) -> io::Result<Option<Blob>> { self.status() }
+
+    fn replace_if_current(&mut self, intent: &FileIntent, replacement: Option<File>) -> io::Result<bool> {
+        if *intent != self.intent { return Ok(false); }
+        self.replace(replacement)
+    }
+}
+
 impl NewFileTarget {
     pub(crate) fn name_is_vacant(&self) -> io::Result<bool> {
         let key = collision_key(&self.name).map_err(|_| invalid_name())?;
@@ -348,13 +414,43 @@ fn measure(file: &mut cap_std::fs::File) -> io::Result<Blob> {
     })
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_vendor = "apple"))]
 fn update_backup(intent: &FileIntent) -> String {
     let mut context = Sha256::new();
     context.update(intent.object);
     context.update(intent.event.peer);
     context.update(intent.event.sequence.to_be_bytes());
     format!(".p2p-update-{:x}", context.finalize())
+}
+
+#[cfg(target_vendor = "apple")]
+fn sync_directory(directory: &Dir) -> io::Result<()> {
+    directory.try_clone()?.into_std_file().sync_all()
+}
+
+/// Darwin's exclusive rename leaves a concurrently created target intact.
+/// Callers first verify the source under file coordination and recheck the
+/// reserved name after this call. Unsupported volumes fail closed.
+#[cfg(target_vendor = "apple")]
+fn rename_exclusive(source: &Dir, old: &str, destination: &Dir, new: &str) -> io::Result<bool> {
+    use std::{ffi::CString, os::{fd::AsRawFd, raw::{c_char, c_int, c_uint}}};
+    unsafe extern "C" {
+        fn renameatx_np(old_fd: c_int, old_name: *const c_char,
+                        new_fd: c_int, new_name: *const c_char, flags: c_uint) -> c_int;
+    }
+    const RENAME_EXCL: c_uint = 0x00000004;
+    let old = CString::new(old).map_err(|_| invalid_name())?;
+    let new = CString::new(new).map_err(|_| invalid_name())?;
+    let result = unsafe {
+        renameatx_np(source.as_raw_fd(), old.as_ptr(), destination.as_raw_fd(), new.as_ptr(), RENAME_EXCL)
+    };
+    if result != 0 {
+        let error = io::Error::last_os_error();
+        return if error.kind() == io::ErrorKind::AlreadyExists { Ok(false) } else { Err(error) };
+    }
+    sync_directory(source)?;
+    sync_directory(destination)?;
+    Ok(true)
 }
 
 #[cfg(windows)]
@@ -424,4 +520,62 @@ fn invalid_name() -> io::Error {
 
 pub(crate) fn open_root(path: &Path) -> io::Result<Dir> {
     Dir::open_ambient_dir(path, cap_std::ambient_authority())
+}
+
+#[cfg(all(test, target_vendor = "apple"))]
+mod apple_tests {
+    use super::*;
+    use crate::replica::EventId;
+
+    fn intent(desired: Option<Blob>) -> FileIntent {
+        FileIntent {
+            object: [4; 16],
+            event: EventId { peer: [5; 32], sequence: 7 },
+            previous: Some(Blob { hash: crate::sha256(b"old"), length: 3 }),
+            desired,
+        }
+    }
+
+    #[test]
+    fn apple_update_resumes_from_backup_and_preserves_a_new_occupant() {
+        let folder = tempfile::tempdir().unwrap();
+        let root = open_root(folder.path()).unwrap();
+        let path = folder.path().join("song.tja");
+        let replacement = folder.path().join("replacement");
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::write(&replacement, b"new").unwrap();
+        let desired = Blob { hash: crate::sha256(b"new"), length: 3 };
+        let intent = intent(Some(desired));
+        let backup = update_backup(&intent);
+        assert!(rename_exclusive(&root, "song.tja", &root, &backup).unwrap());
+        std::fs::write(&path, b"local edit").unwrap();
+        let mut target = AppleExistingTarget::open(&root, &["song.tja"], &intent).unwrap();
+        assert!(!target.replace_if_current(&intent, Some(File::open(&replacement).unwrap())).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), b"local edit");
+        assert_eq!(std::fs::read(folder.path().join(&backup)).unwrap(), b"old");
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(target.replace_if_current(&intent, Some(File::open(&replacement).unwrap())).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert!(!folder.path().join(&backup).exists());
+        std::fs::write(folder.path().join(&backup), b"old").unwrap();
+        assert_eq!(target.inspect(intent.object).unwrap(), Some(desired));
+        assert!(!folder.path().join(&backup).exists());
+    }
+
+    #[test]
+    fn apple_deletion_removes_only_the_verified_version() {
+        let folder = tempfile::tempdir().unwrap();
+        let root = open_root(folder.path()).unwrap();
+        let path = folder.path().join("song.tja");
+        std::fs::write(&path, b"local edit").unwrap();
+        let intent = intent(None);
+        let mut target = AppleExistingTarget::open(&root, &["song.tja"], &intent).unwrap();
+        assert!(!target.replace_if_current(&intent, None).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), b"local edit");
+        std::fs::write(&path, b"old").unwrap();
+        assert!(target.replace_if_current(&intent, None).unwrap());
+        assert!(!path.exists());
+        assert!(!folder.path().join(update_backup(&intent)).exists());
+    }
 }
