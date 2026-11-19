@@ -693,6 +693,79 @@ fn writer_open_rejects_database_restored_before_a_signed_deletion() {
 }
 
 #[test]
+fn receiver_ffi_reports_rollback_instead_of_generic_storage_failure() {
+    use p2p_sync_core::{host::PullSummaryV3, p2p_sync_pull_v6};
+    let root = tempfile::tempdir().unwrap();
+    let setup = root.path().join("setup");
+    assert!(std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
+        .arg("setup")
+        .arg(&setup)
+        .args(["127.0.0.1:8781", "127.0.0.1:8781"])
+        .output().unwrap().status.success());
+    let config = setup.join("receiver/direct.json");
+    let settings: serde_json::Value = serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+    let share = settings["share"].as_str().unwrap();
+    let share_bytes: [u8; 16] = (0..16)
+        .map(|index| u8::from_str_radix(&share[index * 2..index * 2 + 2], 16).unwrap())
+        .collect::<Vec<_>>().try_into().unwrap();
+    let writer = PeerSigningKey::from_bytes(&std::fs::read(setup.join("sender/event-key.bin"))
+        .unwrap().try_into().unwrap());
+    let reader = PeerSigningKey::from_bytes(&std::fs::read(setup.join("receiver/event-key.bin"))
+        .unwrap().try_into().unwrap());
+    let peer = writer.verifying_key().to_bytes();
+    let roster = Roster::new(share_bytes, 1, [
+        (peer, Role::Writer), (reader.verifying_key().to_bytes(), Role::Reader),
+    ].into());
+    let destination = root.path().join("destination");
+    std::fs::create_dir(&destination).unwrap();
+    let destination_id = encode_hex(&sha256(destination.canonicalize().unwrap()
+        .as_os_str().as_encoded_bytes()));
+    let state = root.path().join("receiver-state");
+    let share_root = state.join(share);
+    let database_dir = share_root.join("1").join(&destination_id);
+    let witness = share_root.join("witness/1").join(&destination_id);
+    std::fs::create_dir_all(&database_dir).unwrap();
+    let database = database_dir.join("sync.db");
+    let backup = root.path().join("before-revision.db");
+    let created = Event {
+        id: EventId { peer, sequence: 1 },
+        context: VersionVector::new(),
+        object: [9; 16],
+        change: Change::Create(Entry {
+            parent: None, name: "song.tja".into(), kind: EntryKind::File([3; 32]),
+        }),
+    };
+    let updated = Event {
+        id: EventId { peer, sequence: 2 },
+        context: [(peer, 1)].into(),
+        object: created.object,
+        change: Change::Revise { base: created.id, entry: Some(Entry {
+            parent: None, name: "song.tja".into(), kind: EntryKind::File([4; 32]),
+        }) },
+    };
+    {
+        let mut store = Store::open(&database, roster.membership().clone()).unwrap();
+        store.enable_event_witness(&witness).unwrap();
+        roster.receive(&mut store, &roster.sign_event(&writer, &created).unwrap()).unwrap();
+    }
+    std::fs::copy(&database, &backup).unwrap();
+    {
+        let mut store = Store::open(&database, roster.membership().clone()).unwrap();
+        store.enable_event_witness(&witness).unwrap();
+        roster.receive(&mut store, &roster.sign_event(&writer, &updated).unwrap()).unwrap();
+    }
+    std::fs::copy(&backup, &database).unwrap();
+    let [config, state, destination] = [&config, &state, &destination]
+        .map(|path| path.to_str().unwrap().as_bytes());
+    let mut report = PullSummaryV3::default();
+    assert_eq!(unsafe { p2p_sync_pull_v6(
+        config.as_ptr(), config.len(), state.as_ptr(), state.len(),
+        destination.as_ptr(), destination.len(), &mut report,
+        None, std::ptr::null_mut(), None,
+    ) }, 8);
+}
+
+#[test]
 fn local_receiver_confirmations_can_join_a_serving_cache() {
     use p2p_sync_core::{
         auth::{PeerSigningKey, Role, Roster},
