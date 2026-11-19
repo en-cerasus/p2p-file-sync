@@ -204,7 +204,7 @@ impl Sender {
             config.migration.as_ref(),
         )?;
         store
-            .enable_tombstone_witness(
+            .enable_event_witness(
                 share_root.join("witness").join(config.generation.to_string()).join("sender"),
             )
             .map_err(HostError::Store)?;
@@ -1236,7 +1236,7 @@ pub(crate) fn pull_with_originals(
         configuration_directory,
         config.migration.as_ref(),
     )?;
-    store.enable_tombstone_witness(witness).map_err(HostError::Store)?;
+    store.enable_event_witness(witness).map_err(HostError::Store)?;
     let client = Client::with_baseline(
         roots,
         credentials,

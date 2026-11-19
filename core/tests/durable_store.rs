@@ -78,21 +78,21 @@ fn signed_deletion_witness_rejects_an_older_database() {
     };
     {
         let mut store = Store::open(&database, roster.membership().clone()).unwrap();
-        store.enable_tombstone_witness(&witness).unwrap();
+        store.enable_event_witness(&witness).unwrap();
         roster.receive(&mut store, &roster.sign_event(&key, &created).unwrap()).unwrap();
     }
     std::fs::copy(&database, &backup).unwrap();
     {
         let mut store = Store::open(&database, roster.membership().clone()).unwrap();
-        store.enable_tombstone_witness(&witness).unwrap();
+        store.enable_event_witness(&witness).unwrap();
         roster.receive(&mut store, &roster.sign_event(&key, &deleted).unwrap()).unwrap();
     }
     assert_eq!(std::fs::read_dir(&witness).unwrap().filter(|entry| {
         entry.as_ref().unwrap().file_name().to_string_lossy().ends_with(".witness")
-    }).count(), 1);
+    }).count(), 2);
     std::fs::copy(&backup, &database).unwrap();
     let mut restored = Store::open(&database, roster.membership().clone()).unwrap();
-    assert!(matches!(restored.enable_tombstone_witness(&witness), Err(StoreError::RollbackDetected)));
+    assert!(matches!(restored.enable_event_witness(&witness), Err(StoreError::RollbackDetected)));
 }
 
 #[test]
@@ -116,7 +116,7 @@ fn interrupted_deletion_commit_stops_reopening_until_recovery() {
         change: Change::Revise { base: created.id, entry: None },
     };
     let mut store = Store::open(&database, roster.membership().clone()).unwrap();
-    store.enable_tombstone_witness(&witness).unwrap();
+    store.enable_event_witness(&witness).unwrap();
     roster.receive(&mut store, &roster.sign_event(&key, &created).unwrap()).unwrap();
     let fault = Connection::open(&database).unwrap();
     fault.execute_batch("CREATE TRIGGER interrupt_delete BEFORE INSERT ON journal
@@ -126,9 +126,46 @@ fn interrupted_deletion_commit_stops_reopening_until_recovery() {
     drop(store);
     assert_eq!(std::fs::read_dir(&witness).unwrap().filter(|entry| {
         entry.as_ref().unwrap().file_name().to_string_lossy().ends_with(".witness")
-    }).count(), 1);
+    }).count(), 2);
     let mut reopened = Store::open(&database, roster.membership().clone()).unwrap();
-    assert!(matches!(reopened.enable_tombstone_witness(&witness), Err(StoreError::RollbackDetected)));
+    assert!(matches!(reopened.enable_event_witness(&witness), Err(StoreError::RollbackDetected)));
+}
+
+#[test]
+fn signed_content_revision_witness_rejects_reused_event_sequence() {
+    let folder = tempfile::tempdir().unwrap();
+    let database = folder.path().join("sync.db");
+    let backup = folder.path().join("before-revision.db");
+    let witness = folder.path().join("witness");
+    let key = PeerSigningKey::from_bytes(&[79; 32]);
+    let peer = key.verifying_key().to_bytes();
+    let roster = Roster::new([4; 16], 1, [(peer, Role::Writer)].into());
+    let created = Event {
+        id: EventId { peer, sequence: 1 },
+        context: VersionVector::new(),
+        object: OBJECT,
+        change: Change::Create(entry(5)),
+    };
+    let updated = Event {
+        id: EventId { peer, sequence: 2 },
+        context: [(peer, 1)].into(),
+        object: OBJECT,
+        change: Change::Revise { base: created.id, entry: Some(entry(6)) },
+    };
+    {
+        let mut store = Store::open(&database, roster.membership().clone()).unwrap();
+        store.enable_event_witness(&witness).unwrap();
+        roster.receive(&mut store, &roster.sign_event(&key, &created).unwrap()).unwrap();
+    }
+    std::fs::copy(&database, &backup).unwrap();
+    {
+        let mut store = Store::open(&database, roster.membership().clone()).unwrap();
+        store.enable_event_witness(&witness).unwrap();
+        roster.receive(&mut store, &roster.sign_event(&key, &updated).unwrap()).unwrap();
+    }
+    std::fs::copy(&backup, &database).unwrap();
+    let mut restored = Store::open(&database, roster.membership().clone()).unwrap();
+    assert!(matches!(restored.enable_event_witness(&witness), Err(StoreError::RollbackDetected)));
 }
 
 #[test]
