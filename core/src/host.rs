@@ -427,6 +427,21 @@ impl Sender {
         ))
     }
 
+    pub fn protected_originals_report(&mut self) -> Result<serde_json::Value, HostError> {
+        self.store.refresh().map_err(HostError::Store)?;
+        let originals = self
+            .store
+            .protected_originals(&self.completed)
+            .map_err(HostError::Io)?;
+        let storage = crate::archive::ProtectedStorage::from_originals(&originals);
+        Ok(serde_json::json!({
+            "files": storage.files,
+            "bytes": storage.bytes,
+            "missing": storage.missing,
+            "originals": originals,
+        }))
+    }
+
     pub fn delete_history(
         &mut self,
         selected: &[crate::archive::ArchiveSelection],

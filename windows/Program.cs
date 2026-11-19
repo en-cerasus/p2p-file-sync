@@ -41,6 +41,9 @@ internal sealed class SyncWindow : Window
     private readonly Button writerSourceButton = new() { Content = "共有元フォルダーを選択" };
     private readonly TextBlock writerSourceLabel = new() { TextWrapping = TextWrapping.Wrap };
     private readonly Button refreshWriterButton = new() { Content = "共有元を登録・更新", Margin = new Thickness(0, 12, 0, 0) };
+    private readonly Button loadWriterProtectionButton = new() { Content = "保護原本と容量を確認", Margin = new Thickness(0, 12, 0, 0) };
+    private readonly ListBox writerOriginalList = new() { MaxHeight = 240 };
+    private readonly TextBlock writerProtectionStatus = new() { TextWrapping = TextWrapping.Wrap };
     private readonly Button catchUpWriterButton = new() { Content = "他のピアから取得", Margin = new Thickness(0, 12, 0, 0) };
     private readonly Button cancelCatchUpButton = new() { Content = "取得を中断", Margin = new Thickness(0, 8, 0, 0) };
     private readonly Button loadWriterHistoryButton = new() { Content = "復元できる履歴を確認", Margin = new Thickness(0, 12, 0, 0) };
@@ -88,7 +91,8 @@ internal sealed class SyncWindow : Window
         Height = 760;
         MinHeight = 440;
         var panel = new StackPanel { Margin = new Thickness(24) };
-        foreach (var action in new[] { refreshWriterButton, catchUpWriterButton, cancelCatchUpButton,
+        foreach (var action in new[] { refreshWriterButton, loadWriterProtectionButton,
+            catchUpWriterButton, cancelCatchUpButton,
             startServerButton, stopServerButton,
             loadWriterHistoryButton, restoreHistoryButton, deleteHistoryButton,
             deleteAllHistoryButton, loadWriterConflictsButton, resolveConflictButton })
@@ -121,6 +125,10 @@ internal sealed class SyncWindow : Window
         panel.Children.Add(stopServerButton);
         panel.Children.Add(serverStatus);
         panel.Children.Add(writerStatus);
+        panel.Children.Add(new TextBlock { Text = "保護中の共通原本", FontSize = 18, Margin = new Thickness(0, 20, 0, 0) });
+        panel.Children.Add(loadWriterProtectionButton);
+        panel.Children.Add(writerProtectionStatus);
+        panel.Children.Add(writerOriginalList);
         panel.Children.Add(new TextBlock { Text = "履歴", FontSize = 18, Margin = new Thickness(0, 20, 0, 0) });
         panel.Children.Add(loadWriterHistoryButton);
         panel.Children.Add(writerHistoryList);
@@ -189,6 +197,7 @@ internal sealed class SyncWindow : Window
                 writerConflictList.ItemsSource = null;
                 writerCandidateList.ItemsSource = null;
                 writerStatus.Text = historyStatus.Text = conflictStatus.Text = "";
+                ClearWriterProtection();
                 SavePreferences();
             }
         });
@@ -203,6 +212,7 @@ internal sealed class SyncWindow : Window
                 writerConflictList.ItemsSource = null;
                 writerCandidateList.ItemsSource = null;
                 writerStatus.Text = historyStatus.Text = conflictStatus.Text = "";
+                ClearWriterProtection();
                 SavePreferences();
             }
         });
@@ -218,6 +228,7 @@ internal sealed class SyncWindow : Window
             }
         });
         refreshWriterButton.Click += async (_, _) => await RefreshWriterTree();
+        loadWriterProtectionButton.Click += async (_, _) => await LoadWriterProtection();
         catchUpWriterButton.Click += async (_, _) => await CatchUpWriter();
         cancelCatchUpButton.Click += (_, _) =>
         {
@@ -393,6 +404,8 @@ internal sealed class SyncWindow : Window
         writerSourceButton.IsEnabled = !syncing && !writerServing;
         refreshWriterButton.IsEnabled = !syncing && !writerServing && writerConfiguration is not null
             && writerState is not null && writerSource is not null;
+        loadWriterProtectionButton.IsEnabled = !syncing && !writerServing && writerConfiguration is not null
+            && writerState is not null;
         catchUpWriterButton.IsEnabled = !syncing && !writerServing && writerConfiguration is not null
             && writerState is not null;
         cancelCatchUpButton.IsEnabled = catchUpCancellation?.IsCancellationRequested == false;
@@ -425,6 +438,12 @@ internal sealed class SyncWindow : Window
         {
             syncTimer.Stop();
         }
+    }
+
+    private void ClearWriterProtection()
+    {
+        writerOriginalList.ItemsSource = null;
+        writerProtectionStatus.Text = "";
     }
 
     private static void AddPicker(StackPanel panel, Button button, TextBlock label, string placeholder)
@@ -498,6 +517,7 @@ internal sealed class SyncWindow : Window
                 : SyncCore.ErrorMessage(scan.Status);
             if (scan.Status == 0)
             {
+                ClearWriterProtection();
                 writerHistoryList.ItemsSource = null;
                 writerConflictList.ItemsSource = null;
                 writerCandidateList.ItemsSource = null;
@@ -507,6 +527,42 @@ internal sealed class SyncWindow : Window
         catch (Exception error) when (error is JsonException or DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
         {
             writerStatus.Text = "共有元の登録・更新処理を読み込めませんでした。";
+        }
+        finally
+        {
+            syncing = false;
+            UpdateControls();
+        }
+    }
+
+    private async Task LoadWriterProtection()
+    {
+        if (closing || syncing || writerServing || writerConfiguration is not string config
+            || writerState is not string state)
+        {
+            return;
+        }
+        syncing = true;
+        UpdateControls();
+        try
+        {
+            var loaded = await Task.Run(() => SyncCore.WriterProtectedOriginals(config, state));
+            if (loaded.Status == 0 && loaded.Report is not null)
+            {
+                writerOriginalList.ItemsSource = loaded.Report.Originals.Select(item => item.DisplayText()).ToArray();
+                writerProtectionStatus.Text =
+                    $"保護原本 {loaded.Report.Files} 件 ({loaded.Report.Bytes:N0} バイト)、未取得 {loaded.Report.Missing} 件";
+            }
+            else
+            {
+                writerOriginalList.ItemsSource = null;
+                writerProtectionStatus.Text = SyncCore.ErrorMessage(loaded.Status);
+            }
+        }
+        catch (Exception error) when (error is JsonException or DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
+        {
+            writerOriginalList.ItemsSource = null;
+            writerProtectionStatus.Text = "保護原本の一覧を読み込めませんでした。";
         }
         finally
         {
@@ -537,6 +593,7 @@ internal sealed class SyncWindow : Window
                 : SyncCore.ErrorMessage(fetched.Status);
             if (fetched.Status == 0)
             {
+                ClearWriterProtection();
                 writerHistoryList.ItemsSource = null;
                 writerConflictList.ItemsSource = null;
                 writerCandidateList.ItemsSource = null;
@@ -659,6 +716,7 @@ internal sealed class SyncWindow : Window
         {
             var status = await Task.Run(() => SyncCore.RestoreWriterHistory(config, state, entry.Archive, entry.CurrentHeads[0]));
             historyStatus.Text = status == 0 ? "履歴を新しい同期変更として復元しました。" : SyncCore.ErrorMessage(status);
+            if (status == 0) ClearWriterProtection();
             writerHistoryList.ItemsSource = null;
         }
         catch (Exception error) when (error is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
@@ -694,6 +752,7 @@ internal sealed class SyncWindow : Window
             var status = await Task.Run(() => SyncCore.DeleteWriterHistory(config, state, selected));
             if (status == 0)
             {
+                ClearWriterProtection();
                 writerHistoryList.ItemsSource = null;
                 historyStatus.Text = $"履歴 {selected.Length} 件を削除しました。保護中の原本は保持されます。履歴を再読み込みしてください。";
             }
@@ -776,6 +835,7 @@ internal sealed class SyncWindow : Window
             writerCandidateList.ItemsSource = null;
             if (status == 0)
             {
+                ClearWriterProtection();
                 writerHistoryList.ItemsSource = null;
                 historyStatus.Text = "";
             }
@@ -832,6 +892,12 @@ internal static class SyncCore
                 .Prepend(heading));
         }
     }
+
+    internal sealed record WriterProtectedReport(
+        [property: JsonPropertyName("files")] ulong Files,
+        [property: JsonPropertyName("bytes")] ulong Bytes,
+        [property: JsonPropertyName("missing")] ulong Missing,
+        [property: JsonPropertyName("originals")] ProtectedOriginal[] Originals);
 
     internal sealed record ConflictVersion(
         [property: JsonPropertyName("peer")] string Peer,
@@ -935,6 +1001,22 @@ internal static class SyncCore
             }, IntPtr.Zero);
         return status != 0 || json is null ? (status == 0 ? 6 : status, []) :
             (0, JsonSerializer.Deserialize<WriterHistoryEntry[]>(json) ?? []);
+    }
+
+    internal static (int Status, WriterProtectedReport? Report) WriterProtectedOriginals(string config, string state)
+    {
+        var configBytes = Encoding.UTF8.GetBytes(config);
+        var stateBytes = Encoding.UTF8.GetBytes(state);
+        byte[]? json = null;
+        var status = WriterProtectedOriginalsNative(configBytes, (nuint)configBytes.Length,
+            stateBytes, (nuint)stateBytes.Length, (_, data, length) =>
+            {
+                if (length > int.MaxValue) return;
+                json = new byte[(int)length];
+                Marshal.Copy(data, json, 0, json.Length);
+            }, IntPtr.Zero);
+        return status != 0 || json is null ? (status == 0 ? 6 : status, null) :
+            (0, JsonSerializer.Deserialize<WriterProtectedReport>(json));
     }
 
     internal static int RestoreWriterHistory(string config, string state, string archive, string reviewed)
@@ -1061,6 +1143,11 @@ internal static class SyncCore
 
     [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_writer_history", CallingConvention = CallingConvention.Cdecl)]
     private static extern int WriterHistoryNative(
+        byte[] config, nuint configLength, byte[] state, nuint stateLength,
+        OriginalsCallback callback, IntPtr context);
+
+    [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_writer_protected_originals", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int WriterProtectedOriginalsNative(
         byte[] config, nuint configLength, byte[] state, nuint stateLength,
         OriginalsCallback callback, IntPtr context);
 

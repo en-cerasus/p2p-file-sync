@@ -103,6 +103,11 @@ int32_t p2p_sync_pull_v6(const uint8_t *config, size_t config_len,
 int32_t p2p_sync_writer_history(const uint8_t *config, size_t config_len,
                                 const uint8_t *state, size_t state_len,
                                 p2p_sync_originals_callback callback, void *context);
+/* Writer-side protected common originals, deduplicated by content hash.
+   Callback JSON has files, bytes, missing and originals. */
+int32_t p2p_sync_writer_protected_originals(const uint8_t *config, size_t config_len,
+                                            const uint8_t *state, size_t state_len,
+                                            p2p_sync_originals_callback callback, void *context);
 int32_t p2p_sync_writer_restore(const uint8_t *config, size_t config_len,
                                 const uint8_t *state, size_t state_len,
                                 const uint8_t *archive, size_t archive_len,

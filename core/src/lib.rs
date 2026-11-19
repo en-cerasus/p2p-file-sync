@@ -343,6 +343,39 @@ pub unsafe extern "C" fn p2p_sync_writer_history(
     }
 }
 
+/// Read protected common originals from a writer's serving state.
+///
+/// # Safety
+/// Paths and callback follow p2p_sync_writer_history.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_writer_protected_originals(
+    config: *const u8,
+    config_len: usize,
+    state: *const u8,
+    state_len: usize,
+    callback: Option<OriginalsCallback>,
+    context: *mut std::ffi::c_void,
+) -> i32 {
+    let Some(callback) = callback else { return INVALID_ARGUMENT };
+    let Some((config, state)) = (unsafe { writer_paths(config, config_len, state, state_len) })
+    else {
+        return INVALID_ARGUMENT;
+    };
+    let result = std::panic::catch_unwind(|| {
+        let mut writer = host::Sender::open(config, state).map_err(host_error_code)?;
+        serde_json::to_vec(&writer.protected_originals_report().map_err(host_error_code)?)
+            .map_err(|_| 6)
+    });
+    match result {
+        Ok(Ok(bytes)) => {
+            callback(context, bytes.as_ptr(), bytes.len());
+            OK
+        }
+        Ok(Err(code)) => code,
+        Err(_) => 6,
+    }
+}
+
 /// Restore one reviewed archive as a new signed writer revision. The chosen
 /// archive and current event IDs use `<64-hex-peer>:<sequence>`.
 ///

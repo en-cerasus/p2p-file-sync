@@ -524,7 +524,9 @@ fn writer_ffi_listener_serves_and_stops_on_request() {
 
 #[test]
 fn writer_ffi_refreshes_only_a_safe_selected_source() {
-    use p2p_sync_core::{host::Sender, p2p_sync_writer_refresh_tree};
+    use p2p_sync_core::{
+        host::Sender, p2p_sync_writer_protected_originals, p2p_sync_writer_refresh_tree,
+    };
     let root = tempfile::tempdir().unwrap();
     let setup = root.path().join("setup");
     assert!(std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
@@ -572,6 +574,20 @@ fn writer_ffi_refreshes_only_a_safe_selected_source() {
     assert_eq!(summary["files"], 1);
     std::fs::write(source.join("song.tja"), b"second").unwrap();
     assert_eq!(refresh(&source).0, 0);
+    let mut originals_json = Vec::new();
+    assert_eq!(unsafe {
+        p2p_sync_writer_protected_originals(
+            config_bytes.as_ptr(), config_bytes.len(),
+            state_bytes.as_ptr(), state_bytes.len(),
+            Some(capture), (&mut originals_json as *mut Vec<u8>).cast(),
+        )
+    }, 0);
+    let protected: serde_json::Value = serde_json::from_slice(&originals_json).unwrap();
+    assert_eq!(protected["files"], 1);
+    assert_eq!(protected["bytes"], 5);
+    assert_eq!(protected["missing"], 0);
+    assert_eq!(protected["originals"][0]["names"], serde_json::json!(["song.tja"]));
+    assert!(!protected["originals"][0]["waiting"].as_array().unwrap().is_empty());
     let mut writer = Sender::open(&config, &state).unwrap();
     assert_eq!(writer.history().unwrap().as_array().unwrap().len(), 1);
     std::fs::remove_file(source.join("song.tja")).unwrap();

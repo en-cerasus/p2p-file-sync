@@ -127,6 +127,13 @@ enum SyncCore {
         let skipped: UInt64
     }
 
+    struct WriterProtectedReport: Decodable, Sendable {
+        let files: UInt64
+        let bytes: UInt64
+        let missing: UInt64
+        let originals: [ProtectedOriginal]
+    }
+
     struct WriterHistoryEntry: Decodable, Identifiable, Sendable {
         let id: Int64
         let archive: String
@@ -164,6 +171,29 @@ enum SyncCore {
 
     private struct WriterReportContext {
         var json: Data?
+    }
+
+    static func writerProtectedOriginals(configuration: URL, state: URL) throws -> WriterProtectedReport {
+        let config = Array(configuration.path.utf8)
+        let storage = Array(state.path.utf8)
+        var report = WriterReportContext(json: nil)
+        let status = withUnsafeMutablePointer(to: &report) { context in
+            config.withUnsafeBufferPointer { configBytes in
+                storage.withUnsafeBufferPointer { stateBytes in
+                    p2p_sync_writer_protected_originals(
+                        configBytes.baseAddress, configBytes.count,
+                        stateBytes.baseAddress, stateBytes.count,
+                        { context, data, length in
+                            guard let context, let data else { return }
+                            context.assumingMemoryBound(to: WriterReportContext.self).pointee.json =
+                                Data(bytes: data, count: length)
+                        }, UnsafeMutableRawPointer(context))
+                }
+            }
+        }
+        guard status == P2P_SYNC_OK else { throw CoreError.writerFailed(status) }
+        guard let json = report.json else { throw CoreError.missingWriterReport }
+        return try JSONDecoder().decode(WriterProtectedReport.self, from: json)
     }
 
     static func writerHistory(configuration: URL, state: URL) throws -> [WriterHistoryEntry] {

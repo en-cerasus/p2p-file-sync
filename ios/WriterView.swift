@@ -20,6 +20,7 @@ struct WriterView: View {
     @State private var sourceFolder: URL?
     @State private var result = ""
     @State private var serverStatus = "配信停止中"
+    @State private var protectedReport: SyncCore.WriterProtectedReport?
     @State private var historyEntries: [SyncCore.WriterHistoryEntry] = []
     @State private var conflictEntries: [SyncCore.WriterConflict] = []
     @State private var historyLoaded = false
@@ -63,6 +64,26 @@ struct WriterView: View {
                 Text(serverStatus).foregroundStyle(.secondary)
                 Text("取得と共有元の登録・更新は配信を停止してから行います。配信は画面を開いている間に動作し、アプリがバックグラウンドへ移ると停止します。")
                     .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("保護中の共通原本") {
+                Button("保護原本と容量を確認") { Task { await loadProtection() } }
+                    .disabled(configFolder == nil || serving || refreshing || catchingUp || inspecting)
+                if let report = protectedReport {
+                    Text("保護原本 \(report.files) 件 (\(report.bytes.formatted()) バイト)、未取得 \(report.missing) 件")
+                    ForEach(report.originals) { original in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(original.names.isEmpty ? "名称不明" : original.names.joined(separator: "、"))
+                            Text(original.bytes.map { "\($0.formatted()) バイト" } ?? "本体未取得")
+                                .font(.caption).foregroundStyle(.secondary)
+                            if original.conflict { Text("競合未解決").font(.caption) }
+                            ForEach(original.waiting) { peer in
+                                let reason = peer.state == .events ? "変更の受信待ち" : "ピアの確認待ち"
+                                Text("\(reason)  \(String(peer.peer.prefix(12)))")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
             }
             Section("履歴") {
                 Button("復元できる履歴を確認") { Task { await loadHistory() } }
@@ -113,7 +134,7 @@ struct WriterView: View {
                     }
                 }
             }
-            if inspecting { ProgressView("履歴と競合を確認しています…") }
+            if inspecting { ProgressView("状態を確認しています…") }
             if !result.isEmpty { Section("結果") { Text(result) } }
         }
         .navigationTitle("共有・配信")
@@ -219,10 +240,26 @@ struct WriterView: View {
     private enum WriterFailure: Error { case permissionUnavailable }
 
     private func invalidateLists() {
+        protectedReport = nil
         historyEntries = []
         conflictEntries = []
         historyLoaded = false
         conflictsLoaded = false
+    }
+
+    private func loadProtection() async {
+        guard !serving, !refreshing, !catchingUp, !inspecting, configFolder != nil else { return }
+        inspecting = true
+        defer { inspecting = false }
+        do {
+            protectedReport = try await runWriter { config, state in
+                try SyncCore.writerProtectedOriginals(configuration: config, state: state)
+            }
+            result = "保護原本と容量を読み込みました。"
+        } catch {
+            protectedReport = nil
+            result = writerError(error)
+        }
     }
 
     private func runWriter<T: Sendable>(
