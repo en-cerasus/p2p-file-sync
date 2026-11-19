@@ -127,6 +127,14 @@ int32_t p2p_sync_writer_resolve(const uint8_t *config, size_t config_len,
                                 const uint8_t *choice, size_t choice_len,
                                 const uint8_t *reviewed, size_t reviewed_len);
 
+/* Runs an authenticated writer listener until cancellation returns nonzero.
+   The ready callback receives the bound address as borrowed UTF-8 bytes.
+   Invalid peer sessions do not stop the listener. Returns 7 when stopped. */
+int32_t p2p_sync_writer_serve(const uint8_t *config, size_t config_len,
+                              const uint8_t *state, size_t state_len,
+                              p2p_sync_originals_callback ready,
+                              p2p_sync_cancel_callback cancellation, void *context);
+
 #ifdef __cplusplus
 }
 #endif

@@ -424,6 +424,95 @@ fn writer_ffi_deletes_selected_history_but_keeps_unconfirmed_original() {
 }
 
 #[test]
+fn writer_ffi_listener_serves_and_stops_on_request() {
+    use p2p_sync_core::{
+        host::{pull_from_config, Sender},
+        p2p_sync_writer_serve,
+    };
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
+
+    struct Context {
+        ready: mpsc::Sender<String>,
+        stop: AtomicBool,
+    }
+    extern "C" fn ready(context: *mut std::ffi::c_void, data: *const u8, length: usize) {
+        let context = unsafe { &*context.cast::<Context>() };
+        let bytes = unsafe { std::slice::from_raw_parts(data, length) };
+        let _ = context
+            .ready
+            .send(std::str::from_utf8(bytes).unwrap().to_owned());
+    }
+    extern "C" fn cancelled(context: *mut std::ffi::c_void) -> u8 {
+        let context = unsafe { &*context.cast::<Context>() };
+        u8::from(context.stop.load(Ordering::Relaxed))
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let setup = root.path().join("setup");
+    assert!(std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
+        .arg("setup")
+        .arg(&setup)
+        .args(["127.0.0.1:8767", "127.0.0.1:8767"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let config = setup.join("sender/server.json");
+    let mut settings: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+    settings["bind"] = "127.0.0.1:0".into();
+    std::fs::write(&config, settings.to_string()).unwrap();
+    let state = root.path().join("server-state");
+    let source = root.path().join("song.tja");
+    std::fs::write(&source, b"served from GUI entry point").unwrap();
+    Sender::open(&config, &state)
+        .unwrap()
+        .publish(&source)
+        .unwrap();
+
+    let (tx, rx) = mpsc::channel();
+    let context = Context {
+        ready: tx,
+        stop: AtomicBool::new(false),
+    };
+    let config_bytes = config.to_str().unwrap().as_bytes();
+    let state_bytes = state.to_str().unwrap().as_bytes();
+    std::thread::scope(|threads| {
+        let server = threads.spawn(|| unsafe {
+            p2p_sync_writer_serve(
+                config_bytes.as_ptr(),
+                config_bytes.len(),
+                state_bytes.as_ptr(),
+                state_bytes.len(),
+                Some(ready),
+                Some(cancelled),
+                (&context as *const Context).cast_mut().cast(),
+            )
+        });
+        let address = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let receiver = setup.join("receiver/direct.json");
+        let mut settings: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&receiver).unwrap()).unwrap();
+        settings["address"] = address.into();
+        std::fs::write(&receiver, settings.to_string()).unwrap();
+        let destination = root.path().join("destination");
+        std::fs::create_dir(&destination).unwrap();
+        let result = pull_from_config(&receiver, &root.path().join("receiver-state"), &destination);
+        context.stop.store(true, Ordering::Relaxed);
+        assert_eq!(server.join().unwrap(), 7);
+        let result = result.unwrap();
+        assert_eq!(result.files_published, 1);
+        assert_eq!(
+            std::fs::read(destination.join("song.tja")).unwrap(),
+            b"served from GUI entry point"
+        );
+    });
+}
+
+#[test]
 fn local_receiver_confirmations_can_join_a_serving_cache() {
     use p2p_sync_core::{
         auth::{PeerSigningKey, Role, Roster},

@@ -47,6 +47,9 @@ internal sealed class SyncWindow : Window
     private readonly ListBox writerConflictList = new() { MaxHeight = 180 };
     private readonly ListBox writerCandidateList = new() { MaxHeight = 180 };
     private readonly Button resolveConflictButton = new() { Content = "選択した版を採用", Margin = new Thickness(0, 8, 0, 0) };
+    private readonly Button startServerButton = new() { Content = "配信を開始", Margin = new Thickness(0, 12, 0, 0) };
+    private readonly Button stopServerButton = new() { Content = "配信を停止", Margin = new Thickness(0, 8, 0, 0) };
+    private readonly TextBlock serverStatus = new() { Text = "配信停止中", TextWrapping = TextWrapping.Wrap };
     private readonly CheckBox autoSync = new()
     {
         Content = "10 秒ごとに自動同期",
@@ -56,7 +59,11 @@ internal sealed class SyncWindow : Window
     private readonly DispatcherTimer syncTimer = new() { Interval = TimeSpan.FromSeconds(10) };
     private readonly System.Windows.Forms.NotifyIcon tray = new();
     private readonly System.Windows.Forms.ToolStripMenuItem traySync = new("同期を開始");
+    private readonly System.Windows.Forms.ToolStripMenuItem trayStartServer = new("配信を開始");
+    private readonly System.Windows.Forms.ToolStripMenuItem trayStopServer = new("配信を停止");
     private bool syncing;
+    private bool writerServing;
+    private CancellationTokenSource? serverCancellation;
     private bool closing;
     private string? configuration;
     private string? destination;
@@ -89,6 +96,9 @@ internal sealed class SyncWindow : Window
         panel.Children.Add(new TextBlock { Text = "履歴の復元", FontSize = 18, Margin = new Thickness(0, 20, 0, 0) });
         AddPicker(panel, writerConfigButton, writerConfigLabel, "書き込みピア設定が未選択です");
         AddPicker(panel, writerStateButton, writerStateLabel, "状態フォルダーが未選択です");
+        panel.Children.Add(startServerButton);
+        panel.Children.Add(stopServerButton);
+        panel.Children.Add(serverStatus);
         panel.Children.Add(loadWriterHistoryButton);
         panel.Children.Add(writerHistoryList);
         panel.Children.Add(restoreHistoryButton);
@@ -105,6 +115,8 @@ internal sealed class SyncWindow : Window
         var trayMenu = new System.Windows.Forms.ContextMenuStrip();
         trayMenu.Items.Add("画面を開く", null, (_, _) => ShowWindow());
         trayMenu.Items.Add(traySync);
+        trayMenu.Items.Add(trayStartServer);
+        trayMenu.Items.Add(trayStopServer);
         trayMenu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
         trayMenu.Items.Add("終了", null, (_, _) => Close());
         tray.ContextMenuStrip = trayMenu;
@@ -113,6 +125,8 @@ internal sealed class SyncWindow : Window
         tray.Visible = true;
         tray.DoubleClick += (_, _) => ShowWindow();
         traySync.Click += async (_, _) => await RunSync();
+        trayStartServer.Click += async (_, _) => await StartServer();
+        trayStopServer.Click += (_, _) => StopServer();
         StateChanged += (_, _) =>
         {
             if (WindowState == WindowState.Minimized)
@@ -178,6 +192,8 @@ internal sealed class SyncWindow : Window
         };
         writerCandidateList.SelectionChanged += (_, _) => UpdateControls();
         resolveConflictButton.Click += async (_, _) => await ResolveWriterConflict();
+        startServerButton.Click += async (_, _) => await StartServer();
+        stopServerButton.Click += (_, _) => StopServer();
         syncButton.Click += async (_, _) => await RunSync();
         cancelButton.Click += (_, _) =>
         {
@@ -202,6 +218,7 @@ internal sealed class SyncWindow : Window
             closing = true;
             syncTimer.Stop();
             cancellation?.Cancel();
+            serverCancellation?.Cancel();
             tray.Visible = false;
             tray.Dispose();
             trayMenu.Dispose();
@@ -323,7 +340,11 @@ internal sealed class SyncWindow : Window
         }
         bool ready = configuration is not null && destination is not null;
         configButton.IsEnabled = destinationButton.IsEnabled = !syncing;
-        writerConfigButton.IsEnabled = writerStateButton.IsEnabled = !syncing;
+        writerConfigButton.IsEnabled = writerStateButton.IsEnabled = !syncing && !writerServing;
+        startServerButton.IsEnabled = !writerServing && writerConfiguration is not null && writerState is not null;
+        stopServerButton.IsEnabled = writerServing && serverCancellation?.IsCancellationRequested == false;
+        trayStartServer.Enabled = startServerButton.IsEnabled;
+        trayStopServer.Enabled = stopServerButton.IsEnabled;
         loadWriterHistoryButton.IsEnabled = !syncing && writerConfiguration is not null && writerState is not null;
         loadWriterConflictsButton.IsEnabled = loadWriterHistoryButton.IsEnabled;
         restoreHistoryButton.IsEnabled = loadWriterHistoryButton.IsEnabled
@@ -338,7 +359,7 @@ internal sealed class SyncWindow : Window
             && writerCandidateList.SelectedItem is SyncCore.WriterConflictVersion;
         syncButton.IsEnabled = ready && !syncing;
         traySync.Enabled = ready && !syncing;
-        tray.Text = syncing ? "P2P Sync - 同期中" : "P2P Sync";
+        tray.Text = syncing ? "P2P Sync - 同期中" : writerServing ? "P2P Sync - 配信中" : "P2P Sync";
         cancelButton.IsEnabled = syncing && cancellation?.IsCancellationRequested == false;
         autoSync.IsEnabled = ready;
         if (ready && !syncing && autoSync.IsChecked == true)
@@ -358,6 +379,49 @@ internal sealed class SyncWindow : Window
         label.Text = placeholder;
         panel.Children.Add(button);
         panel.Children.Add(label);
+    }
+
+    private async Task StartServer()
+    {
+        if (closing || writerServing || writerConfiguration is not string config || writerState is not string state)
+        {
+            return;
+        }
+        using var operation = new CancellationTokenSource();
+        serverCancellation = operation;
+        writerServing = true;
+        serverStatus.Text = "配信を開始しています…";
+        UpdateControls();
+        try
+        {
+            var status = await Task.Run(() => SyncCore.ServeWriter(config, state, operation.Token, address =>
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    if (!closing) serverStatus.Text = $"配信中: {address}";
+                }))));
+            if (!closing)
+            {
+                serverStatus.Text = status == 7 ? "配信を停止しました。" :
+                    $"配信を終了しました。{SyncCore.ErrorMessage(status)}";
+            }
+        }
+        catch (Exception error) when (error is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
+        {
+            serverStatus.Text = "配信処理を読み込めませんでした。";
+        }
+        finally
+        {
+            writerServing = false;
+            serverCancellation = null;
+            UpdateControls();
+        }
+    }
+
+    private void StopServer()
+    {
+        serverCancellation?.Cancel();
+        serverStatus.Text = "配信を停止しています…";
+        UpdateControls();
     }
 
     private async Task RunSync()
@@ -782,6 +846,22 @@ internal static class SyncCore
             reviewedBytes, (nuint)reviewedBytes.Length);
     }
 
+    internal static int ServeWriter(string config, string state, CancellationToken cancellation,
+        Action<string> onReady)
+    {
+        var configBytes = Encoding.UTF8.GetBytes(config);
+        var stateBytes = Encoding.UTF8.GetBytes(state);
+        return WriterServeNative(configBytes, (nuint)configBytes.Length,
+            stateBytes, (nuint)stateBytes.Length, (_, data, length) =>
+            {
+                if (length > 1024) return;
+                var address = new byte[(int)length];
+                Marshal.Copy(data, address, 0, address.Length);
+                try { onReady(Encoding.UTF8.GetString(address)); }
+                catch (InvalidOperationException) { /* Window closed during startup. */ }
+            }, _ => cancellation.IsCancellationRequested ? (byte)1 : (byte)0, IntPtr.Zero);
+    }
+
     internal static string ErrorMessage(int status) => status switch
     {
         1 or 2 => "接続設定または保存先を確認してください。",
@@ -828,4 +908,9 @@ internal static class SyncCore
     private static extern int WriterResolveNative(
         byte[] config, nuint configLength, byte[] state, nuint stateLength,
         byte[] choice, nuint choiceLength, byte[] reviewed, nuint reviewedLength);
+
+    [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_writer_serve", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int WriterServeNative(
+        byte[] config, nuint configLength, byte[] state, nuint stateLength,
+        OriginalsCallback ready, CancellationCallback cancellation, IntPtr context);
 }

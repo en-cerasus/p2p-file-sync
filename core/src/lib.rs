@@ -514,6 +514,64 @@ pub unsafe extern "C" fn p2p_sync_writer_conflicts(
     }
 }
 
+/// Serve authenticated peers until the cancellation callback returns nonzero.
+/// The ready callback receives the bound address after the listener starts.
+/// A failed peer session does not stop the listener. Returns 7 on a normal
+/// requested stop, matching the pull cancellation status.
+///
+/// # Safety
+/// Path pointers must remain readable. Callbacks must be thread-safe for this
+/// call, must not unwind or retain the borrowed ready buffer, and the context
+/// must outlive the call.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_writer_serve(
+    config: *const u8,
+    config_len: usize,
+    state: *const u8,
+    state_len: usize,
+    ready: Option<OriginalsCallback>,
+    cancellation: Option<CancellationCallback>,
+    context: *mut std::ffi::c_void,
+) -> i32 {
+    let (Some(ready), Some(cancelled)) = (ready, cancellation) else {
+        return INVALID_ARGUMENT;
+    };
+    let Some((config, state)) = (unsafe { writer_paths(config, config_len, state, state_len) })
+    else {
+        return INVALID_ARGUMENT;
+    };
+    match std::panic::catch_unwind(|| {
+        let mut writer = host::Sender::open(config, state).map_err(host_error_code)?;
+        let listener = writer.bind().map_err(host_error_code)?;
+        listener.set_nonblocking(true).map_err(|_| 3)?;
+        let address = listener.local_addr().map_err(|_| 3)?.to_string();
+        ready(context, address.as_ptr(), address.len());
+        loop {
+            if cancelled(context) != 0 {
+                return Ok(7);
+            }
+            match listener.accept() {
+                Ok((socket, _)) => {
+                    // Invalid or disconnected peers must not stop serving.
+                    // Windows may inherit the listener's nonblocking mode
+                    // onto accepted sockets; TLS expects a blocking stream.
+                    if socket.set_nonblocking(false).is_ok() {
+                        let _ = writer.serve(socket);
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(_) => return Err(3),
+            }
+        }
+    }) {
+        Ok(Ok(status)) => status,
+        Ok(Err(code)) => code,
+        Err(_) => 6,
+    }
+}
+
 /// Resolve a conflict by choosing one reviewed head. `reviewed` is a JSON
 /// array of all candidate IDs shown to the user; a changed set is rejected.
 ///
