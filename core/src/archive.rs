@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     blob::{Blob, BlobStore},
-    materialize::AppliedFile,
+    materialize::{AppliedFile, FileIntent},
     replica::{ContentHash, EntryKind, EventId, ObjectId, PeerId},
     retention::{PeerState, Protection},
     store::{decode, decode_column, encode, Store, StoreError},
@@ -311,6 +311,32 @@ impl Store {
                     EntryKind::Directory => None,
                 })
         }));
+        // A receiver can still be applying a revision after the sender has
+        // advanced its head and all peers have confirmed the newer event.
+        // Its on-disk old version and staged replacement must survive until
+        // reconciliation either commits or explicitly abandons the intent.
+        {
+            let mut statement = self
+                .connection
+                .prepare("SELECT payload FROM applied_file")?;
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                let applied: AppliedFile = decode(&decode_column(row, 0)?)?;
+                if let Some(blob) = applied.contents {
+                    retained.insert(blob.hash);
+                }
+            }
+        }
+        {
+            let mut statement = self.connection.prepare("SELECT payload FROM file_intent")?;
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                let intent: FileIntent = decode(&decode_column(row, 0)?)?;
+                for blob in [intent.previous, intent.desired].into_iter().flatten() {
+                    retained.insert(blob.hash);
+                }
+            }
+        }
         let mut expired = BTreeMap::<ContentHash, Vec<i64>>::new();
         {
             let mut statement = self
@@ -507,5 +533,91 @@ mod tests {
         );
         assert!(store.replica().get(deleted).is_some());
         assert!(store.archives(SystemTime::now()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn expired_blobs_remain_while_applied_or_pending_recovery_references_them() {
+        let folder = tempfile::tempdir().unwrap();
+        let blobs = BlobStore::open(folder.path().join("files")).unwrap();
+        let key = PeerSigningKey::from_bytes(&[9; 32]);
+        let writer = key.verifying_key().to_bytes();
+        let roster = Roster::new([2; 16], 1, [(writer, Role::Writer)].into());
+        let mut store = Store::open(":memory:", roster.membership().clone()).unwrap();
+        let applied_blob = Blob {
+            hash: sha256(b"applied"),
+            length: 7,
+        };
+        let pending_blob = Blob {
+            hash: sha256(b"pending"),
+            length: 7,
+        };
+        blobs.put(applied_blob, &b"applied"[..]).unwrap();
+        blobs.put(pending_blob, &b"pending"[..]).unwrap();
+        let event = EventId {
+            peer: writer,
+            sequence: 1,
+        };
+        let successor = EventId {
+            peer: writer,
+            sequence: 2,
+        };
+        let applied = AppliedFile {
+            event,
+            contents: Some(applied_blob),
+            path: Some(vec!["song.tja".into()]),
+        };
+        let intent = FileIntent {
+            object: [4; 16],
+            event: successor,
+            previous: None,
+            desired: Some(pending_blob),
+        };
+        let tx = store.connection.transaction().unwrap();
+        record_archive(&tx, [3; 16], applied.clone(), successor, None).unwrap();
+        record_archive(
+            &tx,
+            [4; 16],
+            AppliedFile {
+                contents: Some(pending_blob),
+                ..applied.clone()
+            },
+            successor,
+            None,
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO applied_file (object, payload) VALUES (?1, ?2)",
+            params![[3_u8; 16].as_slice(), encode(&applied).unwrap()],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO file_intent (object, payload) VALUES (?1, ?2)",
+            params![intent.object.as_slice(), encode(&intent).unwrap()],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        let expired = SystemTime::now() + Duration::from_secs(RETENTION_SECONDS as u64 + 1);
+        store.sweep_sender_archives(&blobs, expired).unwrap();
+        blobs.open_verified(applied_blob).unwrap();
+        blobs.open_verified(pending_blob).unwrap();
+
+        store
+            .connection
+            .execute("DELETE FROM applied_file", [])
+            .unwrap();
+        store
+            .connection
+            .execute("DELETE FROM file_intent", [])
+            .unwrap();
+        store.sweep_sender_archives(&blobs, expired).unwrap();
+        assert_eq!(
+            blobs.open_verified(applied_blob).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            blobs.open_verified(pending_blob).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
     }
 }
