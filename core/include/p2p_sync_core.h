@@ -165,6 +165,17 @@ int32_t p2p_sync_writer_delete_missing_file(const uint8_t *config, size_t config
                                             const uint8_t *shared_path, size_t shared_path_len,
                                             const uint8_t *reviewed, size_t reviewed_len);
 
+/* Preserve a reviewed file ID after the user selects its new physical file
+   inside the source root. The old name must remain absent, the new file must
+   match the cached prior contents, and the destination must be unoccupied in
+   the shared index. The call never moves the physical source file. */
+int32_t p2p_sync_writer_relocate_missing_file(const uint8_t *config, size_t config_len,
+                                              const uint8_t *state, size_t state_len,
+                                              const uint8_t *source, size_t source_len,
+                                              const uint8_t *shared_path, size_t shared_path_len,
+                                              const uint8_t *reviewed, size_t reviewed_len,
+                                              const uint8_t *destination, size_t destination_len);
+
 /* Fetch signed peer changes and verified contents into a writer's serving
    cache. Peer endpoints come from the selected direct.json. On success,
    events_added receives the number of newly imported events. */

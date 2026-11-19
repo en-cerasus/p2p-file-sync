@@ -738,6 +738,51 @@ pub unsafe extern "C" fn p2p_sync_writer_delete_missing_file(
     }
 }
 
+/// Keep a reviewed file's identity after the user selects its new physical
+/// file inside the source root. The destination must contain the verified
+/// prior bytes and must not already be a different shared entry.
+///
+/// # Safety
+/// Every pointer/length pair must remain readable for the call.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_writer_relocate_missing_file(
+    config: *const u8,
+    config_len: usize,
+    state: *const u8,
+    state_len: usize,
+    source: *const u8,
+    source_len: usize,
+    shared_path: *const u8,
+    shared_path_len: usize,
+    reviewed: *const u8,
+    reviewed_len: usize,
+    destination: *const u8,
+    destination_len: usize,
+) -> i32 {
+    let Some((config, state)) = (unsafe { writer_paths(config, config_len, state, state_len) }) else {
+        return INVALID_ARGUMENT;
+    };
+    let (Some(source), Some(shared_path), Some(reviewed), Some(destination)) = (
+        unsafe { borrowed_text(source, source_len, 32_768) },
+        unsafe { borrowed_text(shared_path, shared_path_len, 32_768) },
+        unsafe { borrowed_text(reviewed, reviewed_len, 128) },
+        unsafe { borrowed_text(destination, destination_len, 32_768) },
+    ) else {
+        return INVALID_ARGUMENT;
+    };
+    let Some(reviewed) = parse_event_id(reviewed) else { return INVALID_ARGUMENT };
+    match std::panic::catch_unwind(|| {
+        let mut writer = host::Sender::open(config, state).map_err(host_error_code)?;
+        writer.relocate_missing_source_file(
+            std::path::Path::new(source), shared_path, reviewed, std::path::Path::new(destination),
+        ).map_err(host_error_code)
+    }) {
+        Ok(Ok(_)) => OK,
+        Ok(Err(code)) => code,
+        Err(_) => 6,
+    }
+}
+
 /// Fetch signed peer events and verified contents into this writer's cache.
 ///
 /// # Safety

@@ -527,6 +527,7 @@ fn writer_ffi_refreshes_only_a_safe_selected_source() {
     use p2p_sync_core::{
         host::Sender, p2p_sync_writer_delete_missing_file, p2p_sync_writer_missing_files,
         p2p_sync_writer_protected_originals, p2p_sync_writer_refresh_tree,
+        p2p_sync_writer_relocate_missing_file,
     };
     let root = tempfile::tempdir().unwrap();
     let setup = root.path().join("setup");
@@ -629,6 +630,35 @@ fn writer_ffi_refreshes_only_a_safe_selected_source() {
     std::fs::remove_file(source.join("nested/other.tja")).unwrap();
     std::fs::remove_dir(source.join("nested")).unwrap();
     assert!(writer.missing_source_files(&source).unwrap().is_empty());
+
+    std::fs::write(source.join("moving.tja"), b"same content").unwrap();
+    assert_eq!(refresh(&source).0, 0);
+    std::fs::create_dir(source.join("new-folder")).unwrap();
+    std::fs::rename(source.join("moving.tja"), source.join("new-folder/moved.tja")).unwrap();
+    let missing = writer.missing_source_files(&source).unwrap();
+    assert_eq!(missing.len(), 1);
+    assert_eq!(missing[0].0, vec!["moving.tja".to_owned()]);
+    let move_path = b"moving.tja";
+    let reviewed = format!("{}:{}", missing[0].1.peer.iter().map(|byte| format!("{byte:02x}")).collect::<String>(), missing[0].1.sequence);
+    let destination = source.join("new-folder/moved.tja");
+    let destination_bytes = destination.to_str().unwrap().as_bytes();
+    let relocate = || unsafe {
+        p2p_sync_writer_relocate_missing_file(
+            config_bytes.as_ptr(), config_bytes.len(),
+            state_bytes.as_ptr(), state_bytes.len(),
+            source_bytes.as_ptr(), source_bytes.len(),
+            move_path.as_ptr(), move_path.len(),
+            reviewed.as_ptr(), reviewed.len(),
+            destination_bytes.as_ptr(), destination_bytes.len(),
+        )
+    };
+    std::fs::write(&destination, b"different").unwrap();
+    assert_eq!(relocate(), 5);
+    std::fs::write(&destination, b"same content").unwrap();
+    assert_eq!(relocate(), 0);
+    assert_eq!(relocate(), 5);
+    assert!(writer.missing_source_files(&source).unwrap().is_empty());
+    assert_eq!(refresh(&source).0, 0);
     assert!(writer.conflicts().unwrap().is_empty());
 }
 

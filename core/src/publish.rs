@@ -93,6 +93,43 @@ pub fn refresh_tree(
     scan_tree(root, store, roster, key, completed, true)
 }
 
+/// Register only the physical ancestor directories of a user-selected file.
+/// This lets a reviewed move preserve its file ID without scanning the new
+/// file as an unrelated creation first.
+pub fn publish_directory_path(
+    root: &Path,
+    components: &[&str],
+    store: &mut Store,
+    roster: &Roster,
+    key: &PeerSigningKey,
+) -> Result<Option<ObjectId>, PublishError> {
+    let peer = authorize(store, roster, key)?;
+    let mut directory = open_root(root).map_err(PublishError::Io)?;
+    let mut parent = None;
+    for &name in components {
+        collision_key(name).map_err(PublishError::InvalidName)?;
+        directory = directory.open_dir_nofollow(name).map_err(PublishError::Io)?;
+        let id = publish_entry(
+            store,
+            roster,
+            key,
+            peer,
+            None,
+            Entry {
+                parent,
+                name: name.to_owned(),
+                kind: EntryKind::Directory,
+            },
+        )?;
+        let event = store.replica().get(id).ok_or(PublishError::Retry)?;
+        if event.change.entry().is_none_or(|entry| entry.name != name) {
+            return Err(PublishError::NameConflict);
+        }
+        parent = Some(event.object);
+    }
+    Ok(parent)
+}
+
 fn scan_tree(
     root: &Path,
     store: &mut Store,

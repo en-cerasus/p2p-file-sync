@@ -15,17 +15,18 @@ use serde::Deserialize;
 
 use crate::{
     auth::{AuthError, PeerSigningKey, Role, Roster},
-    blob::BlobStore,
+    blob::{Blob, BlobStore},
     direct::{self, DirectError, PeerEndpoint},
     generation::{
         BaselineError, CheckpointDataError, GenerationBaseline, GenerationTransition,
         TransitionError, MAX_TRANSITION_BYTES,
     },
     local_target::{open_root, NewFileTarget},
+    materialize::FileTarget,
     names::collision_key,
     projection::Projection,
     publish::{
-        publish_file, publish_tree, refresh_tree, relocate_file, resolve_file_conflict,
+        publish_directory_path, publish_file, publish_tree, refresh_tree, relocate_file, resolve_file_conflict,
         restore_archived_file, revise_file, PublishError, TreeSummary,
     },
     replica::{EntryKind, Event, EventId, PeerId},
@@ -399,6 +400,59 @@ impl Sender {
             return Err(HostError::Publish(PublishError::StaleBase));
         }
         revise_file(None, &mut self.store, &self.roster, &self.signer, &self.completed, current)
+            .map_err(HostError::Publish)
+    }
+
+    /// Keep the reviewed file ID when the user selects its new physical file.
+    /// Both the old vacancy and the destination bytes are checked before a
+    /// signed move is published; no source file is modified by this call.
+    pub fn relocate_missing_source_file(
+        &mut self,
+        root: &Path,
+        shared_path: &str,
+        reviewed: EventId,
+        destination: &Path,
+    ) -> Result<EventId, HostError> {
+        let _lock = self.lock_state()?;
+        let root = self.validate_source_root(root)?;
+        let current = self.shared_head(shared_path, false)?;
+        if current != reviewed || current.peer != self.signer.verifying_key().to_bytes() {
+            return Err(HostError::Publish(PublishError::StaleBase));
+        }
+        let event = self.store.replica().get(current).ok_or(HostError::Publish(PublishError::StaleBase))?;
+        let object = event.object;
+        let Some(EntryKind::File(hash)) = event.change.entry().map(|entry| &entry.kind) else {
+            return Err(HostError::Publish(PublishError::StaleBase));
+        };
+        let hash = *hash;
+        let old_path = Projection::new(self.store.replica()).path(object)
+            .map_err(|_| HostError::Publish(PublishError::StaleBase))?;
+        let directory = open_root(&root).map_err(HostError::Io)?;
+        let old = NewFileTarget::existing(&directory, &old_path).map_err(HostError::Io)?;
+        if !old.name_is_vacant().map_err(HostError::Io)? {
+            return Err(HostError::Publish(PublishError::StaleBase));
+        }
+        let destination = fs::canonicalize(destination).map_err(HostError::Io)?;
+        let relative = destination.strip_prefix(&root).map_err(|_| HostError::Configuration)?;
+        let components = relative.iter().map(|component| component.to_str().ok_or(HostError::Configuration))
+            .collect::<Result<Vec<_>, _>>()?;
+        if components.is_empty() {
+            return Err(HostError::Configuration);
+        }
+        for component in &components {
+            collision_key(component).map_err(|error| HostError::Publish(PublishError::InvalidName(error)))?;
+        }
+        let mut target = NewFileTarget::existing(&directory, &components).map_err(HostError::Io)?;
+        let stored = self.completed.open_candidate(hash).map_err(HostError::Io)?;
+        let expected = Blob { hash, length: stored.metadata().map_err(HostError::Io)?.len() };
+        self.completed.open_verified(expected).map_err(HostError::Io)?;
+        if target.inspect(object).map_err(HostError::Io)? != Some(expected) {
+            return Err(HostError::Publish(PublishError::StaleBase));
+        }
+        let (name, parents) = components.split_last().ok_or(HostError::Configuration)?;
+        let parent = publish_directory_path(&root, parents, &mut self.store, &self.roster, &self.signer)
+            .map_err(HostError::Publish)?;
+        relocate_file(&mut self.store, &self.roster, &self.signer, current, parent, name)
             .map_err(HostError::Publish)
     }
 
