@@ -31,7 +31,7 @@
 
 - `recover_updated_file_with` と `recover_deleted_file_with` は、署名済み head・適用済み版・元のパスと親の整合性を共通コアで検証した後、OS別の `FileTarget` を作る。Windows はこの経路で従来のハンドルベース処理を実行する。iOS にはファイル調整の下で最後の照合と置換・削除を行う専用アダプターを追加する。Unix の単純なパス操作への置換では安全条件を満たさない。
 - Rust FFI から呼び出す Swift 側のファイル調整層で、反映対象のパスを調整する。同期の通信や SQLite トランザクションを調整コールバック内で長時間保持しない。
-- `recover_updated_file`、`recover_moved_file`、`recover_deleted_file` の検証と復旧の共通部分を iOS から利用し、`sync.rs` の iOS 保留分岐を実行経路へ変更する。
+- `recover_updated_file_with`、`recover_moved_file_with`、`recover_deleted_file_with` の共通検証を iOS から利用し、ファイル調整を行う `FileTarget` と `MoveFileTarget` を実装してから `sync.rs` の iOS 保留分岐を実行経路へ変更する。移動アダプターは新しい名前の占有を拒否し、移動済みの旧版と新版のどちらでも途中終了から再開できる必要がある。
 - 変更されたローカルファイル、移動先衝突、権限拒否、ストレージ不足、各永続化境界での強制終了を検証する。iPhone 11 の Files アプリからの編集とバックグラウンド復帰も実機で確認する。
 
 この設計は実装・実機試験前の作業仕様であり、現行 iOS アプリで既存ファイルの更新・移動・削除が動作するという意味ではない。

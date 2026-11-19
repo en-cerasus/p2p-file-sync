@@ -193,6 +193,82 @@ fn platform_adapter_receives_validated_update_and_deletion_paths() {
 }
 
 #[test]
+fn platform_move_adapter_receives_the_recorded_source_and_destination() {
+    struct MoveTarget {
+        source: Option<Vec<u8>>,
+        destination: Option<Vec<u8>>,
+    }
+    impl FileTarget for MoveTarget {
+        fn inspect(&mut self, _: ObjectId) -> io::Result<Option<Blob>> {
+            Ok(self.destination.as_deref().map(metadata))
+        }
+        fn replace_if_current(&mut self, intent: &FileIntent, replacement: Option<File>) -> io::Result<bool> {
+            if self.inspect(intent.object)? != intent.previous { return Ok(false); }
+            self.destination = replacement.map(|mut file| {
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes)?;
+                Ok::<_, io::Error>(bytes)
+            }).transpose()?;
+            Ok(true)
+        }
+    }
+    impl MoveFileTarget for MoveTarget {
+        fn already_moved(&mut self, previous: Blob, desired: Blob, _: bool) -> io::Result<bool> {
+            let current = self.destination.as_deref().map(metadata);
+            Ok(self.source.is_none() && (current == Some(previous) || current == Some(desired)))
+        }
+        fn move_if_current(&mut self, previous: Blob, _: bool) -> io::Result<bool> {
+            if self.source.as_deref().map(metadata) != Some(previous) || self.destination.is_some() {
+                return Ok(false);
+            }
+            self.destination = self.source.take();
+            Ok(true)
+        }
+    }
+
+    let folder = tempfile::tempdir().unwrap();
+    let blobs = BlobStore::open(folder.path().join("objects")).unwrap();
+    let content = metadata(b"old");
+    let replacement = metadata(b"edited after moving");
+    blobs.put(content, &b"old"[..]).unwrap();
+    blobs.put(replacement, &b"edited after moving"[..]).unwrap();
+    let mut store = Store::open(folder.path().join("state.db"), Membership {
+        share: [12; 16], generation: 1, members: [PEER].into(),
+    }).unwrap();
+    let created = event(1, content_entry(content.hash));
+    store.apply_verified(created.clone()).unwrap();
+    let first = FileIntent {
+        object: OBJECT, event: created.id, previous: None, desired: Some(content),
+    };
+    store.stage_file(&blobs, &first).unwrap();
+    store.recover_file(&blobs, &mut Target::default(), OBJECT).unwrap();
+    let moved = Event {
+        id: EventId { peer: PEER, sequence: 2 },
+        context: [(PEER, 1)].into(),
+        object: OBJECT,
+        change: Change::Revise { base: created.id, entry: Some(Entry {
+            name: "moved.tja".into(), ..content_entry(replacement.hash)
+        }) },
+    };
+    store.apply_verified(moved.clone()).unwrap();
+    let intent = FileIntent {
+        object: OBJECT, event: moved.id, previous: Some(content), desired: Some(replacement),
+    };
+    store.stage_file(&blobs, &intent).unwrap();
+    assert_eq!(store.recover_moved_file_with(&blobs, OBJECT, |before, after, pending, same_slot| {
+        assert_eq!(before, &[String::from("song.tja")]);
+        assert_eq!(after, &[String::from("moved.tja")]);
+        assert_eq!(pending, &intent);
+        assert!(!same_slot);
+        Ok(MoveTarget { source: Some(b"old".to_vec()), destination: None })
+    }).unwrap(), Recovery::Applied);
+    let applied = store.applied_file(OBJECT).unwrap().unwrap();
+    assert_eq!(applied.event, moved.id);
+    assert_eq!(applied.contents, Some(replacement));
+    assert_eq!(applied.path.unwrap(), ["moved.tja"]);
+}
+
+#[test]
 fn resumes_after_filesystem_write_when_sql_completion_failed() {
     let f = Fixture::new();
     let mut store = f.open();

@@ -68,6 +68,14 @@ pub trait FileTarget {
     ) -> io::Result<bool>;
 }
 
+/// Platform move adapter. It must never replace an occupied destination and
+/// must keep the source bytes available when a move cannot be completed.
+pub trait MoveFileTarget: FileTarget {
+    fn already_moved(&mut self, previous: Blob, desired: Blob, same_slot: bool)
+        -> io::Result<bool>;
+    fn move_if_current(&mut self, previous: Blob, same_slot: bool) -> io::Result<bool>;
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Recovery {
     NonePending,
@@ -375,6 +383,26 @@ impl Store {
         root: &Path,
         object: ObjectId,
     ) -> Result<Recovery, MaterializeError> {
+        self.recover_moved_file_with(blobs, object, |old_path, path, intent, _same_slot| {
+            let root = open_root(root)?;
+            let source_components: Vec<_> = old_path.iter().map(String::as_str).collect();
+            let target_components: Vec<_> = path.iter().map(String::as_str).collect();
+            Ok(WindowsMoveTarget {
+                source: NewFileTarget::existing(&root, &source_components)?,
+                target: NewFileTarget::existing(&root, &target_components)?,
+                intent: intent.clone(),
+            })
+        })
+    }
+
+    /// Validate both recorded paths and the single signed head before the
+    /// platform adapter moves the verified source to an unoccupied name.
+    pub fn recover_moved_file_with<T: MoveFileTarget>(
+        &mut self,
+        blobs: &BlobStore,
+        object: ObjectId,
+        make_target: impl FnOnce(&[String], &[String], &FileIntent, bool) -> io::Result<T>,
+    ) -> Result<Recovery, MaterializeError> {
         let (tx, replica) = self.begin_indexed_write()?;
         let Some((intent, Some(path))) = load_intent(&tx, object)? else {
             return Ok(Recovery::NonePending);
@@ -407,38 +435,16 @@ impl Store {
         if !same_slot && !projection.vacant(old_entry.parent, &old_entry.name) {
             return Ok(Recovery::Diverged);
         }
-        let root = open_root(root)?;
-        let source_components: Vec<_> = old_path.iter().map(String::as_str).collect();
-        let target_components: Vec<_> = path.iter().map(String::as_str).collect();
-        let source = NewFileTarget::existing(&root, &source_components)?;
-        let mut target = NewFileTarget::existing(&root, &target_components)?;
-        let already_renamed = if same_slot {
-            target.is_only_spelling()? || source.name_is_vacant()?
-        } else {
-            source.name_is_vacant()?
-        };
-        let content_ready = if !already_renamed {
-            false
-        } else if desired == previous {
-            target
-                .inspect(object)
-                .is_ok_and(|blob| blob == Some(previous))
-        } else {
-            let status = target.update_status(&intent)?;
-            status == Some(previous) || status == Some(desired)
-        };
+        let mut target = make_target(&old_path, &path, &intent, same_slot)?;
+        let content_ready = target.already_moved(previous, desired, same_slot)?;
         let result = if content_ready {
             Recovery::AlreadyApplied
-        } else if source.move_verified(&target, previous, same_slot)? {
+        } else if target.move_if_current(previous, same_slot)? {
             Recovery::Applied
         } else {
             return Ok(Recovery::Diverged);
         };
         if desired != previous {
-            let mut target = UpdateTarget {
-                target,
-                intent: intent.clone(),
-            };
             return reconcile(tx, blobs, &mut target, &intent, Some(path), true);
         }
         record_applied(&tx, &intent, Some(path))?;
@@ -515,7 +521,6 @@ impl Store {
     }
 }
 
-#[cfg(windows)]
 fn same_name_slot(before: &[String], after: &[String]) -> bool {
     use crate::names::collision_key;
 
@@ -546,6 +551,56 @@ impl FileTarget for UpdateTarget {
         replacement: Option<File>,
     ) -> io::Result<bool> {
         self.target.replace_if_current(intent, replacement)
+    }
+}
+
+#[cfg(windows)]
+struct WindowsMoveTarget {
+    source: NewFileTarget,
+    target: NewFileTarget,
+    intent: FileIntent,
+}
+
+#[cfg(windows)]
+impl FileTarget for WindowsMoveTarget {
+    fn inspect(&mut self, object: ObjectId) -> io::Result<Option<Blob>> {
+        if self.intent.desired == self.intent.previous {
+            self.target.inspect(object)
+        } else {
+            self.target.update_status(&self.intent)
+        }
+    }
+
+    fn replace_if_current(
+        &mut self,
+        intent: &FileIntent,
+        replacement: Option<File>,
+    ) -> io::Result<bool> {
+        self.target.replace_if_current(intent, replacement)
+    }
+}
+
+#[cfg(windows)]
+impl MoveFileTarget for WindowsMoveTarget {
+    fn already_moved(&mut self, previous: Blob, desired: Blob, same_slot: bool)
+        -> io::Result<bool> {
+        let already_renamed = if same_slot {
+            self.target.is_only_spelling()? || self.source.name_is_vacant()?
+        } else {
+            self.source.name_is_vacant()?
+        };
+        if !already_renamed {
+            return Ok(false);
+        }
+        if desired == previous {
+            return Ok(self.target.inspect(self.intent.object)? == Some(previous));
+        }
+        let status = self.target.update_status(&self.intent)?;
+        Ok(status == Some(previous) || status == Some(desired))
+    }
+
+    fn move_if_current(&mut self, previous: Blob, same_slot: bool) -> io::Result<bool> {
+        self.source.move_verified(&self.target, previous, same_slot)
     }
 }
 
