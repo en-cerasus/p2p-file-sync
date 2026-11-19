@@ -269,6 +269,47 @@ fn platform_move_adapter_receives_the_recorded_source_and_destination() {
 }
 
 #[test]
+fn stale_move_retains_the_path_that_was_staged_for_recovery() {
+    let f = Fixture::new();
+    let root = f.folder.path().join("destination");
+    std::fs::create_dir(&root).unwrap();
+    let mut store = f.open();
+    let created = FileIntent { previous: None, ..f.intent.clone() };
+    store.stage_file(&f.blobs, &created).unwrap();
+    store.recover_new_file(&f.blobs, &root, OBJECT).unwrap();
+
+    let content = created.desired.unwrap();
+    let moved = Event {
+        id: EventId { peer: PEER, sequence: 3 },
+        context: [(PEER, 2)].into(),
+        object: OBJECT,
+        change: Change::Revise { base: created.event, entry: Some(Entry {
+            name: "moved.tja".into(), ..content_entry(content.hash)
+        }) },
+    };
+    store.apply_verified(moved.clone()).unwrap();
+    let intent = FileIntent {
+        object: OBJECT, event: moved.id, previous: Some(content), desired: Some(content),
+    };
+    store.stage_file(&f.blobs, &intent).unwrap();
+    let newer = Event {
+        id: EventId { peer: PEER, sequence: 4 },
+        context: [(PEER, 3)].into(),
+        object: OBJECT,
+        change: Change::Revise { base: moved.id, entry: Some(Entry {
+            name: "newer.tja".into(), ..content_entry(content.hash)
+        }) },
+    };
+    store.apply_verified(newer).unwrap();
+
+    assert_eq!(store.pending_files_with_paths().unwrap(), [
+        (intent, Some(vec!["moved.tja".into()]))
+    ]);
+    assert_eq!(p2p_sync_core::projection::Projection::new(store.replica()).path(OBJECT).unwrap(),
+               vec!["newer.tja"]);
+}
+
+#[test]
 fn resumes_after_filesystem_write_when_sql_completion_failed() {
     let f = Fixture::new();
     let mut store = f.open();
