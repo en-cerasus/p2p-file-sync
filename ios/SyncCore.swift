@@ -127,8 +127,118 @@ enum SyncCore {
         let skipped: UInt64
     }
 
+    struct WriterHistoryEntry: Decodable, Identifiable, Sendable {
+        let id: Int64
+        let archive: String
+        let replaced_by: String
+        let current_heads: [String]
+        let path: [String]?
+        let bytes: UInt64
+        let archived_at: Int64
+    }
+
+    struct WriterConflictVersion: Decodable, Identifiable, Sendable {
+        let id: String
+        let name: String?
+        let kind: String
+    }
+
+    struct WriterConflict: Decodable, Identifiable, Sendable {
+        let versions: [WriterConflictVersion]
+        var id: String { versions.map(\.id).joined(separator: "|") }
+    }
+
     private struct WriterReportContext {
         var json: Data?
+    }
+
+    static func writerHistory(configuration: URL, state: URL) throws -> [WriterHistoryEntry] {
+        let config = Array(configuration.path.utf8)
+        let storage = Array(state.path.utf8)
+        var report = WriterReportContext(json: nil)
+        let status = withUnsafeMutablePointer(to: &report) { context in
+            config.withUnsafeBufferPointer { configBytes in
+                storage.withUnsafeBufferPointer { stateBytes in
+                    p2p_sync_writer_history(configBytes.baseAddress, configBytes.count,
+                                            stateBytes.baseAddress, stateBytes.count,
+                                            { context, data, length in
+                                                guard let context, let data else { return }
+                                                context.assumingMemoryBound(to: WriterReportContext.self).pointee.json =
+                                                    Data(bytes: data, count: length)
+                                            }, UnsafeMutableRawPointer(context))
+                }
+            }
+        }
+        guard status == P2P_SYNC_OK else { throw CoreError.writerFailed(status) }
+        guard let json = report.json else { throw CoreError.missingWriterReport }
+        return try JSONDecoder().decode([WriterHistoryEntry].self, from: json)
+    }
+
+    static func writerConflicts(configuration: URL, state: URL) throws -> [WriterConflict] {
+        let config = Array(configuration.path.utf8)
+        let storage = Array(state.path.utf8)
+        var report = WriterReportContext(json: nil)
+        let status = withUnsafeMutablePointer(to: &report) { context in
+            config.withUnsafeBufferPointer { configBytes in
+                storage.withUnsafeBufferPointer { stateBytes in
+                    p2p_sync_writer_conflicts(configBytes.baseAddress, configBytes.count,
+                                              stateBytes.baseAddress, stateBytes.count,
+                                              { context, data, length in
+                                                  guard let context, let data else { return }
+                                                  context.assumingMemoryBound(to: WriterReportContext.self).pointee.json =
+                                                      Data(bytes: data, count: length)
+                                              }, UnsafeMutableRawPointer(context))
+                }
+            }
+        }
+        guard status == P2P_SYNC_OK else { throw CoreError.writerFailed(status) }
+        guard let json = report.json else { throw CoreError.missingWriterReport }
+        return try JSONDecoder().decode([WriterConflict].self, from: json)
+    }
+
+    static func restoreWriterHistory(configuration: URL, state: URL,
+                                     archive: String, reviewed: String) throws {
+        let config = Array(configuration.path.utf8)
+        let storage = Array(state.path.utf8)
+        let archived = Array(archive.utf8)
+        let current = Array(reviewed.utf8)
+        let status = config.withUnsafeBufferPointer { configBytes in
+            storage.withUnsafeBufferPointer { stateBytes in
+                archived.withUnsafeBufferPointer { archiveBytes in
+                    current.withUnsafeBufferPointer { currentBytes in
+                        p2p_sync_writer_restore(
+                            configBytes.baseAddress, configBytes.count,
+                            stateBytes.baseAddress, stateBytes.count,
+                            archiveBytes.baseAddress, archiveBytes.count,
+                            currentBytes.baseAddress, currentBytes.count)
+                    }
+                }
+            }
+        }
+        guard status == P2P_SYNC_OK else { throw CoreError.writerFailed(status) }
+    }
+
+    static func resolveWriterConflict(configuration: URL, state: URL,
+                                      choice: String, reviewed: [String]) throws {
+        let config = Array(configuration.path.utf8)
+        let storage = Array(state.path.utf8)
+        let chosen = Array(choice.utf8)
+        let candidates = try JSONEncoder().encode(reviewed)
+        let status = config.withUnsafeBufferPointer { configBytes in
+            storage.withUnsafeBufferPointer { stateBytes in
+                chosen.withUnsafeBufferPointer { choiceBytes in
+                    candidates.withUnsafeBytes { candidateBytes in
+                        let bytes = candidateBytes.bindMemory(to: UInt8.self)
+                        return p2p_sync_writer_resolve(
+                            configBytes.baseAddress, configBytes.count,
+                            stateBytes.baseAddress, stateBytes.count,
+                            choiceBytes.baseAddress, choiceBytes.count,
+                            bytes.baseAddress, bytes.count)
+                    }
+                }
+            }
+        }
+        guard status == P2P_SYNC_OK else { throw CoreError.writerFailed(status) }
     }
 
     static func refreshWriter(configuration: URL, state: URL, source: URL) throws -> WriterSummary {
