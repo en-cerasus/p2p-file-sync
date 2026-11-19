@@ -162,7 +162,7 @@ pub(crate) fn pull_serving_cache_cancellable(
     if cancelled() {
         Err(DirectError::Cancelled)
     } else {
-        Ok(result)
+        result
     }
 }
 
