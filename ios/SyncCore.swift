@@ -630,6 +630,17 @@ enum SyncCore {
 
     static func pull(configuration: URL, state: URL, destination: URL,
                      cancellation: Cancellation = Cancellation()) throws -> PullSummary {
+        // Finish previously verified local operations before attempting a
+        // connection, so a temporarily offline peer does not block recovery.
+        let resumed: PendingCounts
+        do {
+            resumed = try recoverPending(configuration: configuration, state: state,
+                                         destination: destination, cancellation: cancellation)
+        } catch CoreError.pendingFailed(2) {
+            // A new generation may have a staged baseline but no activation
+            // marker yet. The pull below performs the transition checks.
+            resumed = PendingCounts()
+        }
         var summary = p2p_sync_pull_summary_v3()
         let config = Array(configuration.path.utf8)
         let storage = Array(state.path.utf8)
@@ -670,9 +681,9 @@ enum SyncCore {
             eventsAdded: summary.sync.events_added, filesPublished: summary.sync.files_published,
             filesPresent: summary.sync.files_present,
             filesBlocked: max(summary.sync.files_blocked - min(summary.sync.files_blocked, publishedLocally),
-                              recovered.blocked),
-            filesUpdated: summary.sync.files_updated + recovered.updated,
-            filesRemoved: summary.sync.files_removed + recovered.removed,
+                              recovered.blocked + resumed.blocked),
+            filesUpdated: summary.sync.files_updated + resumed.updated + recovered.updated,
+            filesRemoved: summary.sync.files_removed + resumed.removed + recovered.removed,
             protectedFiles: summary.protected_files, protectedBytes: summary.protected_bytes,
             protectedMissing: summary.protected_missing,
             originals: details.originals,

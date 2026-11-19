@@ -953,11 +953,22 @@ pub struct PendingLocalFile {
 }
 
 #[cfg(target_os = "ios")]
-fn open_local_receiver(
+struct LocalReceiverLayout {
+    roster: Roster,
+    migration: Option<MigrationConfig>,
+    generation: u64,
+    destination: PathBuf,
+    share_root: PathBuf,
+    state: PathBuf,
+    witness: PathBuf,
+}
+
+#[cfg(target_os = "ios")]
+fn local_receiver_layout(
     configuration: &Path,
     state_root: &Path,
     destination: &Path,
-) -> Result<(Store, BlobStore, PathBuf), HostError> {
+) -> Result<LocalReceiverLayout, HostError> {
     let config: Config = serde_json::from_slice(&read_bounded(configuration, MAX_CONFIG_BYTES)?)
         .map_err(|_| HostError::Configuration)?;
     let roster = build_roster(&config.share, config.generation, config.members)?;
@@ -969,18 +980,28 @@ fn open_local_receiver(
         .iter().map(|byte| format!("{byte:02x}")).collect();
     let share_root = state_root.join(config.share.to_ascii_lowercase());
     let state = share_root.join(config.generation.to_string()).join(&destination_id);
-    let completed = BlobStore::open(state.join("files")).map_err(HostError::Io)?;
+    let witness = share_root.join("witness").join(config.generation.to_string()).join(&destination_id);
+    Ok(LocalReceiverLayout {
+        roster, migration: config.migration, generation: config.generation,
+        destination, share_root, state, witness,
+    })
+}
+
+#[cfg(target_os = "ios")]
+fn open_local_receiver(
+    configuration: &Path,
+    layout: LocalReceiverLayout,
+) -> Result<(Store, BlobStore, PathBuf), HostError> {
+    let completed = BlobStore::open(layout.state.join("files")).map_err(HostError::Io)?;
     let (mut store, digest) = open_host_store(
-        &state, &completed, &roster,
+        &layout.state, &completed, &layout.roster,
         configuration.parent().ok_or(HostError::Configuration)?,
-        config.migration.as_ref(),
+        layout.migration.as_ref(),
     )?;
-    check_generation(&share_root.join("active-generation"), config.generation, digest, false)?;
-    store.enable_event_witness(
-        share_root.join("witness").join(config.generation.to_string()).join(&destination_id)
-    ).map_err(HostError::Store)?;
+    check_generation(&layout.share_root.join("active-generation"), layout.generation, digest, false)?;
+    store.enable_event_witness(layout.witness).map_err(HostError::Store)?;
     store.refresh().map_err(HostError::Store)?;
-    Ok((store, completed, destination))
+    Ok((store, completed, layout.destination))
 }
 
 #[cfg(target_os = "ios")]
@@ -1010,7 +1031,11 @@ fn pending_local_file(store: &Store, intent: &crate::materialize::FileIntent,
 #[cfg(target_os = "ios")]
 pub fn pending_local_files(configuration: &Path, state: &Path, destination: &Path)
     -> Result<Vec<PendingLocalFile>, HostError> {
-    let (store, _, _) = open_local_receiver(configuration, state, destination)?;
+    let layout = local_receiver_layout(configuration, state, destination)?;
+    if !layout.state.exists() && !layout.witness.exists() {
+        return Ok(Vec::new());
+    }
+    let (store, _, _) = open_local_receiver(configuration, layout)?;
     let pending = store.pending_files_with_paths().map_err(HostError::Materialize)?;
     let files: Result<Vec<_>, _> = pending.iter()
         .map(|(intent, path)| pending_local_file(&store, intent, path.clone())).collect();
@@ -1024,7 +1049,8 @@ pub fn apply_local_file(configuration: &Path, state: &Path, destination: &Path,
                         reviewed: &PendingLocalFile)
     -> Result<crate::materialize::Recovery, HostError> {
     use crate::local_target::{AppleExistingTarget, AppleMoveTarget};
-    let (mut store, blobs, root) = open_local_receiver(configuration, state, destination)?;
+    let layout = local_receiver_layout(configuration, state, destination)?;
+    let (mut store, blobs, root) = open_local_receiver(configuration, layout)?;
     let object = hex::<16>(&reviewed.object)?;
     let (intent, path) = store.pending_files_with_paths().map_err(HostError::Materialize)?
         .into_iter().find(|(intent, _)| intent.object == object)
