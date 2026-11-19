@@ -192,6 +192,7 @@ fn publish_heads(
 
     for (object, event, previous, live, moving) in files {
         check_cancelled(cancelled)?;
+        #[cfg(not(target_os = "ios"))]
         let (previous, moving) = if store
             .retire_superseded_file(destination.completed, destination.root, object)
             .map_err(SyncError::Materialize)?
@@ -211,6 +212,10 @@ fn publish_heads(
         } else {
             (previous, moving)
         };
+        // Retiring a stale intent can inspect or change an existing file.
+        // On iOS that must happen under NSFileCoordinator, outside this pull.
+        #[cfg(target_os = "ios")]
+        let (previous, moving) = (previous, moving);
         #[cfg(windows)]
         if moving {
             let Some(previous) = previous else {
@@ -315,7 +320,23 @@ fn publish_heads(
         };
         let is_update = previous.is_some() && previous != desired;
         check_cancelled(cancelled)?;
-        #[cfg(not(windows))]
+        #[cfg(target_os = "ios")]
+        if is_update || moving {
+            let intent = FileIntent {
+                object,
+                event,
+                previous,
+                desired,
+            };
+            match store.stage_file(destination.completed, &intent) {
+                Ok(()) | Err(MaterializeError::AlreadyPending | MaterializeError::InvalidIntent) => {
+                    report.files.push((object, FileResult::PendingRecovery));
+                }
+                Err(error) => return Err(SyncError::Materialize(error)),
+            }
+            continue;
+        }
+        #[cfg(all(not(windows), not(target_os = "ios")))]
         if is_update || moving {
             // This platform has no conditional existing-file adapter yet.
             // This includes a path-only move with unchanged content. Keep
@@ -330,7 +351,7 @@ fn publish_heads(
                 &FileIntent {
                     object,
                     event,
-                    previous: if is_update { previous } else { None },
+                    previous: if is_update || moving { previous } else { None },
                     desired,
                 },
             )

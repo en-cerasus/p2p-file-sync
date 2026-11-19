@@ -12,6 +12,8 @@ use rustls::{
     RootCertStore,
 };
 use serde::Deserialize;
+#[cfg(target_os = "ios")]
+use serde::Serialize;
 
 use crate::{
     auth::{AuthError, PeerSigningKey, Role, Roster},
@@ -928,6 +930,126 @@ pub enum HostError {
     CheckpointTooLarge,
     Baseline(BaselineError),
     InactiveGeneration,
+    #[cfg(target_os = "ios")]
+    Materialize(crate::materialize::MaterializeError),
+}
+
+#[cfg(target_os = "ios")]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PendingLocalKind {
+    Update,
+    Delete,
+    Move,
+}
+
+#[cfg(target_os = "ios")]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PendingLocalFile {
+    pub object: String,
+    pub kind: PendingLocalKind,
+    pub source: Vec<String>,
+    pub destination: Option<Vec<String>>,
+}
+
+#[cfg(target_os = "ios")]
+fn open_local_receiver(
+    configuration: &Path,
+    state_root: &Path,
+    destination: &Path,
+) -> Result<(Store, BlobStore, PathBuf), HostError> {
+    let config: Config = serde_json::from_slice(&read_bounded(configuration, MAX_CONFIG_BYTES)?)
+        .map_err(|_| HostError::Configuration)?;
+    let roster = build_roster(&config.share, config.generation, config.members)?;
+    let destination = destination.canonicalize().map_err(HostError::Io)?;
+    if !destination.is_dir() {
+        return Err(HostError::Configuration);
+    }
+    let destination_id: String = crate::sha256(destination.as_os_str().as_encoded_bytes())
+        .iter().map(|byte| format!("{byte:02x}")).collect();
+    let share_root = state_root.join(config.share.to_ascii_lowercase());
+    let state = share_root.join(config.generation.to_string()).join(&destination_id);
+    let completed = BlobStore::open(state.join("files")).map_err(HostError::Io)?;
+    let (mut store, digest) = open_host_store(
+        &state, &completed, &roster,
+        configuration.parent().ok_or(HostError::Configuration)?,
+        config.migration.as_ref(),
+    )?;
+    check_generation(&share_root.join("active-generation"), config.generation, digest, false)?;
+    store.enable_event_witness(
+        share_root.join("witness").join(config.generation.to_string()).join(&destination_id)
+    ).map_err(HostError::Store)?;
+    store.refresh().map_err(HostError::Store)?;
+    Ok((store, completed, destination))
+}
+
+#[cfg(target_os = "ios")]
+fn pending_local_file(store: &Store, intent: &crate::materialize::FileIntent)
+    -> Result<Option<PendingLocalFile>, HostError> {
+    let applied = store.applied_file(intent.object).map_err(HostError::Materialize)?;
+    let Some(applied) = applied.filter(|entry| entry.contents == intent.previous) else {
+        return Ok(None);
+    };
+    let Some(source) = applied.path else { return Ok(None) };
+    let (kind, destination) = if intent.desired.is_none() {
+        (PendingLocalKind::Delete, None)
+    } else {
+        let Ok(path) = Projection::new(store.replica()).path(intent.object) else {
+            return Ok(None);
+        };
+        let path: Vec<String> = path.into_iter().map(str::to_owned).collect();
+        if path == source {
+            (PendingLocalKind::Update, Some(path))
+        } else {
+            (PendingLocalKind::Move, Some(path))
+        }
+    };
+    if intent.previous.is_none() { return Ok(None) }
+    let object = intent.object.iter().map(|byte| format!("{byte:02x}")).collect();
+    Ok(Some(PendingLocalFile { object, kind, source, destination }))
+}
+
+#[cfg(target_os = "ios")]
+pub fn pending_local_files(configuration: &Path, state: &Path, destination: &Path)
+    -> Result<Vec<PendingLocalFile>, HostError> {
+    let (store, _, _) = open_local_receiver(configuration, state, destination)?;
+    let pending = store.pending_files().map_err(HostError::Materialize)?;
+    let files: Result<Vec<_>, _> = pending.iter()
+        .map(|intent| pending_local_file(&store, intent)).collect();
+    Ok(files?.into_iter().flatten().collect())
+}
+
+/// The caller must hold NSFileCoordinator write access for every URL in the
+/// reviewed item for the duration of this call.
+#[cfg(target_os = "ios")]
+pub fn apply_local_file(configuration: &Path, state: &Path, destination: &Path,
+                        reviewed: &PendingLocalFile)
+    -> Result<crate::materialize::Recovery, HostError> {
+    use crate::local_target::{AppleExistingTarget, AppleMoveTarget};
+    let (mut store, blobs, root) = open_local_receiver(configuration, state, destination)?;
+    let object = hex::<32>(&reviewed.object)?;
+    let intent = store.pending_files().map_err(HostError::Materialize)?
+        .into_iter().find(|intent| intent.object == object)
+        .ok_or(HostError::Configuration)?;
+    if pending_local_file(&store, &intent)?.as_ref() != Some(reviewed) {
+        return Err(HostError::Configuration);
+    }
+    let result = match reviewed.kind {
+        PendingLocalKind::Update => store.recover_updated_file_with(&blobs, object, |path, intent| {
+            let components: Vec<_> = path.iter().map(String::as_str).collect();
+            AppleExistingTarget::open(&open_root(&root)?, &components, intent)
+        }),
+        PendingLocalKind::Delete => store.recover_deleted_file_with(&blobs, object, |path, intent| {
+            let components: Vec<_> = path.iter().map(String::as_str).collect();
+            AppleExistingTarget::open(&open_root(&root)?, &components, intent)
+        }),
+        PendingLocalKind::Move => store.recover_moved_file_with(&blobs, object, |old, new, intent, _| {
+            let before: Vec<_> = old.iter().map(String::as_str).collect();
+            let after: Vec<_> = new.iter().map(String::as_str).collect();
+            AppleMoveTarget::open(&open_root(&root)?, &before, &after, intent)
+        }),
+    };
+    result.map_err(HostError::Materialize)
 }
 
 fn generation_marker_bytes(generation: u64, digest: [u8; 32]) -> [u8; 40] {

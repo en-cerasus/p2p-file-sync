@@ -960,6 +960,89 @@ unsafe fn writer_paths<'a>(
     ))
 }
 
+#[cfg(target_os = "ios")]
+unsafe fn receiver_paths<'a>(paths: [(*const u8, usize); 3])
+    -> Option<[&'a std::path::Path; 3]> {
+    let [config, state, destination] = paths.map(|(ptr, len)| {
+        unsafe { borrowed_text(ptr, len, 32_768) }.map(std::path::Path::new)
+    });
+    Some([config?, state?, destination?])
+}
+
+/// List verified, staged changes to existing local files. JSON callback data
+/// is borrowed only for the duration of the call.
+///
+/// # Safety
+/// All path buffers must be readable UTF-8; callback must be valid.
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_ios_pending_v1(
+    config: *const u8, config_len: usize,
+    state: *const u8, state_len: usize,
+    destination: *const u8, destination_len: usize,
+    callback: Option<OriginalsCallback>, context: *mut std::ffi::c_void,
+) -> i32 {
+    let Some(callback) = callback else { return INVALID_ARGUMENT };
+    let Some([config, state, destination]) = (unsafe {
+        receiver_paths([(config, config_len), (state, state_len), (destination, destination_len)])
+    }) else { return INVALID_ARGUMENT };
+    let result = std::panic::catch_unwind(|| {
+        let pending = host::pending_local_files(config, state, destination).map_err(host_error_code)?;
+        serde_json::to_vec(&pending).map_err(|_| 6)
+    });
+    match result {
+        Ok(Ok(bytes)) => { callback(context, bytes.as_ptr(), bytes.len()); OK }
+        Ok(Err(code)) => code,
+        Err(_) => 6,
+    }
+}
+
+/// Apply one previously listed item while Swift holds NSFileCoordinator write
+/// access to both its source and destination URLs. The reviewed JSON must be
+/// byte-for-byte semantically equal to the current staged item.
+///
+/// # Safety
+/// Buffers must be valid for this call and outcome writable on success.
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_ios_apply_v1(
+    config: *const u8, config_len: usize,
+    state: *const u8, state_len: usize,
+    destination: *const u8, destination_len: usize,
+    reviewed: *const u8, reviewed_len: usize,
+    outcome: *mut i32,
+) -> i32 {
+    if outcome.is_null() { return INVALID_ARGUMENT }
+    let Some([config, state, destination]) = (unsafe {
+        receiver_paths([(config, config_len), (state, state_len), (destination, destination_len)])
+    }) else { return INVALID_ARGUMENT };
+    if reviewed.is_null() || reviewed_len == 0 || reviewed_len > 16_384 {
+        return INVALID_ARGUMENT;
+    }
+    let input = unsafe { std::slice::from_raw_parts(reviewed, reviewed_len) };
+    let Ok(reviewed) = serde_json::from_slice::<host::PendingLocalFile>(input) else {
+        return INVALID_ARGUMENT;
+    };
+    let result = std::panic::catch_unwind(|| {
+        host::apply_local_file(config, state, destination, &reviewed).map_err(host_error_code)
+    });
+    match result {
+        Ok(Ok(value)) => {
+            let code = match value {
+                materialize::Recovery::NonePending => 0,
+                materialize::Recovery::Applied => 1,
+                materialize::Recovery::AlreadyApplied => 2,
+                materialize::Recovery::Diverged => 3,
+                materialize::Recovery::Superseded => 4,
+            };
+            unsafe { outcome.write(code) };
+            OK
+        }
+        Ok(Err(code)) => code,
+        Err(_) => 6,
+    }
+}
+
 fn parse_event_id(value: &str) -> Option<replica::EventId> {
     let (peer, sequence) = value.split_once(':')?;
     if peer.len() != 64 || !peer.bytes().all(|byte| byte.is_ascii_hexdigit()) {

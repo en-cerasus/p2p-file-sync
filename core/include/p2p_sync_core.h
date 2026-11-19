@@ -98,6 +98,23 @@ int32_t p2p_sync_pull_v6(const uint8_t *config, size_t config_len,
                          p2p_sync_originals_callback details, void *context,
                          p2p_sync_cancel_callback cancellation);
 
+/* iOS receiver: list staged changes to existing files as JSON. Each item has
+   object, kind (update/delete/move), source components, and optional
+   destination components. All paths are relative to the selected destination.
+   Fetching is finished before these calls. The apply call must run inside an
+   NSFileCoordinator accessor covering source and destination write URLs.
+   outcome: 0 no pending, 1 applied, 2 already applied, 3 diverged,
+   4 superseded. Reviewed JSON must match the current staged item. */
+int32_t p2p_sync_ios_pending_v1(const uint8_t *config, size_t config_len,
+                                 const uint8_t *state, size_t state_len,
+                                 const uint8_t *destination, size_t destination_len,
+                                 p2p_sync_originals_callback callback, void *context);
+int32_t p2p_sync_ios_apply_v1(const uint8_t *config, size_t config_len,
+                               const uint8_t *state, size_t state_len,
+                               const uint8_t *destination, size_t destination_len,
+                               const uint8_t *reviewed, size_t reviewed_len,
+                               int32_t *outcome);
+
 /* Writer-only archive operations. History callback receives a JSON array
    with archive, current_heads, path, bytes and archived_at. The restore
    call accepts archive and reviewed-current IDs as 64-hex-peer:sequence.

@@ -26,6 +26,9 @@ enum SyncCore {
         case missingOriginalsReport
         case writerFailed(Int32)
         case missingWriterReport
+        case pendingFailed(Int32)
+        case coordinatedPathChanged
+        case missingPendingDestination
     }
 
     static var abiVersion: UInt32 { p2p_sync_abi_version() }
@@ -83,6 +86,140 @@ enum SyncCore {
         let history: [HistoryEntry]
         let historyBytes: UInt64
         let historyMissing: UInt64
+    }
+
+    private struct PendingFile: Codable {
+        enum Kind: String, Codable, Equatable {
+            case update, delete, move
+        }
+        let object: String
+        let kind: Kind
+        let source: [String]
+        let destination: [String]?
+    }
+
+    private struct PendingCounts {
+        var updated: UInt64 = 0
+        var removed: UInt64 = 0
+        var blocked: UInt64 = 0
+    }
+
+    private static func pendingFiles(configuration: URL, state: URL, destination: URL) throws -> [PendingFile] {
+        let config = Array(configuration.path.utf8)
+        let storage = Array(state.path.utf8)
+        let output = Array(destination.path.utf8)
+        var context = PullContext(cancellation: Cancellation(), json: nil)
+        let status = withUnsafeMutablePointer(to: &context) { pointer in
+            config.withUnsafeBufferPointer { configBytes in
+                storage.withUnsafeBufferPointer { stateBytes in
+                    output.withUnsafeBufferPointer { outputBytes in
+                        p2p_sync_ios_pending_v1(
+                            configBytes.baseAddress, configBytes.count,
+                            stateBytes.baseAddress, stateBytes.count,
+                            outputBytes.baseAddress, outputBytes.count,
+                            { context, data, length in
+                                guard let context, let data else { return }
+                                context.assumingMemoryBound(to: PullContext.self).pointee.json =
+                                    Data(bytes: data, count: length)
+                            }, UnsafeMutableRawPointer(pointer)
+                        )
+                    }
+                }
+            }
+        }
+        guard status == P2P_SYNC_OK else { throw CoreError.pendingFailed(status) }
+        guard let json = context.json else { throw CoreError.missingOriginalsReport }
+        return try JSONDecoder().decode([PendingFile].self, from: json)
+    }
+
+    private static func pendingURL(root: URL, components: [String]) throws -> URL {
+        var url = root
+        for component in components {
+            guard !component.isEmpty, component != ".", component != "..",
+                  !component.contains("/"), !component.contains("\\"), !component.contains("\0") else {
+                throw CoreError.coordinatedPathChanged
+            }
+            url.appendPathComponent(component)
+        }
+        return url
+    }
+
+    private static func applyPending(_ item: PendingFile, configuration: URL, state: URL,
+                                     destination: URL) throws -> Int32 {
+        let config = Array(configuration.path.utf8)
+        let storage = Array(state.path.utf8)
+        let output = Array(destination.path.utf8)
+        let reviewed = Array(try JSONEncoder().encode(item))
+        var outcome: Int32 = 0
+        let status = config.withUnsafeBufferPointer { configBytes in
+            storage.withUnsafeBufferPointer { stateBytes in
+                output.withUnsafeBufferPointer { outputBytes in
+                    reviewed.withUnsafeBufferPointer { reviewBytes in
+                        p2p_sync_ios_apply_v1(
+                            configBytes.baseAddress, configBytes.count,
+                            stateBytes.baseAddress, stateBytes.count,
+                            outputBytes.baseAddress, outputBytes.count,
+                            reviewBytes.baseAddress, reviewBytes.count, &outcome
+                        )
+                    }
+                }
+            }
+        }
+        guard status == P2P_SYNC_OK else { throw CoreError.pendingFailed(status) }
+        return outcome
+    }
+
+    private static func recoverPending(configuration: URL, state: URL, destination: URL,
+                                       cancellation: Cancellation) throws -> PendingCounts {
+        var counts = PendingCounts()
+        for item in try pendingFiles(configuration: configuration, state: state, destination: destination) {
+            if cancellation.isCancelled() { break }
+            let source = try pendingURL(root: destination, components: item.source)
+            let coordinator = NSFileCoordinator(filePresenter: nil)
+            var coordinationError: NSError?
+            var operationError: Error?
+            var outcome: Int32?
+            if item.kind == .move {
+                guard let components = item.destination else { throw CoreError.missingPendingDestination }
+                let target = try pendingURL(root: destination, components: components)
+                coordinator.coordinate(writingItemAt: source, options: .forMoving,
+                                       writingItemAt: target, options: [], error: &coordinationError) {
+                    actualSource, actualTarget in
+                    guard actualSource.standardizedFileURL == source.standardizedFileURL,
+                          actualTarget.standardizedFileURL == target.standardizedFileURL else {
+                        operationError = CoreError.coordinatedPathChanged
+                        return
+                    }
+                    do {
+                        outcome = try applyPending(item, configuration: configuration,
+                                                   state: state, destination: destination)
+                    } catch { operationError = error }
+                }
+            } else {
+                let options: NSFileCoordinator.WritingOptions = item.kind == .delete ? .forDeleting : .forReplacing
+                coordinator.coordinate(writingItemAt: source, options: options,
+                                       error: &coordinationError) { actualSource in
+                    guard actualSource.standardizedFileURL == source.standardizedFileURL else {
+                        operationError = CoreError.coordinatedPathChanged
+                        return
+                    }
+                    do {
+                        outcome = try applyPending(item, configuration: configuration,
+                                                   state: state, destination: destination)
+                    } catch { operationError = error }
+                }
+            }
+            if let error = operationError as? CoreError,
+               case .pendingFailed(8) = error { throw error }
+            if coordinationError != nil || operationError != nil {
+                counts.blocked += 1
+            } else if outcome == 1 || outcome == 2 {
+                if item.kind == .delete { counts.removed += 1 } else { counts.updated += 1 }
+            } else if outcome == 3 || outcome == 4 {
+                counts.blocked += 1
+            }
+        }
+        return counts
     }
 
     struct FileConflict: Decodable, Identifiable, Sendable {
@@ -526,10 +663,16 @@ enum SyncCore {
         guard status == P2P_SYNC_OK else { throw CoreError.pullFailed(status) }
         guard let json = callbacks.json else { throw CoreError.missingOriginalsReport }
         let details = try JSONDecoder().decode(SyncDetails.self, from: json)
+        let recovered = try recoverPending(configuration: configuration, state: state,
+                                           destination: destination, cancellation: cancellation)
+        let publishedLocally = recovered.updated + recovered.removed
         return PullSummary(
             eventsAdded: summary.sync.events_added, filesPublished: summary.sync.files_published,
-            filesPresent: summary.sync.files_present, filesBlocked: summary.sync.files_blocked,
-            filesUpdated: summary.sync.files_updated, filesRemoved: summary.sync.files_removed,
+            filesPresent: summary.sync.files_present,
+            filesBlocked: summary.sync.files_blocked - min(summary.sync.files_blocked, publishedLocally)
+                + recovered.blocked,
+            filesUpdated: summary.sync.files_updated + recovered.updated,
+            filesRemoved: summary.sync.files_removed + recovered.removed,
             protectedFiles: summary.protected_files, protectedBytes: summary.protected_bytes,
             protectedMissing: summary.protected_missing,
             originals: details.originals,
