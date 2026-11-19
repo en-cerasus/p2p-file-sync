@@ -23,8 +23,10 @@ struct WriterView: View {
     @State private var historyLoaded = false
     @State private var conflictsLoaded = false
     @State private var pendingHistory: SyncCore.WriterHistoryEntry?
+    @State private var pendingDeletion: SyncCore.WriterHistoryEntry?
     @State private var pendingChoice: (SyncCore.WriterConflict, SyncCore.WriterConflictVersion)?
     @State private var confirmRestore = false
+    @State private var confirmDelete = false
     @State private var confirmResolve = false
 
     var body: some View {
@@ -69,6 +71,11 @@ struct WriterView: View {
                             confirmRestore = true
                         }
                         .disabled(entry.current_heads.count != 1 || serving || refreshing || catchingUp || inspecting)
+                        Button("履歴を削除", role: .destructive) {
+                            pendingDeletion = entry
+                            confirmDelete = true
+                        }
+                        .disabled(serving || refreshing || catchingUp || inspecting)
                     }
                 }
             }
@@ -123,6 +130,13 @@ struct WriterView: View {
             }
         } message: {
             Text("現在の版が変わっていれば復元は拒否されます。")
+        }
+        .confirmationDialog("履歴を削除", isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("この履歴を削除", role: .destructive) {
+                if let pendingDeletion { Task { await deleteHistory(pendingDeletion) } }
+            }
+        } message: {
+            Text("この履歴は復元に使えなくなります。未同期ピアのために保護中の共通原本は保持されます。")
         }
         .confirmationDialog("競合の解決", isPresented: $confirmResolve, titleVisibility: .visible) {
             Button("選択した版を採用") {
@@ -304,6 +318,21 @@ struct WriterView: View {
             }
             invalidateLists()
             result = "履歴を新しい同期変更として復元しました。"
+        } catch {
+            result = writerError(error)
+        }
+    }
+
+    private func deleteHistory(_ entry: SyncCore.WriterHistoryEntry) async {
+        guard !serving, !refreshing, !catchingUp, !inspecting else { return }
+        inspecting = true
+        defer { inspecting = false }
+        do {
+            try await runWriter { config, state in
+                try SyncCore.deleteWriterHistory(configuration: config, state: state, entry: entry)
+            }
+            invalidateLists()
+            result = "履歴を削除しました。保護中の共通原本は保持されます。"
         } catch {
             result = writerError(error)
         }

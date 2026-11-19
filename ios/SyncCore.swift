@@ -137,6 +137,20 @@ enum SyncCore {
         let archived_at: Int64
     }
 
+    private struct WriterArchiveSelection: Encodable {
+        let id: Int64
+        let archive: String
+        let replaced_by: String
+        let archived_at: Int64
+
+        init(_ entry: WriterHistoryEntry) {
+            id = entry.id
+            archive = entry.archive
+            replaced_by = entry.replaced_by
+            archived_at = entry.archived_at
+        }
+    }
+
     struct WriterConflictVersion: Decodable, Identifiable, Sendable {
         let id: String
         let name: String?
@@ -212,6 +226,25 @@ enum SyncCore {
                             archiveBytes.baseAddress, archiveBytes.count,
                             currentBytes.baseAddress, currentBytes.count)
                     }
+                }
+            }
+        }
+        guard status == P2P_SYNC_OK else { throw CoreError.writerFailed(status) }
+    }
+
+    static func deleteWriterHistory(configuration: URL, state: URL,
+                                    entry: WriterHistoryEntry) throws {
+        let config = Array(configuration.path.utf8)
+        let storage = Array(state.path.utf8)
+        let selected = try JSONEncoder().encode([WriterArchiveSelection(entry)])
+        let status = config.withUnsafeBufferPointer { configBytes in
+            storage.withUnsafeBufferPointer { stateBytes in
+                selected.withUnsafeBytes { selectedBytes in
+                    let bytes = selectedBytes.bindMemory(to: UInt8.self)
+                    return p2p_sync_writer_delete_history(
+                        configBytes.baseAddress, configBytes.count,
+                        stateBytes.baseAddress, stateBytes.count,
+                        bytes.baseAddress, bytes.count)
                 }
             }
         }
