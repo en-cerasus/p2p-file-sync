@@ -14,6 +14,8 @@ Windowsでは書き込みピアの履歴を個別または一覧から一括削�
 
 RustのMSVCツールチェーン、Visual StudioのC++ビルドツールとWindows SDK、.NET 10 SDKが必要です。
 
+GitHub Actionsの「Test and build Windows client」を手動実行すると、Windows固有のRust試験とGUIビルドを行い、`P2PSync-Windows` にEXEとRust DLLをまとめて保存します。この成果物はフレームワーク依存で、実行するPCに.NET 10 Windows Desktop Runtimeが必要です。インストーラーとコード署名は未実装です。
+
 ```powershell
 cargo test --locked --workspace
 cargo build --locked --release
