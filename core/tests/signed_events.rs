@@ -1,4 +1,4 @@
-use p2p_sync_core::{auth::*, replica::*, store::Store};
+use p2p_sync_core::{auth::*, replica::*, store::{Store, StoreError}};
 
 fn event(key: &PeerSigningKey) -> Event {
     Event {
@@ -48,6 +48,49 @@ fn only_the_authorized_generation_can_apply_and_forward_an_event() {
     let forwarded = reopened.signed_event(item.id).unwrap();
     assert_eq!(forwarded, wire);
     assert_eq!(roster.verify_event(forwarded).unwrap(), item);
+}
+
+#[test]
+fn an_old_writer_backup_cannot_reuse_a_delete_event_id_to_revive_a_file() {
+    let key = PeerSigningKey::from_bytes(&[13; 32]);
+    let created = event(&key);
+    let roster = Roster::new([3; 16], 4, [(created.id.peer, Role::Writer)].into());
+    let deleted = Event {
+        id: EventId { sequence: 2, ..created.id },
+        context: [(created.id.peer, 1)].into(),
+        object: created.object,
+        change: Change::Revise { base: created.id, entry: None },
+    };
+    let revived = Event {
+        change: Change::Revise {
+            base: created.id,
+            entry: Some(Entry {
+                parent: None,
+                name: "譜面.tja".into(),
+                kind: EntryKind::File([10; 32]),
+            }),
+        },
+        ..deleted.clone()
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("recipient.db");
+    let mut recipient = Store::open(&database, roster.membership().clone()).unwrap();
+    let mut restored_backup = Store::open(":memory:", roster.membership().clone()).unwrap();
+    let first = roster.sign_event(&key, &created).unwrap();
+    assert_eq!(roster.receive(&mut recipient, &first).unwrap(), Apply::Added);
+    assert_eq!(roster.receive(&mut restored_backup, &first).unwrap(), Apply::Added);
+    let tombstone = roster.sign_event(&key, &deleted).unwrap();
+    assert_eq!(roster.receive(&mut recipient, &tombstone).unwrap(), Apply::Added);
+    let fork = roster.sign_event(&key, &revived).unwrap();
+    assert_eq!(roster.receive(&mut restored_backup, &fork).unwrap(), Apply::Added);
+    assert!(matches!(
+        roster.receive(&mut recipient, &fork),
+        Err(AuthError::Store(StoreError::Rejected(Reject::EventIdReuse)))
+    ));
+    drop(recipient);
+    let recipient = Store::open(&database, roster.membership().clone()).unwrap();
+    assert_eq!(recipient.replica().heads(created.object).next().unwrap().id, deleted.id);
+    assert_eq!(recipient.replica().heads(created.object).count(), 1);
 }
 
 #[test]
