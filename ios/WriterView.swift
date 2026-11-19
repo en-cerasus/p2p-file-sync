@@ -227,7 +227,7 @@ struct WriterView: View {
                 if let pendingMove { Task { await relocateMissingFile(pendingMove.0, destination: pendingMove.1) } }
             }
         } message: {
-            Text("P2PShared 内の移動後のファイルを選んでください。旧名が空き、内容が保存済みの版と一致する場合だけ記録します。実ファイルは移動しません。")
+            Text("P2PShared 内の移動後のファイルを選んでください。旧名が空いていることを確認し、内容の変更も同時に記録します。実ファイルは移動しません。")
         }
         .confirmationDialog("競合の解決", isPresented: $confirmResolve, titleVisibility: .visible) {
             Button("選択した版を採用") {

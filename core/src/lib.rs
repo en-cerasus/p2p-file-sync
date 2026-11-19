@@ -739,8 +739,8 @@ pub unsafe extern "C" fn p2p_sync_writer_delete_missing_file(
 }
 
 /// Keep a reviewed file's identity after the user selects its new physical
-/// file inside the source root. The destination must contain the verified
-/// prior bytes and must not already be a different shared entry.
+/// file inside the source root. A changed destination body is included in
+/// the same signed revision. The path must not be a different shared entry.
 ///
 /// # Safety
 /// Every pointer/length pair must remain readable for the call.

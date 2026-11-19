@@ -26,8 +26,9 @@ use crate::{
     names::collision_key,
     projection::Projection,
     publish::{
-        publish_directory_path, publish_file, publish_tree, refresh_tree, relocate_file, resolve_file_conflict,
-        restore_archived_file, revise_file, PublishError, TreeSummary,
+        publish_directory_path, publish_file, publish_tree, refresh_tree, relocate_file,
+        relocate_file_with_content, resolve_file_conflict, restore_archived_file, revise_file,
+        store_file, PublishError, TreeSummary,
     },
     replica::{EntryKind, Event, EventId, PeerId},
     store::{Store, StoreError},
@@ -410,7 +411,8 @@ impl Sender {
 
     /// Keep the reviewed file ID when the user selects its new physical file.
     /// Both the old vacancy and the destination bytes are checked before a
-    /// signed move is published; no source file is modified by this call.
+    /// signed move (possibly with changed contents) is published. No source
+    /// file is modified by this call.
     pub fn relocate_missing_source_file(
         &mut self,
         root: &Path,
@@ -451,19 +453,34 @@ impl Sender {
         let stored = self.completed.open_candidate(hash).map_err(HostError::Io)?;
         let expected = Blob { hash, length: stored.metadata().map_err(HostError::Io)?.len() };
         self.completed.open_verified(expected).map_err(HostError::Io)?;
-        if target.inspect(object).map_err(HostError::Io)? != Some(expected) {
-            return Err(HostError::Publish(PublishError::StaleBase));
-        }
+        let observed = target.inspect(object).map_err(HostError::Io)?
+            .ok_or(HostError::Publish(PublishError::StaleBase))?;
+        let replacement = if observed == expected {
+            observed
+        } else {
+            let copied = store_file(&destination, &self.completed).map_err(HostError::Publish)?;
+            if copied != observed {
+                return Err(HostError::Publish(PublishError::StaleBase));
+            }
+            copied
+        };
         let (name, parents) = components.split_last().ok_or(HostError::Configuration)?;
         let parent = publish_directory_path(&root, parents, &mut self.store, &self.roster, &self.signer)
             .map_err(HostError::Publish)?;
         if !old.name_is_vacant().map_err(HostError::Io)?
-            || target.inspect(object).map_err(HostError::Io)? != Some(expected)
+            || target.inspect(object).map_err(HostError::Io)? != Some(replacement)
         {
             return Err(HostError::Publish(PublishError::StaleBase));
         }
-        relocate_file(&mut self.store, &self.roster, &self.signer, current, parent, name)
-            .map_err(HostError::Publish)
+        if replacement == expected {
+            relocate_file(&mut self.store, &self.roster, &self.signer, current, parent, name)
+                .map_err(HostError::Publish)
+        } else {
+            relocate_file_with_content(
+                &mut self.store, &self.roster, &self.signer, &self.completed,
+                current, parent, name, replacement,
+            ).map_err(HostError::Publish)
+        }
     }
 
     /// Issue a change for a single existing, non-conflicted shared file.

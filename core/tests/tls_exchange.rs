@@ -653,8 +653,6 @@ fn writer_ffi_refreshes_only_a_safe_selected_source() {
         )
     };
     std::fs::write(&destination, b"different").unwrap();
-    assert_eq!(relocate(), 5);
-    std::fs::write(&destination, b"same content").unwrap();
     assert_eq!(relocate(), 0);
     assert_eq!(relocate(), 5);
     assert!(writer.missing_source_files(&source).unwrap().is_empty());

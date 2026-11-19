@@ -368,7 +368,7 @@ fn migration_baseline_rejects_old_events_and_preserves_deleted_identity() {
 fn shared_move_keeps_the_file_identity_and_hash_and_refuses_collisions() {
     use p2p_sync_core::{
         projection::Projection,
-        publish::{publish_tree, relocate_file},
+        publish::{publish_tree, relocate_file, relocate_file_with_content},
     };
     let folder = tempfile::tempdir().unwrap();
     let root = folder.path().join("share");
@@ -427,6 +427,19 @@ fn shared_move_keeps_the_file_identity_and_hash_and_refuses_collisions() {
         ["folder", "renamed.tja"]
     );
     assert_eq!(store.protections().count(), 0);
+    assert_eq!(std::fs::read(root.join("song.tja")).unwrap(), b"song");
+
+    let changed = b"song with edits";
+    let replacement = Blob { hash: sha256(changed), length: changed.len() as u64 };
+    blobs.put(replacement, &changed[..]).unwrap();
+    let revised = relocate_file_with_content(
+        &mut store, &roster, &key, &blobs, id, Some(parent), "edited.tja", replacement,
+    ).unwrap();
+    let event = roster.verify_event(store.signed_event(revised).unwrap()).unwrap();
+    assert_eq!(event.object, object);
+    assert_eq!(event.change.entry().unwrap().kind, EntryKind::File(replacement.hash));
+    assert_eq!(Projection::new(store.replica()).path(object).unwrap(), ["folder", "edited.tja"]);
+    assert_eq!(store.protections().count(), 1);
     assert_eq!(std::fs::read(root.join("song.tja")).unwrap(), b"song");
 }
 

@@ -650,7 +650,7 @@ internal sealed class SyncWindow : Window
         if (picker.ShowDialog(this) != true) return;
         var destination = picker.FileName;
         if (MessageBox.Show(this,
-            $"{string.Join("/", file.Path)} の移動先を {destination} として同期します。\n元の名前が空いていて、選んだファイルの内容が元の版と一致する場合だけ記録します。",
+            $"{string.Join("/", file.Path)} の移動先を {destination} として同期します。\n元の名前が空いていることを確認し、選んだファイルの内容も同じ変更として記録します。",
             "移動を同期", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
         {
             return;

@@ -363,6 +363,34 @@ pub fn relocate_file(
     parent: Option<ObjectId>,
     name: &str,
 ) -> Result<EventId, PublishError> {
+    relocate_content(store, roster, key, base, parent, name, None)
+}
+
+/// Publish a path and content change in one signed revision. The replacement
+/// must already be safely cached; a peer never observes an intermediate path.
+pub fn relocate_file_with_content(
+    store: &mut Store,
+    roster: &Roster,
+    key: &PeerSigningKey,
+    completed: &BlobStore,
+    base: EventId,
+    parent: Option<ObjectId>,
+    name: &str,
+    replacement: Blob,
+) -> Result<EventId, PublishError> {
+    completed.open_verified(replacement).map_err(PublishError::Io)?;
+    relocate_content(store, roster, key, base, parent, name, Some((completed, replacement)))
+}
+
+fn relocate_content(
+    store: &mut Store,
+    roster: &Roster,
+    key: &PeerSigningKey,
+    base: EventId,
+    parent: Option<ObjectId>,
+    name: &str,
+    replacement: Option<(&BlobStore, Blob)>,
+) -> Result<EventId, PublishError> {
     let peer = authorize(store, roster, key)?;
     let target_key = collision_key(name).map_err(PublishError::InvalidName)?;
     store.refresh().map_err(PublishError::Store)?;
@@ -382,7 +410,7 @@ pub fn relocate_file(
         return Err(PublishError::StaleBase);
     };
     let projection = Projection::new(replica);
-    projection
+    let old_path = projection
         .path(object)
         .map_err(|_| PublishError::StaleBase)?;
     if let Some(parent) = parent {
@@ -396,7 +424,8 @@ pub fn relocate_file(
             return Err(PublishError::InvalidParent);
         }
     }
-    if original.parent == parent && original.name == name {
+    let new_hash = replacement.map_or(hash, |(_, blob)| blob.hash);
+    if original.parent == parent && original.name == name && new_hash == hash {
         return Ok(base);
     }
     let same_slot = original.parent == parent
@@ -404,15 +433,25 @@ pub fn relocate_file(
     if !same_slot && !projection.vacant(parent, name) {
         return Err(PublishError::NameConflict);
     }
+    let previous = if let Some((completed, blob)) = replacement.filter(|(_, blob)| blob.hash != hash) {
+        completed.open_verified(blob).map_err(PublishError::Io)?;
+        Some(AppliedFile {
+            event: base,
+            contents: Some(verified_content(completed, hash)?),
+            path: Some(old_path.into_iter().map(str::to_owned).collect()),
+        })
+    } else {
+        None
+    };
     let change = Change::Revise {
         base,
         entry: Some(Entry {
             parent,
             name: name.into(),
-            kind: EntryKind::File(hash),
+            kind: EntryKind::File(new_hash),
         }),
     };
-    append_change(store, roster, key, peer, object, change, None)
+    append_change(store, roster, key, peer, object, change, previous)
 }
 
 fn revise_content(
@@ -688,7 +727,7 @@ fn authorize(
     Ok(peer)
 }
 
-fn store_file(source: &Path, completed: &BlobStore) -> Result<Blob, PublishError> {
+pub(crate) fn store_file(source: &Path, completed: &BlobStore) -> Result<Blob, PublishError> {
     let input = open_selected_file(source).map_err(PublishError::Io)?;
     store_open_file(input, completed)
 }
