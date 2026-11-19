@@ -330,6 +330,17 @@ struct DirectSyncView: View {
             case 8: result = "古い同期状態が復元された可能性があります。共有元を変更せず、状態の復旧が必要です。"
             default: result = "同期に失敗しました。接続先、証明書、同期先を確認してください。"
             }
+        } catch SyncCore.CoreError.pendingFailed(let status) {
+            switch status {
+            case 8: result = "古い同期状態が復元された可能性があります。共有元を変更せず、状態の復旧が必要です。"
+            case 2: result = "接続設定または保存先を確認してください。"
+            default: result = "保存済みの変更を反映できませんでした。同期先を確認してください。"
+            }
+        } catch SyncCore.CoreError.snapshotFailed(let status) {
+            switch status {
+            case 8: result = "古い同期状態が復元された可能性があります。共有元を変更せず、状態の復旧が必要です。"
+            default: result = "同期後の保護原本と履歴を読み込めませんでした。"
+            }
         } catch is DecodingError {
             result = "保護原本の一覧を読み込めませんでした。"
         } catch SyncCore.CoreError.missingOriginalsReport {
