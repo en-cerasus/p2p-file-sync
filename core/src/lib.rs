@@ -572,6 +572,56 @@ pub unsafe extern "C" fn p2p_sync_writer_serve(
     }
 }
 
+/// Scan a selected source folder, publishing new files and changed contents.
+/// Missing source files are not interpreted as deletions. The callback gets
+/// a JSON object with files, directories and skipped counts.
+///
+/// # Safety
+/// Paths and callback follow p2p_sync_writer_history.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_writer_refresh_tree(
+    config: *const u8,
+    config_len: usize,
+    state: *const u8,
+    state_len: usize,
+    source: *const u8,
+    source_len: usize,
+    callback: Option<OriginalsCallback>,
+    context: *mut std::ffi::c_void,
+) -> i32 {
+    let Some(callback) = callback else {
+        return INVALID_ARGUMENT;
+    };
+    let Some((config, state)) = (unsafe { writer_paths(config, config_len, state, state_len) })
+    else {
+        return INVALID_ARGUMENT;
+    };
+    let Some(source) = (unsafe { borrowed_text(source, source_len, 32_768) }) else {
+        return INVALID_ARGUMENT;
+    };
+    let result = std::panic::catch_unwind(|| {
+        let mut writer = host::Sender::open(config, state).map_err(host_error_code)?;
+        let root = writer
+            .validate_source_root(std::path::Path::new(source))
+            .map_err(host_error_code)?;
+        let summary = writer.refresh_tree(&root).map_err(host_error_code)?;
+        serde_json::to_vec(&serde_json::json!({
+            "files": summary.files,
+            "directories": summary.directories,
+            "skipped": summary.skipped,
+        }))
+        .map_err(|_| 6)
+    });
+    match result {
+        Ok(Ok(bytes)) => {
+            callback(context, bytes.as_ptr(), bytes.len());
+            OK
+        }
+        Ok(Err(code)) => code,
+        Err(_) => 6,
+    }
+}
+
 /// Resolve a conflict by choosing one reviewed head. `reviewed` is a JSON
 /// array of all candidate IDs shown to the user; a changed set is rejected.
 ///

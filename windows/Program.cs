@@ -38,6 +38,9 @@ internal sealed class SyncWindow : Window
     private readonly TextBlock writerConfigLabel = new() { TextWrapping = TextWrapping.Wrap };
     private readonly Button writerStateButton = new() { Content = "書き込みピアの状態フォルダーを選択" };
     private readonly TextBlock writerStateLabel = new() { TextWrapping = TextWrapping.Wrap };
+    private readonly Button writerSourceButton = new() { Content = "共有元フォルダーを選択" };
+    private readonly TextBlock writerSourceLabel = new() { TextWrapping = TextWrapping.Wrap };
+    private readonly Button refreshWriterButton = new() { Content = "共有元を登録・更新", Margin = new Thickness(0, 12, 0, 0) };
     private readonly Button loadWriterHistoryButton = new() { Content = "復元できる履歴を確認", Margin = new Thickness(0, 12, 0, 0) };
     private readonly ListBox writerHistoryList = new() { MaxHeight = 240 };
     private readonly Button restoreHistoryButton = new() { Content = "選択した履歴を復元", Margin = new Thickness(0, 8, 0, 0) };
@@ -69,6 +72,7 @@ internal sealed class SyncWindow : Window
     private string? destination;
     private string? writerConfiguration;
     private string? writerState;
+    private string? writerSource;
 
     public SyncWindow()
     {
@@ -96,6 +100,8 @@ internal sealed class SyncWindow : Window
         panel.Children.Add(new TextBlock { Text = "履歴の復元", FontSize = 18, Margin = new Thickness(0, 20, 0, 0) });
         AddPicker(panel, writerConfigButton, writerConfigLabel, "書き込みピア設定が未選択です");
         AddPicker(panel, writerStateButton, writerStateLabel, "状態フォルダーが未選択です");
+        AddPicker(panel, writerSourceButton, writerSourceLabel, "共有元フォルダーが未選択です");
+        panel.Children.Add(refreshWriterButton);
         panel.Children.Add(startServerButton);
         panel.Children.Add(stopServerButton);
         panel.Children.Add(serverStatus);
@@ -179,6 +185,17 @@ internal sealed class SyncWindow : Window
                 SavePreferences();
             }
         });
+        writerSourceButton.Click += (_, _) => ChoosePath(() =>
+        {
+            var picker = new OpenFolderDialog { Title = "共有元フォルダー" };
+            if (picker.ShowDialog(this) == true)
+            {
+                writerSource = picker.FolderName;
+                writerSourceLabel.Text = writerSource;
+                SavePreferences();
+            }
+        });
+        refreshWriterButton.Click += async (_, _) => await RefreshWriterTree();
         loadWriterHistoryButton.Click += async (_, _) => await LoadWriterHistory();
         writerHistoryList.SelectionChanged += (_, _) => UpdateControls();
         restoreHistoryButton.Click += async (_, _) => await RestoreWriterHistory();
@@ -266,7 +283,7 @@ internal sealed class SyncWindow : Window
     }
 
     private sealed record Preferences(string? Configuration, string? Destination, bool AutomaticSync,
-        string? WriterConfiguration, string? WriterState);
+        string? WriterConfiguration, string? WriterState, string? WriterSource);
 
     private static string PreferencesPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "P2PSync", "preferences.json");
@@ -288,10 +305,12 @@ internal sealed class SyncWindow : Window
             destination = Directory.Exists(preferences.Destination) ? preferences.Destination : null;
             writerConfiguration = File.Exists(preferences.WriterConfiguration) ? preferences.WriterConfiguration : null;
             writerState = Directory.Exists(preferences.WriterState) ? preferences.WriterState : null;
+            writerSource = Directory.Exists(preferences.WriterSource) ? preferences.WriterSource : null;
             configLabel.Text = configuration ?? "接続設定をもう一度選択してください";
             destinationLabel.Text = destination ?? "保存先をもう一度選択してください";
             writerConfigLabel.Text = writerConfiguration ?? "書き込みピア設定を選択してください";
             writerStateLabel.Text = writerState ?? "書き込みピアの状態フォルダーを選択してください";
+            writerSourceLabel.Text = writerSource ?? "共有元フォルダーを選択してください";
             autoSync.IsChecked = preferences.AutomaticSync;
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
@@ -307,7 +326,7 @@ internal sealed class SyncWindow : Window
         {
             Directory.CreateDirectory(Path.GetDirectoryName(PreferencesPath)!);
             var preferences = new Preferences(configuration, destination, autoSync.IsChecked == true,
-                writerConfiguration, writerState);
+                writerConfiguration, writerState, writerSource);
             using (var file = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
                 JsonSerializer.Serialize(file, preferences);
@@ -341,6 +360,9 @@ internal sealed class SyncWindow : Window
         bool ready = configuration is not null && destination is not null;
         configButton.IsEnabled = destinationButton.IsEnabled = !syncing;
         writerConfigButton.IsEnabled = writerStateButton.IsEnabled = !syncing && !writerServing;
+        writerSourceButton.IsEnabled = !syncing;
+        refreshWriterButton.IsEnabled = !syncing && writerConfiguration is not null
+            && writerState is not null && writerSource is not null;
         startServerButton.IsEnabled = !writerServing && writerConfiguration is not null && writerState is not null;
         stopServerButton.IsEnabled = writerServing && serverCancellation?.IsCancellationRequested == false;
         trayStartServer.Enabled = startServerButton.IsEnabled;
@@ -422,6 +444,35 @@ internal sealed class SyncWindow : Window
         serverCancellation?.Cancel();
         serverStatus.Text = "配信を停止しています…";
         UpdateControls();
+    }
+
+    private async Task RefreshWriterTree()
+    {
+        if (closing || syncing || writerConfiguration is not string config
+            || writerState is not string state || writerSource is not string source)
+        {
+            return;
+        }
+        syncing = true;
+        result.Text = "共有元を確認しています…";
+        UpdateControls();
+        try
+        {
+            var scan = await Task.Run(() => SyncCore.RefreshWriterTree(config, state, source));
+            result.Text = scan.Status == 0
+                ? $"共有元を登録・更新しました。ファイル {scan.Summary.Files} 件、フォルダー {scan.Summary.Directories} 件、対象外 {scan.Summary.Skipped} 件。見つからないファイルは削除しません。"
+                : scan.Status == 2 ? "共有元に設定ファイルや状態フォルダーが含まれています。別のフォルダーを選択してください。"
+                : SyncCore.ErrorMessage(scan.Status);
+        }
+        catch (Exception error) when (error is JsonException or DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
+        {
+            result.Text = "共有元の登録・更新処理を読み込めませんでした。";
+        }
+        finally
+        {
+            syncing = false;
+            UpdateControls();
+        }
     }
 
     private async Task RunSync()
@@ -743,6 +794,11 @@ internal static class SyncCore
             $" · {Versions.Length} 件の候補";
     }
 
+    internal sealed record TreeSummary(
+        [property: JsonPropertyName("files")] ulong Files,
+        [property: JsonPropertyName("directories")] ulong Directories,
+        [property: JsonPropertyName("skipped")] ulong Skipped);
+
     private sealed record SyncDetails(
         [property: JsonPropertyName("originals")] ProtectedOriginal[] Originals,
         [property: JsonPropertyName("conflicts")] FileConflict[] Conflicts,
@@ -862,6 +918,24 @@ internal static class SyncCore
             }, _ => cancellation.IsCancellationRequested ? (byte)1 : (byte)0, IntPtr.Zero);
     }
 
+    internal static (int Status, TreeSummary Summary) RefreshWriterTree(string config, string state, string source)
+    {
+        var configBytes = Encoding.UTF8.GetBytes(config);
+        var stateBytes = Encoding.UTF8.GetBytes(state);
+        var sourceBytes = Encoding.UTF8.GetBytes(source);
+        byte[]? json = null;
+        var status = WriterRefreshTreeNative(configBytes, (nuint)configBytes.Length,
+            stateBytes, (nuint)stateBytes.Length, sourceBytes, (nuint)sourceBytes.Length,
+            (_, data, length) =>
+            {
+                if (length > 4096) return;
+                json = new byte[(int)length];
+                Marshal.Copy(data, json, 0, json.Length);
+            }, IntPtr.Zero);
+        return status != 0 || json is null ? (status == 0 ? 6 : status, new TreeSummary(0, 0, 0)) :
+            (0, JsonSerializer.Deserialize<TreeSummary>(json) ?? new TreeSummary(0, 0, 0));
+    }
+
     internal static string ErrorMessage(int status) => status switch
     {
         1 or 2 => "接続設定または保存先を確認してください。",
@@ -913,4 +987,9 @@ internal static class SyncCore
     private static extern int WriterServeNative(
         byte[] config, nuint configLength, byte[] state, nuint stateLength,
         OriginalsCallback ready, CancellationCallback cancellation, IntPtr context);
+
+    [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_writer_refresh_tree", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int WriterRefreshTreeNative(
+        byte[] config, nuint configLength, byte[] state, nuint stateLength,
+        byte[] source, nuint sourceLength, OriginalsCallback callback, IntPtr context);
 }

@@ -135,6 +135,15 @@ int32_t p2p_sync_writer_serve(const uint8_t *config, size_t config_len,
                               p2p_sync_originals_callback ready,
                               p2p_sync_cancel_callback cancellation, void *context);
 
+/* Publish new and changed regular files from a selected source folder.
+   The source must not contain private keys or the state directory. Missing
+   source files do not become deletions. Callback JSON has files,
+   directories and skipped counts. */
+int32_t p2p_sync_writer_refresh_tree(const uint8_t *config, size_t config_len,
+                                     const uint8_t *state, size_t state_len,
+                                     const uint8_t *source, size_t source_len,
+                                     p2p_sync_originals_callback callback, void *context);
+
 #ifdef __cplusplus
 }
 #endif

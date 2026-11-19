@@ -513,6 +513,63 @@ fn writer_ffi_listener_serves_and_stops_on_request() {
 }
 
 #[test]
+fn writer_ffi_refreshes_only_a_safe_selected_source() {
+    use p2p_sync_core::{host::Sender, p2p_sync_writer_refresh_tree};
+    let root = tempfile::tempdir().unwrap();
+    let setup = root.path().join("setup");
+    assert!(std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
+        .arg("setup")
+        .arg(&setup)
+        .args(["127.0.0.1:8768", "127.0.0.1:8768"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let config = setup.join("sender/server.json");
+    let state = root.path().join("server-state");
+    let source = root.path().join("songs");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::write(source.join("song.tja"), b"first").unwrap();
+    extern "C" fn capture(context: *mut std::ffi::c_void, data: *const u8, length: usize) {
+        unsafe {
+            (*context.cast::<Vec<u8>>())
+                .extend_from_slice(std::slice::from_raw_parts(data, length));
+        }
+    }
+    let config_bytes = config.to_str().unwrap().as_bytes();
+    let state_bytes = state.to_str().unwrap().as_bytes();
+    let refresh = |source: &std::path::Path| {
+        let source_bytes = source.to_str().unwrap().as_bytes();
+        let mut json = Vec::new();
+        let status = unsafe {
+            p2p_sync_writer_refresh_tree(
+                config_bytes.as_ptr(),
+                config_bytes.len(),
+                state_bytes.as_ptr(),
+                state_bytes.len(),
+                source_bytes.as_ptr(),
+                source_bytes.len(),
+                Some(capture),
+                (&mut json as *mut Vec<u8>).cast(),
+            )
+        };
+        (status, json)
+    };
+    assert_eq!(refresh(root.path()).0, 2);
+    let (status, json) = refresh(&source);
+    assert_eq!(status, 0);
+    let summary: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    assert_eq!(summary["files"], 1);
+    std::fs::write(source.join("song.tja"), b"second").unwrap();
+    assert_eq!(refresh(&source).0, 0);
+    let mut writer = Sender::open(&config, &state).unwrap();
+    assert_eq!(writer.history().unwrap().as_array().unwrap().len(), 1);
+    std::fs::remove_file(source.join("song.tja")).unwrap();
+    assert_eq!(refresh(&source).0, 0);
+    assert!(writer.conflicts().unwrap().is_empty());
+}
+
+#[test]
 fn local_receiver_confirmations_can_join_a_serving_cache() {
     use p2p_sync_core::{
         auth::{PeerSigningKey, Role, Roster},
