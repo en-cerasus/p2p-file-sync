@@ -78,7 +78,8 @@ jobs:
           kill "$peer_a" "$peer_b" 2>/dev/null || true
           wait "$peer_a" "$peer_b" 2>/dev/null || true
           trial=$(mktemp -d)
-          target/rtc-test/debug/p2p-send setup "$trial/setup" 127.0.0.1:9766 127.0.0.1:9866
+          target/rtc-test/debug/p2p-send setup "$trial/setup" 127.0.0.1:9766 127.0.0.1:9766
+          python3 -c 'import json,sys; p=sys.argv[1]; config=json.load(open(p)); config["address"]="127.0.0.1:9866"; json.dump(config,open(p,"w"))' "$trial/setup/receiver/direct.json"
           printf 'sync through WebRTC\n' > "$trial/song.tja"
           target/rtc-test/debug/p2p-send publish "$trial/setup/sender/server.json" "$trial/sender-state" "$trial/song.tja"
           target/rtc-test/debug/p2p-send serve "$trial/setup/sender/server.json" "$trial/sender-state" > sync-server.log 2>&1 &
