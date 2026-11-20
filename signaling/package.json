@@ -1,0 +1,11 @@
+{
+  "name": "p2p-file-sync-signaling",
+  "private": true,
+  "scripts": {
+    "check": "wrangler types && tsc --noEmit && wrangler deploy --dry-run"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "wrangler": "^4.102.0"
+  }
+}
