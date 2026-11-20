@@ -216,6 +216,7 @@ async fn run_async(config: BridgeConfig, cancelled: &dyn Fn() -> bool,
                 if stats_ticks < 4 { continue; }
                 stats_ticks = 0;
                 if let Some(connection) = pc.as_ref() {
+                    if std::env::var_os("P2P_RTC_DEBUG").is_some() { eprintln!("RTC stats begin"); }
                     if let Some((relay, sent, received)) = selected_route(connection.as_ref()).await {
                         report_ticks += 1;
                         if reported_route != Some(relay) || report_ticks >= 4 {
@@ -228,6 +229,8 @@ async fn run_async(config: BridgeConfig, cancelled: &dyn Fn() -> bool,
                             status("relay-limit");
                             break;
                         }
+                    } else if std::env::var_os("P2P_RTC_DEBUG").is_some() {
+                        eprintln!("RTC selected route unavailable");
                     }
                 }
             },
@@ -307,6 +310,9 @@ async fn run_async(config: BridgeConfig, cancelled: &dyn Fn() -> bool,
 
 async fn selected_route(connection: &dyn PeerConnection) -> Option<(bool, u64, u64)> {
     let report = connection.get_stats(Instant::now(), StatsSelector::None).await;
+    if std::env::var_os("P2P_RTC_DEBUG").is_some() {
+        eprintln!("RTC stats: {:?}", report.iter().collect::<Vec<_>>());
+    }
     for entry in report.iter() {
         let RTCStatsReportEntry::Transport(transport) = entry else { continue };
         let Some(RTCStatsReportEntry::IceCandidatePair(pair)) =
