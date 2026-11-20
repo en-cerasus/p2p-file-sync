@@ -1,7 +1,7 @@
 //! Manual-configured WebRTC DataChannel route probe for Windows ↔ iPhone Safari.
 //! No sync data or persistent files are transferred by this probe.
 
-use std::{net::UdpSocket, sync::Arc};
+use std::{net::UdpSocket, sync::Arc, time::Instant};
 
 use anyhow::{bail, Context, Result};
 use futures_util::{SinkExt, StreamExt};
@@ -13,7 +13,8 @@ use webrtc::{
     peer_connection::{
         MediaEngine, PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler,
         RTCConfigurationBuilder, RTCIceCandidateInit, RTCIceServer, RTCSessionDescription,
-        RTCPeerConnectionIceEvent, RTCPeerConnectionState, Registry,
+        RTCPeerConnectionIceEvent, RTCPeerConnectionState, RTCStatsReportEntry, Registry,
+        StatsSelector,
         register_default_interceptors,
     },
     runtime::{default_runtime, Runtime},
@@ -90,7 +91,7 @@ async fn peer_connection(
     Ok(Box::new(pc))
 }
 
-fn run_channel(channel: Arc<dyn DataChannel>) {
+fn run_channel(channel: Arc<dyn DataChannel>, pong_tx: mpsc::UnboundedSender<()>) {
     tokio::spawn(async move {
         while let Some(event) = channel.poll().await {
             match event {
@@ -105,6 +106,7 @@ fn run_channel(channel: Arc<dyn DataChannel>) {
                     } else if let Some(stamp) = text.strip_prefix("pong:") {
                         if let Ok(sent) = stamp.parse::<u128>() {
                             println!("DataChannel pong: {} ms", now_ms().saturating_sub(sent));
+                            let _ = pong_tx.send(());
                         }
                     }
                 }
@@ -113,6 +115,20 @@ fn run_channel(channel: Arc<dyn DataChannel>) {
             }
         }
     });
+}
+
+async fn report_route(connection: &dyn PeerConnection) {
+    let report = connection.get_stats(Instant::now(), StatsSelector::None).await;
+    for entry in report.iter() {
+        let RTCStatsReportEntry::Transport(transport) = entry else { continue };
+        let Some(RTCStatsReportEntry::IceCandidatePair(pair)) = report.get(&transport.selected_candidate_pair_id) else { continue };
+        let local = report.get(&pair.local_candidate_id);
+        let remote = report.get(&pair.remote_candidate_id);
+        if let (Some(RTCStatsReportEntry::LocalCandidate(local)), Some(RTCStatsReportEntry::RemoteCandidate(remote))) = (local, remote) {
+            println!("Selected route: {:?} -> {:?}; bytes sent={} received={}",
+                local.candidate_type, remote.candidate_type, transport.bytes_sent, transport.bytes_received);
+        }
+    }
 }
 
 fn now_ms() -> u128 {
@@ -147,6 +163,7 @@ async fn main() -> Result<()> {
     println!("Waiting in room; local peer {}", &me[..8]);
     let (candidate_tx, mut candidate_rx) = mpsc::unbounded_channel::<Value>();
     let (channel_tx, mut channel_rx) = mpsc::unbounded_channel::<Arc<dyn DataChannel>>();
+    let (pong_tx, mut pong_rx) = mpsc::unbounded_channel::<()>();
     let runtime = default_runtime().context("WebRTC runtime unavailable")?;
     let mut remote: Option<String> = None;
     let mut pc: Option<Box<dyn PeerConnection>> = None;
@@ -155,7 +172,10 @@ async fn main() -> Result<()> {
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,
-            Some(channel) = channel_rx.recv() => run_channel(channel),
+            Some(channel) = channel_rx.recv() => run_channel(channel, pong_tx.clone()),
+            Some(()) = pong_rx.recv() => {
+                if let Some(conn) = pc.as_ref() { report_route(conn.as_ref()).await; }
+            }
             Some(candidate) = candidate_rx.recv() => {
                 outgoing.send(Message::Text(candidate.to_string().into())).await?;
             }
@@ -176,7 +196,7 @@ async fn main() -> Result<()> {
                     if me.as_str() < possible {
                         let conn = pc.as_ref().unwrap();
                         let channel = conn.create_data_channel("p2p-diagnostic", None).await?;
-                        run_channel(channel);
+                        run_channel(channel, pong_tx.clone());
                         conn.set_local_description(conn.create_offer(None).await?).await?;
                         let offer = conn.local_description().await.context("missing local offer")?;
                         outgoing.send(Message::Text(signal_text("offer", possible, serde_json::to_value(offer)?).to_string().into())).await?;
