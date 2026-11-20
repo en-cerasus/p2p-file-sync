@@ -39,13 +39,15 @@ async function pathReport(pc) {
 }
 
 function wireChannel(channel, remote) {
+  channel.binaryType = 'arraybuffer';
   channel.onopen = async () => {
     log(`${remote.slice(0, 8)} DataChannel接続。${await pathReport(peers.get(remote).pc)}`);
-    channel.send(`ping:${Date.now()}`);
+    channel.send(new TextEncoder().encode(`ping:${Date.now()}\n`));
   };
   channel.onmessage = event => {
-    if (String(event.data).startsWith('ping:')) channel.send(`pong:${String(event.data).slice(5)}`);
-    else if (String(event.data).startsWith('pong:')) log(`${remote.slice(0, 8)} 応答 ${Date.now() - Number(String(event.data).slice(5))} ms`);
+    const text = typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data);
+    if (text.startsWith('ping:')) channel.send(new TextEncoder().encode(`pong:${text.slice(5).trim()}\n`));
+    else if (text.startsWith('pong:')) log(`${remote.slice(0, 8)} 応答 ${Date.now() - Number(text.slice(5).trim())} ms`);
   };
   channel.onclose = () => log(`${remote.slice(0, 8)} DataChannel切断`);
 }

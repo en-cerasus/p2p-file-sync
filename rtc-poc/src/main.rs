@@ -1,10 +1,12 @@
 //! Manual-configured WebRTC DataChannel route probe for Windows ↔ iPhone Safari.
 //! No sync data or persistent files are transferred by this probe.
 
-use std::{net::UdpSocket, sync::Arc, time::Instant};
+use std::{io::{BufRead, BufReader, Write}, net::UdpSocket, sync::Arc, time::Instant};
 
 use anyhow::{bail, Context, Result};
+use bytes::BytesMut;
 use futures_util::{SinkExt, StreamExt};
+use p2p_sync_core::channel_stream::bridge;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -93,27 +95,66 @@ async fn peer_connection(
 
 fn run_channel(channel: Arc<dyn DataChannel>, pong_tx: mpsc::UnboundedSender<()>) {
     tokio::spawn(async move {
-        while let Some(event) = channel.poll().await {
-            match event {
-                DataChannelEvent::OnOpen => {
-                    println!("DataChannel open; sending ping");
-                    let _ = channel.send_text(&format!("ping:{}", now_ms())).await;
-                }
-                DataChannelEvent::OnMessage(message) => {
-                    let text = String::from_utf8_lossy(&message.data);
-                    if let Some(stamp) = text.strip_prefix("ping:") {
-                        let _ = channel.send_text(&format!("pong:{stamp}")).await;
-                    } else if let Some(stamp) = text.strip_prefix("pong:") {
-                        if let Ok(sent) = stamp.parse::<u128>() {
-                            println!("DataChannel pong: {} ms", now_ms().saturating_sub(sent));
-                            let _ = pong_tx.send(());
-                        }
-                    }
-                }
-                DataChannelEvent::OnClose => { println!("DataChannel closed"); break; }
+        loop {
+            match channel.poll().await {
+                Some(DataChannelEvent::OnOpen) => break,
+                Some(DataChannelEvent::OnClose) | None => return,
                 _ => {}
             }
         }
+        println!("DataChannel open; sending stream ping");
+        let (mut stream, ingress, egress) = bridge();
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        tokio::task::spawn_blocking(move || {
+            while let Some(frame) = egress.next() {
+                if outbound_tx.send(frame).is_err() { break; }
+            }
+        });
+        tokio::task::spawn_blocking(move || {
+            if writeln!(stream, "ping:{}", now_ms()).is_err() { return; }
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        if let Some(stamp) = line.trim_end().strip_prefix("ping:") {
+                            let _ = writeln!(reader.get_mut(), "pong:{stamp}");
+                        } else if let Some(stamp) = line.trim_end().strip_prefix("pong:") {
+                            if let Ok(sent) = stamp.parse::<u128>() {
+                                println!("DataChannel pong: {} ms", now_ms().saturating_sub(sent));
+                                let _ = pong_tx.send(());
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        loop {
+            tokio::select! {
+                frame = outbound_rx.recv() => {
+                    let Some(frame) = frame else { break };
+                    if channel.send(BytesMut::from(frame.as_slice())).await.is_err() { break; }
+                }
+                event = channel.poll() => match event {
+                    Some(DataChannelEvent::OnMessage(message)) => {
+                        loop {
+                            match ingress.try_receive(&message.data) {
+                                Ok(()) => break,
+                                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                                }
+                                Err(_) => return,
+                            }
+                        }
+                    }
+                    Some(DataChannelEvent::OnClose) | None => break,
+                    _ => {}
+                }
+            }
+        }
+        println!("DataChannel closed");
     });
 }
 
