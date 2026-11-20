@@ -58,6 +58,25 @@ private enum BackgroundSync {
     }
 }
 
+private final class BridgeReady: @unchecked Sendable {
+    let signal = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var connected = false
+
+    func finish(connected: Bool) {
+        lock.lock()
+        self.connected = connected
+        lock.unlock()
+        signal.signal()
+    }
+
+    var isConnected: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return connected
+    }
+}
+
 private actor SyncRunner {
     static let shared = SyncRunner()
     private var running = false
@@ -90,20 +109,20 @@ private actor SyncRunner {
                 let bridgeStop = SyncCore.Cancellation()
                 defer { bridgeStop.cancel() }
                 if manager.fileExists(atPath: rtc.path) {
-                    let ready = DispatchSemaphore(value: 0)
+                    let ready = BridgeReady()
                     Task.detached(priority: .utility) {
                         try? SyncCore.runRTCBridge(configuration: rtc, cancellation: bridgeStop) { status in
-                            if status == "ready" { ready.signal() }
+                            if status == "ready" { ready.finish(connected: true) }
+                            if status == "failed" { ready.finish(connected: false) }
                         }
+                        ready.finish(connected: false)
                     }
-                    var connected = false
                     for _ in 0..<80 where !cancellation.isCancelled() {
-                        if ready.wait(timeout: .now() + 0.25) == .success {
-                            connected = true
+                        if ready.signal.wait(timeout: .now() + 0.25) == .success {
                             break
                         }
                     }
-                    guard connected && !cancellation.isCancelled() else {
+                    guard ready.isConnected && !cancellation.isCancelled() else {
                         throw SyncCore.CoreError.rtcFailed(5)
                     }
                 }
