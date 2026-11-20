@@ -1,0 +1,54 @@
+name: Test WebRTC signaling and DataChannel
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  loopback:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTUP_TOOLCHAIN: 1.100.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: Build Worker and Rust probe
+        shell: bash
+        run: |
+          npm install --prefix signaling --no-audit --no-fund
+          npm --prefix signaling run check
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          cargo build --locked --manifest-path rtc-poc/Cargo.toml
+      - name: Exchange data over local WebRTC
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd signaling && npx wrangler dev --ip 127.0.0.1 --port 8787) > worker.log 2>&1 &
+          worker=$!
+          trap 'kill "$worker" 2>/dev/null || true' EXIT
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:8787/diagnostic.html > /dev/null; then break; fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:8787/diagnostic.html > /dev/null
+          room=0123456789abcdef0123456789abcdef
+          timeout 45s rtc-poc/target/debug/p2p-rtc-poc ws://127.0.0.1:8787/signal "$room" > peer-a.log 2>&1 &
+          peer_a=$!
+          sleep 1
+          timeout 45s rtc-poc/target/debug/p2p-rtc-poc ws://127.0.0.1:8787/signal "$room" > peer-b.log 2>&1 &
+          peer_b=$!
+          trap 'kill "$peer_a" "$peer_b" "$worker" 2>/dev/null || true' EXIT
+          success=0
+          for attempt in {1..30}; do
+            if grep -q 'DataChannel pong:' peer-a.log && grep -q 'DataChannel pong:' peer-b.log; then success=1; break; fi
+            sleep 1
+          done
+          cat peer-a.log peer-b.log
+          if [ "$success" -ne 1 ]; then cat worker.log; exit 1; fi

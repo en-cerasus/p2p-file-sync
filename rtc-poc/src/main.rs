@@ -132,7 +132,8 @@ async fn main() -> Result<()> {
     }
     let signal = &args[1];
     let room = &args[2];
-    if !signal.starts_with("wss://") || !signal.ends_with("/signal") ||
+    let local_test = signal.starts_with("ws://127.0.0.1:") || signal.starts_with("ws://localhost:");
+    if !(signal.starts_with("wss://") || local_test) || !signal.ends_with("/signal") ||
         room.len() != 32 || !room.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         bail!("expected a wss://.../signal URL and a 32-digit hex room");
     }
