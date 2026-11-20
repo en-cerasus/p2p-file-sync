@@ -185,9 +185,14 @@ pub fn run(configuration: &Path, cancelled: &dyn Fn() -> bool,
     let config: BridgeConfig = serde_json::from_slice(&bytes)?;
     config.validate()?;
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let mut relay_bytes_total = 0u64;
     loop {
         if cancelled() { return Ok(()); }
-        match runtime.block_on(run_async(&config, cancelled, status)) {
+        if config.relay_byte_limit.is_some_and(|limit| relay_bytes_total >= limit) {
+            status("relay-limit");
+            return Ok(());
+        }
+        match runtime.block_on(run_async(&config, &mut relay_bytes_total, cancelled, status)) {
             Ok(false) => return Ok(()), // The configured relay limit is terminal.
             Ok(true) | Err(_) if cancelled() => return Ok(()),
             Ok(true) | Err(_) => status("reconnecting"),
@@ -199,7 +204,8 @@ pub fn run(configuration: &Path, cancelled: &dyn Fn() -> bool,
     }
 }
 
-async fn run_async(config: &BridgeConfig, cancelled: &dyn Fn() -> bool,
+async fn run_async(config: &BridgeConfig, relay_bytes_total: &mut u64,
+    cancelled: &dyn Fn() -> bool,
     status: &dyn Fn(&str)) -> Result<bool> {
     let mode = config.mode;
     let local_tcp = config.local_tcp;
@@ -222,6 +228,7 @@ async fn run_async(config: &BridgeConfig, cancelled: &dyn Fn() -> bool,
     let mut report_ticks = 0u8;
     let mut reported_route = None;
     let mut relay_limit_reached = false;
+    let mut last_relay_bytes = 0u64;
     let mut tunnels = Vec::new();
     loop {
         tokio::select! {
@@ -232,6 +239,7 @@ async fn run_async(config: &BridgeConfig, cancelled: &dyn Fn() -> bool,
                 stats_ticks = 0;
                 if let Some(connection) = pc.as_ref() {
                     if let Some((relay, sent, received)) = selected_route(connection.as_ref()).await {
+                        count_relay_bytes(relay_bytes_total, &mut last_relay_bytes, relay, sent, received);
                         report_ticks += 1;
                         if reported_route != Some(relay) || report_ticks >= 4 {
                             status(&format!("route:{} sent={sent} received={received}",
@@ -239,7 +247,7 @@ async fn run_async(config: &BridgeConfig, cancelled: &dyn Fn() -> bool,
                             reported_route = Some(relay);
                             report_ticks = 0;
                         }
-                        if relay && config.relay_byte_limit.is_some_and(|limit| sent.saturating_add(received) >= limit) {
+                        if relay && config.relay_byte_limit.is_some_and(|limit| *relay_bytes_total >= limit) {
                             status("relay-limit");
                             relay_limit_reached = true;
                             break;
@@ -254,10 +262,16 @@ async fn run_async(config: &BridgeConfig, cancelled: &dyn Fn() -> bool,
                 if text == "ready" {
                     if let Some(connection) = pc.as_ref() {
                         if let Some((relay, sent, received)) = selected_route(connection.as_ref()).await {
+                            count_relay_bytes(relay_bytes_total, &mut last_relay_bytes, relay, sent, received);
                             status(&format!("route:{} sent={sent} received={received}",
                                 if relay { "relay" } else { "direct" }));
                             reported_route = Some(relay);
                             report_ticks = 0;
+                            if relay && config.relay_byte_limit.is_some_and(|limit| *relay_bytes_total >= limit) {
+                                status("relay-limit");
+                                relay_limit_reached = true;
+                                break;
+                            }
                         }
                     }
                 }
@@ -331,6 +345,15 @@ async fn run_async(config: &BridgeConfig, cancelled: &dyn Fn() -> bool,
             },
         }
     }
+    if let Some(connection) = pc.as_ref() {
+        if let Some((relay, sent, received)) = selected_route(connection.as_ref()).await {
+            count_relay_bytes(relay_bytes_total, &mut last_relay_bytes, relay, sent, received);
+        }
+    }
+    if !relay_limit_reached && config.relay_byte_limit.is_some_and(|limit| *relay_bytes_total >= limit) {
+        status("relay-limit");
+        relay_limit_reached = true;
+    }
     for tunnel in tunnels {
         tunnel.abort();
         let _ = tunnel.await;
@@ -338,6 +361,15 @@ async fn run_async(config: &BridgeConfig, cancelled: &dyn Fn() -> bool,
     if let Some(conn) = pc { conn.close().await?; }
     status("closed");
     Ok(!relay_limit_reached)
+}
+
+fn count_relay_bytes(total: &mut u64, last: &mut u64,
+    relay: bool, sent: u64, received: u64) {
+    if relay {
+        let current = sent.saturating_add(received);
+        *total = total.saturating_add(current.saturating_sub(*last));
+        *last = current;
+    }
 }
 
 async fn selected_route(connection: &dyn PeerConnection) -> Option<(bool, u64, u64)> {
@@ -383,5 +415,19 @@ mod tests {
         assert!(config.validate().is_err());
         config.relay_byte_limit = Some(10_000);
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn relay_limit_accumulates_across_connections() {
+        let mut total = 0;
+        let mut last = 0;
+        count_relay_bytes(&mut total, &mut last, true, 40, 20);
+        count_relay_bytes(&mut total, &mut last, true, 70, 30);
+        assert_eq!(total, 100);
+        last = 0; // A new ICE transport starts its byte counters at zero.
+        count_relay_bytes(&mut total, &mut last, true, 20, 10);
+        assert_eq!(total, 130);
+        count_relay_bytes(&mut total, &mut last, false, 1000, 1000);
+        assert_eq!(total, 130);
     }
 }

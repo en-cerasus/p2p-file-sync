@@ -15,7 +15,7 @@
 
 Rust共通コアの`p2p-send rtc-bridge <rtc.json>`は、DataChannelとローカルTCP接続の間でバイト列を転送する。`p2p_sync_rtc_bridge_run_v1`からも同じ処理を呼べる。指定できるTCPアドレスは`127.0.0.1`などのループバックのみ。元の相互TLSと証明書ピンはDataChannelの内側でそのまま検証する。`rtc-poc`の環境変数方式も診断用に残している。
 
-`rtc.json`の例。ルーム値は16バイトの乱数を16進数32桁にしたもので、両端末に同じ値を設定する。`signal_url`には公開済みWorkerの`wss://.../signal`を指定する。TURNを許可して試す場合だけ、短期の`turn_username`と`turn_password`に加え、端末ごとの中継送受信量上限`relay_byte_limit`を正のバイト数で指定する。上限を超えた経路は切断する。クライアント側の上限はCloudflareアカウント全体の請求額を保証しない。
+`rtc.json`の例。ルーム値は16バイトの乱数を16進数32桁にしたもので、両端末に同じ値を設定する。`signal_url`には公開済みWorkerの`wss://.../signal`を指定する。TURNを許可して試す場合だけ、短期の`turn_username`と`turn_password`に加え、端末ごとの中継送受信量上限`relay_byte_limit`を正のバイト数で指定する。同じ起動中は再接続しても中継量を合算し、上限を超えたら経路を切断する。クライアント側の上限はCloudflareアカウント全体の請求額を保証しない。
 
 ```json
 {"signal_url":"wss://<WorkerのURL>/signal","room":"0123456789abcdef0123456789abcdef","local_tcp":"127.0.0.1:8765","mode":"connect"}
