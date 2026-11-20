@@ -76,7 +76,13 @@ jobs:
             cat tunnel-a.log tunnel-b.log echo-server.log worker.log
             exit 1
           fi
+          for attempt in {1..10}; do
+            if grep -q 'RTC route:direct' tunnel-a.log && grep -q 'RTC route:direct' tunnel-b.log; then break; fi
+            sleep 1
+          done
           cat tunnel-a.log tunnel-b.log
+          grep -q 'RTC route:direct' tunnel-a.log
+          grep -q 'RTC route:direct' tunnel-b.log
           kill "$peer_a" "$peer_b" 2>/dev/null || true
           wait "$peer_a" "$peer_b" 2>/dev/null || true
           trial=$(mktemp -d)
