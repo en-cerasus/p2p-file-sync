@@ -217,7 +217,7 @@ enum SyncCore {
                 counts.blocked += 1
             } else if outcome == 1 || outcome == 2 {
                 if item.kind == .delete { counts.removed += 1 } else { counts.updated += 1 }
-            } else if outcome == 3 || outcome == 4 {
+            } else if outcome != 0 {
                 counts.blocked += 1
             }
         }
