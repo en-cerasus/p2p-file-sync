@@ -2,6 +2,7 @@ pub mod archive;
 pub mod auth;
 pub mod blob;
 pub mod catchup;
+pub mod channel_stream;
 pub mod chunks;
 pub mod direct;
 pub mod generation;
