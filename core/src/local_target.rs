@@ -756,4 +756,77 @@ mod apple_tests {
         assert_eq!(store.applied_file(object).unwrap().unwrap().event, deleted.id);
         assert!(store.pending_files().unwrap().is_empty());
     }
+
+    #[test]
+    fn apple_move_with_edit_retries_after_sql_completion_failure() {
+        let folder = tempfile::tempdir().unwrap();
+        let database = folder.path().join("state.db");
+        let blobs = BlobStore::open(folder.path().join("blobs")).unwrap();
+        let old = Blob { hash: crate::sha256(b"old"), length: 3 };
+        let new = Blob { hash: crate::sha256(b"new"), length: 3 };
+        blobs.put(old, &b"old"[..]).unwrap();
+        blobs.put(new, &b"new"[..]).unwrap();
+        let peer = [5; 32];
+        let object = [4; 16];
+        let open = || Store::open(&database, Membership {
+            share: [9; 16], generation: 1, members: [peer].into(),
+        }).unwrap();
+        let mut store = open();
+        let created = Event {
+            id: EventId { peer, sequence: 1 }, context: VersionVector::new(), object,
+            change: Change::Create(Entry {
+                parent: None, name: "song.tja".into(), kind: EntryKind::File(old.hash),
+            }),
+        };
+        store.apply_verified(created.clone()).unwrap();
+        store.stage_file(&blobs, &FileIntent {
+            object, event: created.id, previous: None, desired: Some(old),
+        }).unwrap();
+        store.recover_new_file(&blobs, folder.path(), object).unwrap();
+
+        let moved = Event {
+            id: EventId { peer, sequence: 2 }, context: [(peer, 1)].into(), object,
+            change: Change::Revise {
+                base: created.id,
+                entry: Some(Entry {
+                    parent: None, name: "moved.tja".into(), kind: EntryKind::File(new.hash),
+                }),
+            },
+        };
+        store.apply_verified(moved.clone()).unwrap();
+        let intent = FileIntent {
+            object, event: moved.id, previous: Some(old), desired: Some(new),
+        };
+        store.stage_file(&blobs, &intent).unwrap();
+        let source = folder.path().join("song.tja");
+        let destination = folder.path().join("moved.tja");
+        let recover = |store: &mut Store| store.recover_moved_file_with(&blobs, object, |before, after, pending, _| {
+            let before: Vec<_> = before.iter().map(String::as_str).collect();
+            let after: Vec<_> = after.iter().map(String::as_str).collect();
+            AppleMoveTarget::open(&open_root(folder.path())?, &before, &after, pending)
+        });
+
+        std::fs::write(&destination, b"local edit").unwrap();
+        assert_eq!(recover(&mut store).unwrap(), Recovery::Diverged);
+        assert_eq!(std::fs::read(&source).unwrap(), b"old");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"local edit");
+        std::fs::remove_file(&destination).unwrap();
+
+        let fault = Connection::open(&database).unwrap();
+        fault.execute_batch("CREATE TRIGGER reject_completion BEFORE DELETE ON file_intent
+            BEGIN SELECT RAISE(ABORT, 'injected completion failure'); END;").unwrap();
+        assert!(recover(&mut store).is_err());
+        assert!(!source.exists());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"new");
+        assert_eq!(store.applied_file(object).unwrap().unwrap().event, created.id);
+        drop(store);
+        fault.execute_batch("DROP TRIGGER reject_completion").unwrap();
+
+        let mut store = open();
+        assert_eq!(recover(&mut store).unwrap(), Recovery::AlreadyApplied);
+        let applied = store.applied_file(object).unwrap().unwrap();
+        assert_eq!(applied.event, moved.id);
+        assert_eq!(applied.path.unwrap(), ["moved.tja"]);
+        assert!(store.pending_files().unwrap().is_empty());
+    }
 }
