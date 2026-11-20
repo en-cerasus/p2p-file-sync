@@ -329,6 +329,7 @@ struct DirectSyncView: View {
             switch status {
             case 8: result = "古い同期状態が復元された可能性があります。共有元を変更せず、状態の復旧が必要です。"
             case 2: result = "接続設定または保存先を確認してください。"
+            case 3: result = "保存領域にアクセスできないため、保存済みの変更を反映できませんでした。"
             default: result = "保存済みの変更を反映できませんでした。同期先を確認してください。"
             }
         } catch SyncCore.CoreError.snapshotFailed(let status) {

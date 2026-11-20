@@ -1102,6 +1102,9 @@ fn host_error_code(error: host::HostError) -> i32 {
         host::HostError::Materialize(materialize::MaterializeError::Store(
             store::StoreError::RollbackDetected,
         )) => 8,
+        #[cfg(target_os = "ios")]
+        host::HostError::Materialize(materialize::MaterializeError::Io(_)
+            | materialize::MaterializeError::Store(_)) => 3,
         host::HostError::Io(_) | host::HostError::Store(_) => 3,
         host::HostError::Tls(_) => 4,
         host::HostError::Direct(direct::DirectError::Cancelled) => 7,
