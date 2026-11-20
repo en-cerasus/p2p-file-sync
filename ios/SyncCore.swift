@@ -135,6 +135,7 @@ enum SyncCore {
     }
 
     private static func pendingURL(root: URL, components: [String]) throws -> URL {
+        guard !components.isEmpty else { throw CoreError.coordinatedPathChanged }
         var url = root
         for component in components {
             guard !component.isEmpty, component != ".", component != "..",
