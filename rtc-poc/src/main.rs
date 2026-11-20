@@ -1,7 +1,7 @@
 //! Manual-configured WebRTC DataChannel route probe for Windows ↔ iPhone Safari.
 //! No sync data or persistent files are transferred by this probe.
 
-use std::{io::{BufRead, BufReader, Write}, net::UdpSocket, sync::Arc, time::Instant};
+use std::{io::{BufRead, BufReader, Write}, net::{SocketAddr, UdpSocket}, sync::Arc, time::Instant};
 
 use anyhow::{bail, Context, Result};
 use bytes::BytesMut;
@@ -9,6 +9,7 @@ use futures_util::{SinkExt, StreamExt};
 use p2p_sync_core::channel_stream::bridge;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
+use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream}};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use webrtc::{
     data_channel::{DataChannel, DataChannelEvent},
@@ -26,6 +27,27 @@ struct Handler {
     remote: String,
     candidate_tx: mpsc::UnboundedSender<Value>,
     channel_tx: mpsc::UnboundedSender<Arc<dyn DataChannel>>,
+}
+
+#[derive(Clone)]
+enum Mode {
+    Probe,
+    Connect(SocketAddr),
+    Listen(SocketAddr),
+}
+
+fn mode_from_environment() -> Result<Mode> {
+    let connect = std::env::var("P2P_RTC_TCP_CONNECT").ok();
+    let listen = std::env::var("P2P_RTC_TCP_LISTEN").ok();
+    let value = match (connect, listen) {
+        (None, None) => return Ok(Mode::Probe),
+        (Some(value), None) => (value, true),
+        (None, Some(value)) => (value, false),
+        (Some(_), Some(_)) => bail!("set only one P2P_RTC_TCP_* variable"),
+    };
+    let address: SocketAddr = value.0.parse().context("invalid TCP bridge address")?;
+    if !address.ip().is_loopback() { bail!("TCP bridge must use a loopback address"); }
+    Ok(if value.1 { Mode::Connect(address) } else { Mode::Listen(address) })
 }
 
 #[async_trait::async_trait]
@@ -88,12 +110,13 @@ async fn peer_connection(
         }))
         .with_runtime(runtime)
         .with_udp_addrs(vec![format!("{}:0", local_ip()?)])
+        .with_data_channel_send_buffer_limit(1024 * 1024)
         .build()
         .await?;
     Ok(Box::new(pc))
 }
 
-fn run_channel(channel: Arc<dyn DataChannel>, pong_tx: mpsc::UnboundedSender<()>) {
+fn run_channel(channel: Arc<dyn DataChannel>, pong_tx: mpsc::UnboundedSender<()>, mode: Mode) {
     tokio::spawn(async move {
         loop {
             match channel.poll().await {
@@ -102,6 +125,51 @@ fn run_channel(channel: Arc<dyn DataChannel>, pong_tx: mpsc::UnboundedSender<()>
                 _ => {}
             }
         }
+        if let Mode::Probe = mode {
+            probe_channel(channel, pong_tx).await;
+        } else {
+            tunnel_channel(channel, mode).await;
+        }
+    });
+}
+
+async fn tunnel_channel(channel: Arc<dyn DataChannel>, mode: Mode) {
+    let tcp = match mode {
+        Mode::Connect(address) => TcpStream::connect(address).await,
+        Mode::Listen(address) => match TcpListener::bind(address).await {
+            Ok(listener) => {
+                println!("Local TCP bridge listening on {address}");
+                listener.accept().await.map(|(stream, _)| stream)
+            }
+            Err(error) => Err(error),
+        },
+        Mode::Probe => unreachable!(),
+    };
+    let Ok(tcp) = tcp else { eprintln!("Local TCP bridge failed: {}", tcp.unwrap_err()); return };
+    println!("Local TCP bridge connected");
+    let (mut tcp_read, mut tcp_write) = tcp.into_split();
+    let mut buffer = [0u8; 16 * 1024];
+    loop {
+        tokio::select! {
+            read = tcp_read.read(&mut buffer) => match read {
+                Ok(0) | Err(_) => break,
+                Ok(count) => {
+                    if channel.send(BytesMut::from(&buffer[..count])).await.is_err() { break; }
+                }
+            },
+            event = channel.poll() => match event {
+                Some(DataChannelEvent::OnMessage(message)) => {
+                    if tcp_write.write_all(&message.data).await.is_err() { break; }
+                }
+                Some(DataChannelEvent::OnClose) | None => break,
+                _ => {}
+            }
+        }
+    }
+    println!("Local TCP bridge closed");
+}
+
+async fn probe_channel(channel: Arc<dyn DataChannel>, pong_tx: mpsc::UnboundedSender<()>) {
         println!("DataChannel open; sending stream ping");
         let (mut stream, ingress, egress) = bridge();
         let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Vec<u8>>();
@@ -155,7 +223,6 @@ fn run_channel(channel: Arc<dyn DataChannel>, pong_tx: mpsc::UnboundedSender<()>
             }
         }
         println!("DataChannel closed");
-    });
 }
 
 async fn report_route(connection: &dyn PeerConnection) {
@@ -195,6 +262,7 @@ async fn main() -> Result<()> {
         bail!("expected a wss://.../signal URL and a 32-digit hex room");
     }
     let turn = (args.len() == 5).then(|| (args[3].as_str(), args[4].as_str()));
+    let mode = mode_from_environment()?;
     let mut random = [0u8; 32];
     getrandom::fill(&mut random).map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let me: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -213,7 +281,7 @@ async fn main() -> Result<()> {
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,
-            Some(channel) = channel_rx.recv() => run_channel(channel, pong_tx.clone()),
+            Some(channel) = channel_rx.recv() => run_channel(channel, pong_tx.clone(), mode.clone()),
             Some(()) = pong_rx.recv() => {
                 if let Some(conn) = pc.as_ref() { report_route(conn.as_ref()).await; }
             }
@@ -237,7 +305,7 @@ async fn main() -> Result<()> {
                     if me.as_str() < possible {
                         let conn = pc.as_ref().unwrap();
                         let channel = conn.create_data_channel("p2p-diagnostic", None).await?;
-                        run_channel(channel, pong_tx.clone());
+                        run_channel(channel, pong_tx.clone(), mode.clone());
                         conn.set_local_description(conn.create_offer(None).await?).await?;
                         let offer = conn.local_description().await.context("missing local offer")?;
                         outgoing.send(Message::Text(signal_text("offer", possible, serde_json::to_value(offer)?).to_string().into())).await?;

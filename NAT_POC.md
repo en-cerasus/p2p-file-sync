@@ -11,6 +11,17 @@
 5. TURN資格情報を空欄にして接続し、DataChannelの応答と選択候補の種類を記録する。直接接続できない回線では失敗してよい。
 6. TURN使用を別途許可した場合のみ、Cloudflare Realtimeが発行した短期資格情報を両端末に入れて再試行する。Windows側はコマンド末尾にユーザー名とパスワードを指定する。`relay`候補が選ばれた場合だけTURN中継として記録する。実転送量と請求画面の使用量を確認する。
 
+## 既存の同期処理を通すWindows間の試験
+
+Windows用PoCは環境変数`P2P_RTC_TCP_CONNECT`または`P2P_RTC_TCP_LISTEN`を指定すると、DataChannelとローカルTCP接続の間でバイト列を転送する。指定できるアドレスは`127.0.0.1`などのループバックのみ。元の相互TLSと証明書ピンはDataChannelの内側でそのまま検証する。
+
+1. 配信側は既存の`p2p-send setup`で`server.json`の待受を`127.0.0.1:8765`にし、`publish`後に`serve`を起動する。
+2. 配信側で`P2P_RTC_TCP_CONNECT=127.0.0.1:8765`を設定し、Windows用PoCを起動する。
+3. 受信側で`P2P_RTC_TCP_LISTEN=127.0.0.1:9865`を設定し、同じルーム値でWindows用PoCを起動する。受信側の`direct.json`の`address`だけを`127.0.0.1:9865`へ変更する。証明書ピンは変更しない。
+4. `Local TCP bridge listening`と`Local TCP bridge connected`が出た後、受信側GUIから同期する。接続が切れたらPoCを再起動する。現時点では同時に1接続だけ扱う。
+
+この試験はWindows間の同期経路に限る。iOSアプリへのWebRTC組み込みと別LANの実機試験は未完了。
+
 ## 残る実装
 
 - Windows・iOSアプリ内にWebRTC接続を組み込み、DataChannelをRustの`channel_stream`へ接続する。現状の手動設定の共有ID・証明書ピン・端末IDを使う。

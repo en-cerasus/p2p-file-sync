@@ -52,3 +52,24 @@ jobs:
           done
           cat peer-a.log peer-b.log
           if [ "$success" -ne 1 ]; then cat worker.log; exit 1; fi
+          kill "$peer_a" "$peer_b" 2>/dev/null || true
+          wait "$peer_a" "$peer_b" 2>/dev/null || true
+          python3 -u rtc-poc/tests/echo.py server > echo-server.log 2>&1 &
+          echo_server=$!
+          sleep 1
+          room=fedcba9876543210fedcba9876543210
+          P2P_RTC_TCP_CONNECT=127.0.0.1:9765 timeout 45s rtc-poc/target/debug/p2p-rtc-poc ws://127.0.0.1:8787/signal "$room" > tunnel-a.log 2>&1 &
+          peer_a=$!
+          sleep 1
+          P2P_RTC_TCP_LISTEN=127.0.0.1:9865 timeout 45s rtc-poc/target/debug/p2p-rtc-poc ws://127.0.0.1:8787/signal "$room" > tunnel-b.log 2>&1 &
+          peer_b=$!
+          trap 'kill "$peer_a" "$peer_b" "$echo_server" "$worker" 2>/dev/null || true' EXIT
+          for attempt in {1..20}; do
+            if grep -q 'Local TCP bridge listening' tunnel-b.log; then break; fi
+            sleep 1
+          done
+          if ! python3 rtc-poc/tests/echo.py client; then
+            cat tunnel-a.log tunnel-b.log echo-server.log worker.log
+            exit 1
+          fi
+          cat tunnel-a.log tunnel-b.log
