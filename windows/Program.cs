@@ -519,6 +519,7 @@ internal sealed class SyncWindow : Window
         }
         finally
         {
+            operation.Cancel();
             writerServing = false;
             serverCancellation = null;
             UpdateControls();

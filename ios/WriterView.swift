@@ -545,6 +545,7 @@ struct WriterView: View {
         let (ready, continuation) = AsyncStream.makeStream(of: String.self)
         let worker = Task.detached(priority: .utility) {
             defer { continuation.finish() }
+            defer { stop.cancel() }
             guard configFolder.startAccessingSecurityScopedResource() else {
                 throw WriterFailure.permissionUnavailable
             }
