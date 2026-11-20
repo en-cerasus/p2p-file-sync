@@ -30,8 +30,6 @@ jobs:
           cargo build --locked -p p2p-sync-core --bin p2p-send
       - name: Exchange data over local WebRTC
         shell: bash
-        env:
-          P2P_RTC_DEBUG: '1'
         run: |
           set -euo pipefail
           (cd signaling && npx wrangler dev --ip 127.0.0.1 --port 8787) > worker.log 2>&1 &
