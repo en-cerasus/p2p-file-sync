@@ -127,3 +127,42 @@ jobs:
           hash=$(sha256sum "$trial/song.tja" | cut -d' ' -f1)
           cmp "$trial/song.tja" "$trial/receiver-state/$share/1/files/$hash"
           echo 'Signed event and verified file body crossed WebRTC DataChannel'
+          kill "$peer_a" "$peer_b" "$sync_server" 2>/dev/null || true
+          wait "$peer_a" "$peer_b" "$sync_server" 2>/dev/null || true
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq coturn
+          turnserver -n --lt-cred-mech --user test:secret --realm p2p-test \
+            --listening-ip 127.0.0.1 --relay-ip 127.0.0.1 \
+            --listening-port 3478 --min-port 50000 --max-port 50050 \
+            --no-tls --no-tcp --fingerprint --allow-loopback-peers \
+            --cli-password testcli > turn.log 2>&1 &
+          turn_server=$!
+          python3 -u rtc-poc/tests/echo.py server > relay-echo.log 2>&1 &
+          echo_server=$!
+          trap 'kill "$peer_a" "$peer_b" "$echo_server" "$turn_server" "$worker" 2>/dev/null || true' EXIT
+          sleep 2
+          room=abcdef1234567890abcdef1234567890
+          printf '{"signal_url":"ws://127.0.0.1:8787/signal","room":"%s","local_tcp":"127.0.0.1:9765","mode":"connect","turn_username":"test","turn_password":"secret","relay_byte_limit":10000000,"test_turn_url":"turn:127.0.0.1:3478?transport=udp","test_relay_only":true}\n' "$room" > rtc-a.json
+          printf '{"signal_url":"ws://127.0.0.1:8787/signal","room":"%s","local_tcp":"127.0.0.1:9865","mode":"listen","turn_username":"test","turn_password":"secret","relay_byte_limit":10000000,"test_turn_url":"turn:127.0.0.1:3478?transport=udp","test_relay_only":true}\n' "$room" > rtc-b.json
+          timeout 45s target/rtc-test/debug/p2p-send rtc-bridge rtc-a.json > relay-a.log 2>&1 &
+          peer_a=$!
+          sleep 1
+          timeout 45s target/rtc-test/debug/p2p-send rtc-bridge rtc-b.json > relay-b.log 2>&1 &
+          peer_b=$!
+          for attempt in {1..25}; do
+            if grep -q 'RTC ready' relay-a.log && grep -q 'RTC ready' relay-b.log; then break; fi
+            sleep 1
+          done
+          if ! grep -q 'RTC ready' relay-a.log || ! grep -q 'RTC ready' relay-b.log ||
+             ! python3 rtc-poc/tests/echo.py client; then
+            cat relay-a.log relay-b.log relay-echo.log turn.log worker.log
+            exit 1
+          fi
+          for attempt in {1..10}; do
+            if grep -q 'RTC route:relay' relay-a.log && grep -q 'RTC route:relay' relay-b.log; then break; fi
+            sleep 1
+          done
+          cat relay-a.log relay-b.log
+          grep -q 'RTC route:relay' relay-a.log
+          grep -q 'RTC route:relay' relay-b.log
+          echo 'TURN relay transferred 100000 bytes'

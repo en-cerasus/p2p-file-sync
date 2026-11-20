@@ -15,7 +15,7 @@ use webrtc::{
     peer_connection::{
         MediaEngine, PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler,
         RTCConfigurationBuilder, RTCIceCandidateInit, RTCIceServer, RTCSessionDescription,
-        RTCPeerConnectionIceEvent, RTCStatsReportEntry, Registry, StatsSelector,
+        RTCPeerConnectionIceEvent, RTCIceTransportPolicy, RTCStatsReportEntry, Registry, StatsSelector,
         register_default_interceptors,
     },
     runtime::{default_runtime, Runtime},
@@ -35,6 +35,10 @@ pub struct BridgeConfig {
     pub turn_username: Option<String>,
     pub turn_password: Option<String>,
     pub relay_byte_limit: Option<u64>,
+    #[serde(default)]
+    test_turn_url: Option<String>,
+    #[serde(default)]
+    test_relay_only: bool,
 }
 
 impl BridgeConfig {
@@ -49,6 +53,11 @@ impl BridgeConfig {
             || self.local_tcp.port() == 0
             || self.turn_username.is_some() != self.turn_password.is_some()
             || self.turn_username.is_some() && self.relay_byte_limit.unwrap_or(0) == 0
+            || self.test_turn_url.as_ref().is_some_and(|url|
+                !local_test || !(url.starts_with("turn:127.0.0.1:")
+                    || url.starts_with("turn:localhost:")))
+            || self.test_relay_only && (!local_test || self.test_turn_url.is_none()
+                || self.turn_username.is_none())
         { bail!("invalid WebRTC bridge configuration"); }
         Ok(())
     }
@@ -60,12 +69,12 @@ impl BridgeConfig {
         }];
         if let (Some(username), Some(credential)) = (&self.turn_username, &self.turn_password) {
             servers.push(RTCIceServer {
-                urls: vec![
+                urls: self.test_turn_url.as_ref().map(|url| vec![url.clone()]).unwrap_or_else(|| vec![
                     "turn:turn.cloudflare.com:3478?transport=udp".into(),
                     "turn:turn.cloudflare.com:443?transport=udp".into(),
                     "turn:turn.cloudflare.com:3478?transport=tcp".into(),
                     "turns:turn.cloudflare.com:5349?transport=tcp".into(),
-                ],
+                ]),
                 username: username.clone(), credential: credential.clone(),
             });
         }
@@ -124,9 +133,13 @@ async fn peer_connection(
     let mut media = MediaEngine::default();
     media.register_default_codecs()?;
     let registry = register_default_interceptors(Registry::new(), &mut media)?;
+    let mut ice_configuration = RTCConfigurationBuilder::new()
+        .with_ice_servers(config.ice_servers());
+    if config.test_relay_only {
+        ice_configuration = ice_configuration.with_ice_transport_policy(RTCIceTransportPolicy::Relay);
+    }
     let connection = PeerConnectionBuilder::new()
-        .with_configuration(RTCConfigurationBuilder::new()
-            .with_ice_servers(config.ice_servers()).build())
+        .with_configuration(ice_configuration.build())
         .with_media_engine(media)
         .with_interceptor_registry(registry)
         .with_handler(Arc::new(Handler {
@@ -404,6 +417,8 @@ mod tests {
             turn_username: None,
             turn_password: None,
             relay_byte_limit: None,
+            test_turn_url: None,
+            test_relay_only: false,
         };
         assert!(config.validate().is_ok());
         config.local_tcp = "192.0.2.1:8765".parse().unwrap();
@@ -414,6 +429,11 @@ mod tests {
         config.turn_password = Some("secret".into());
         assert!(config.validate().is_err());
         config.relay_byte_limit = Some(10_000);
+        assert!(config.validate().is_ok());
+        config.test_turn_url = Some("turn:127.0.0.1:3478?transport=udp".into());
+        config.test_relay_only = true;
+        assert!(config.validate().is_err());
+        config.signal_url = "ws://127.0.0.1:8787/signal".into();
         assert!(config.validate().is_ok());
     }
 
