@@ -84,7 +84,6 @@ jobs:
           target/rtc-test/debug/p2p-send publish "$trial/setup/sender/server.json" "$trial/sender-state" "$trial/song.tja"
           target/rtc-test/debug/p2p-send serve "$trial/setup/sender/server.json" "$trial/sender-state" > sync-server.log 2>&1 &
           sync_server=$!
-          mkdir "$trial/destination"
           room=1234567890abcdef1234567890abcdef
           P2P_RTC_TCP_CONNECT=127.0.0.1:9766 timeout 45s target/rtc-test/debug/p2p-rtc-poc ws://127.0.0.1:8787/signal "$room" > sync-a.log 2>&1 &
           peer_a=$!
@@ -96,9 +95,11 @@ jobs:
             if grep -q 'Local TCP bridge listening' sync-b.log; then break; fi
             sleep 1
           done
-          if ! timeout 35s target/rtc-test/debug/p2p-send pull "$trial/setup/receiver/direct.json" "$trial/receiver-state" "$trial/destination"; then
+          if ! timeout 35s target/rtc-test/debug/p2p-send catch-up "$trial/setup/receiver/server.json" "$trial/receiver-state" "$trial/setup/receiver/direct.json"; then
             cat sync-a.log sync-b.log sync-server.log worker.log
             exit 1
           fi
-          cmp "$trial/song.tja" "$trial/destination/song.tja"
-          echo 'Existing TLS sync protocol crossed WebRTC DataChannel'
+          share=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["share"])' "$trial/setup/receiver/direct.json")
+          hash=$(sha256sum "$trial/song.tja" | cut -d' ' -f1)
+          cmp "$trial/song.tja" "$trial/receiver-state/$share/1/files/$hash"
+          echo 'Signed event and verified file body crossed WebRTC DataChannel'
