@@ -84,14 +84,19 @@ jobs:
           grep -q 'RTC route:direct' tunnel-a.log
           grep -q 'RTC route:direct' tunnel-b.log
           for attempt in {1..25}; do
-            if [ "$(grep -c 'RTC ready' tunnel-b.log)" -ge 2 ]; then break; fi
+            if [ "$(grep -c 'RTC ready' tunnel-a.log)" -ge 2 ] &&
+               [ "$(grep -c 'RTC ready' tunnel-b.log)" -ge 2 ]; then break; fi
             sleep 1
           done
-          if [ "$(grep -c 'RTC ready' tunnel-b.log)" -lt 2 ]; then
-            cat tunnel-a.log tunnel-b.log worker.log
+          if [ "$(grep -c 'RTC ready' tunnel-a.log)" -lt 2 ] ||
+             [ "$(grep -c 'RTC ready' tunnel-b.log)" -lt 2 ]; then
+            cat tunnel-a.log tunnel-b.log echo-server.log worker.log
             exit 1
           fi
-          python3 rtc-poc/tests/echo.py client
+          if ! python3 rtc-poc/tests/echo.py client; then
+            cat tunnel-a.log tunnel-b.log echo-server.log worker.log
+            exit 1
+          fi
           kill "$peer_a" "$peer_b" 2>/dev/null || true
           wait "$peer_a" "$peer_b" 2>/dev/null || true
           trial=$(mktemp -d)
