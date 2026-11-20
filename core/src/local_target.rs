@@ -589,8 +589,11 @@ pub(crate) fn open_root(path: &Path) -> io::Result<Dir> {
 #[cfg(all(test, target_vendor = "apple"))]
 mod apple_tests {
     use super::*;
-    use crate::materialize::MoveFileTarget;
-    use crate::replica::EventId;
+    use crate::blob::BlobStore;
+    use crate::materialize::{MoveFileTarget, Recovery};
+    use crate::replica::{Change, Entry, EntryKind, Event, EventId, VersionVector};
+    use crate::store::{Membership, Store};
+    use rusqlite::Connection;
 
     fn intent(desired: Option<Blob>) -> FileIntent {
         FileIntent {
@@ -669,5 +672,88 @@ mod apple_tests {
         assert_eq!(std::fs::read(&destination).unwrap(), b"old");
         assert!(target.replace_if_current(&intent, Some(File::open(&replacement).unwrap())).unwrap());
         assert_eq!(std::fs::read(&destination).unwrap(), b"new");
+    }
+
+    #[test]
+    fn apple_update_and_delete_resume_after_sql_completion_failure() {
+        let folder = tempfile::tempdir().unwrap();
+        let database = folder.path().join("state.db");
+        let blobs = BlobStore::open(folder.path().join("blobs")).unwrap();
+        let old = Blob { hash: crate::sha256(b"old"), length: 3 };
+        let new = Blob { hash: crate::sha256(b"new"), length: 3 };
+        blobs.put(old, &b"old"[..]).unwrap();
+        blobs.put(new, &b"new"[..]).unwrap();
+        let peer = [5; 32];
+        let object = [4; 16];
+        let open = || Store::open(&database, Membership {
+            share: [9; 16], generation: 1, members: [peer].into(),
+        }).unwrap();
+        let mut store = open();
+        let created = Event {
+            id: EventId { peer, sequence: 1 }, context: VersionVector::new(), object,
+            change: Change::Create(Entry {
+                parent: None, name: "song.tja".into(), kind: EntryKind::File(old.hash),
+            }),
+        };
+        store.apply_verified(created.clone()).unwrap();
+        store.stage_file(&blobs, &FileIntent {
+            object, event: created.id, previous: None, desired: Some(old),
+        }).unwrap();
+        assert_eq!(store.recover_new_file(&blobs, folder.path(), object).unwrap(), Recovery::Applied);
+        let path = folder.path().join("song.tja");
+
+        let updated = Event {
+            id: EventId { peer, sequence: 2 }, context: [(peer, 1)].into(), object,
+            change: Change::Revise {
+                base: created.id,
+                entry: Some(Entry {
+                    parent: None, name: "song.tja".into(), kind: EntryKind::File(new.hash),
+                }),
+            },
+        };
+        store.apply_verified(updated.clone()).unwrap();
+        store.stage_file(&blobs, &FileIntent {
+            object, event: updated.id, previous: Some(old), desired: Some(new),
+        }).unwrap();
+        let fault = Connection::open(&database).unwrap();
+        let fail_completion = "CREATE TRIGGER reject_completion BEFORE DELETE ON file_intent
+            BEGIN SELECT RAISE(ABORT, 'injected completion failure'); END;";
+        fault.execute_batch(fail_completion).unwrap();
+        let update = |store: &mut Store| store.recover_updated_file_with(&blobs, object, |parts, intent| {
+            let parts: Vec<_> = parts.iter().map(String::as_str).collect();
+            AppleExistingTarget::open(&open_root(folder.path())?, &parts, intent)
+        });
+        assert!(update(&mut store).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert_eq!(store.applied_file(object).unwrap().unwrap().event, created.id);
+        drop(store);
+        fault.execute_batch("DROP TRIGGER reject_completion").unwrap();
+        let mut store = open();
+        assert_eq!(update(&mut store).unwrap(), Recovery::AlreadyApplied);
+        assert_eq!(store.applied_file(object).unwrap().unwrap().event, updated.id);
+        assert!(store.pending_files().unwrap().is_empty());
+
+        let deleted = Event {
+            id: EventId { peer, sequence: 3 }, context: [(peer, 2)].into(), object,
+            change: Change::Revise { base: updated.id, entry: None },
+        };
+        store.apply_verified(deleted.clone()).unwrap();
+        store.stage_file(&blobs, &FileIntent {
+            object, event: deleted.id, previous: Some(new), desired: None,
+        }).unwrap();
+        fault.execute_batch(fail_completion).unwrap();
+        let delete = |store: &mut Store| store.recover_deleted_file_with(&blobs, object, |parts, intent| {
+            let parts: Vec<_> = parts.iter().map(String::as_str).collect();
+            AppleExistingTarget::open(&open_root(folder.path())?, &parts, intent)
+        });
+        assert!(delete(&mut store).is_err());
+        assert!(!path.exists());
+        assert_eq!(store.applied_file(object).unwrap().unwrap().event, updated.id);
+        drop(store);
+        fault.execute_batch("DROP TRIGGER reject_completion").unwrap();
+        let mut store = open();
+        assert_eq!(delete(&mut store).unwrap(), Recovery::AlreadyApplied);
+        assert_eq!(store.applied_file(object).unwrap().unwrap().event, deleted.id);
+        assert!(store.pending_files().unwrap().is_empty());
     }
 }
