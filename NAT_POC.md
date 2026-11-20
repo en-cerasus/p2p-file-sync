@@ -18,7 +18,7 @@ Windows用PoCは環境変数`P2P_RTC_TCP_CONNECT`または`P2P_RTC_TCP_LISTEN`�
 1. 配信側は既存の`p2p-send setup`で`server.json`の待受を`127.0.0.1:8765`にし、`publish`後に`serve`を起動する。
 2. 配信側で`P2P_RTC_TCP_CONNECT=127.0.0.1:8765`を設定し、Windows用PoCを起動する。
 3. 受信側で`P2P_RTC_TCP_LISTEN=127.0.0.1:9865`を設定し、同じルーム値でWindows用PoCを起動する。受信側の`direct.json`の`address`だけを`127.0.0.1:9865`へ変更する。証明書ピンは変更しない。
-4. `Local TCP bridge listening`と`Local TCP bridge connected`が出た後、受信側GUIから同期する。接続が切れたらPoCを再起動する。現時点では同時に1接続だけ扱う。
+4. `Local TCP bridge listening`と`Local TCP bridge connected`が出た後、受信側GUIから同期する。CLIで試す場合は`p2p-send pull <direct.json> <receiver-state-dir> <destination>`を使う。接続が切れたらPoCを再起動する。現時点では同時に1接続だけ扱う。
 
 この試験はWindows間の同期経路に限る。iOSアプリへのWebRTC組み込みと別LANの実機試験は未完了。
 

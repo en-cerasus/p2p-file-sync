@@ -12,6 +12,7 @@ jobs:
     timeout-minutes: 20
     env:
       RUSTUP_TOOLCHAIN: 1.100.0
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/rtc-test
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -26,6 +27,7 @@ jobs:
           npm --prefix signaling run check
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
           cargo build --locked --manifest-path rtc-poc/Cargo.toml
+          cargo build --locked -p p2p-sync-core --bin p2p-send
       - name: Exchange data over local WebRTC
         shell: bash
         run: |
@@ -39,10 +41,10 @@ jobs:
           done
           curl --fail --silent http://127.0.0.1:8787/diagnostic.html > /dev/null
           room=0123456789abcdef0123456789abcdef
-          timeout 45s rtc-poc/target/debug/p2p-rtc-poc ws://127.0.0.1:8787/signal "$room" > peer-a.log 2>&1 &
+          timeout 45s target/rtc-test/debug/p2p-rtc-poc ws://127.0.0.1:8787/signal "$room" > peer-a.log 2>&1 &
           peer_a=$!
           sleep 1
-          timeout 45s rtc-poc/target/debug/p2p-rtc-poc ws://127.0.0.1:8787/signal "$room" > peer-b.log 2>&1 &
+          timeout 45s target/rtc-test/debug/p2p-rtc-poc ws://127.0.0.1:8787/signal "$room" > peer-b.log 2>&1 &
           peer_b=$!
           trap 'kill "$peer_a" "$peer_b" "$worker" 2>/dev/null || true' EXIT
           success=0
@@ -58,10 +60,10 @@ jobs:
           echo_server=$!
           sleep 1
           room=fedcba9876543210fedcba9876543210
-          P2P_RTC_TCP_CONNECT=127.0.0.1:9765 timeout 45s rtc-poc/target/debug/p2p-rtc-poc ws://127.0.0.1:8787/signal "$room" > tunnel-a.log 2>&1 &
+          P2P_RTC_TCP_CONNECT=127.0.0.1:9765 timeout 45s target/rtc-test/debug/p2p-rtc-poc ws://127.0.0.1:8787/signal "$room" > tunnel-a.log 2>&1 &
           peer_a=$!
           sleep 1
-          P2P_RTC_TCP_LISTEN=127.0.0.1:9865 timeout 45s rtc-poc/target/debug/p2p-rtc-poc ws://127.0.0.1:8787/signal "$room" > tunnel-b.log 2>&1 &
+          P2P_RTC_TCP_LISTEN=127.0.0.1:9865 timeout 45s target/rtc-test/debug/p2p-rtc-poc ws://127.0.0.1:8787/signal "$room" > tunnel-b.log 2>&1 &
           peer_b=$!
           trap 'kill "$peer_a" "$peer_b" "$echo_server" "$worker" 2>/dev/null || true' EXIT
           for attempt in {1..20}; do
@@ -73,3 +75,29 @@ jobs:
             exit 1
           fi
           cat tunnel-a.log tunnel-b.log
+          kill "$peer_a" "$peer_b" 2>/dev/null || true
+          wait "$peer_a" "$peer_b" 2>/dev/null || true
+          trial=$(mktemp -d)
+          target/rtc-test/debug/p2p-send setup "$trial/setup" 127.0.0.1:9766 127.0.0.1:9866
+          printf 'sync through WebRTC\n' > "$trial/song.tja"
+          target/rtc-test/debug/p2p-send publish "$trial/setup/sender/server.json" "$trial/sender-state" "$trial/song.tja"
+          target/rtc-test/debug/p2p-send serve "$trial/setup/sender/server.json" "$trial/sender-state" > sync-server.log 2>&1 &
+          sync_server=$!
+          mkdir "$trial/destination"
+          room=1234567890abcdef1234567890abcdef
+          P2P_RTC_TCP_CONNECT=127.0.0.1:9766 timeout 45s target/rtc-test/debug/p2p-rtc-poc ws://127.0.0.1:8787/signal "$room" > sync-a.log 2>&1 &
+          peer_a=$!
+          sleep 1
+          P2P_RTC_TCP_LISTEN=127.0.0.1:9866 timeout 45s target/rtc-test/debug/p2p-rtc-poc ws://127.0.0.1:8787/signal "$room" > sync-b.log 2>&1 &
+          peer_b=$!
+          trap 'kill "$peer_a" "$peer_b" "$sync_server" "$worker" 2>/dev/null || true' EXIT
+          for attempt in {1..20}; do
+            if grep -q 'Local TCP bridge listening' sync-b.log; then break; fi
+            sleep 1
+          done
+          if ! timeout 35s target/rtc-test/debug/p2p-send pull "$trial/setup/receiver/direct.json" "$trial/receiver-state" "$trial/destination"; then
+            cat sync-a.log sync-b.log sync-server.log worker.log
+            exit 1
+          fi
+          cmp "$trial/song.tja" "$trial/destination/song.tja"
+          echo 'Existing TLS sync protocol crossed WebRTC DataChannel'
