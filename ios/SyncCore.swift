@@ -23,6 +23,7 @@ enum SyncCore {
         case incompatibleABI(UInt32)
         case hashingFailed(Int32)
         case pullFailed(Int32)
+        case pullFailedAfterRecovery(Int32, UInt64, UInt64)
         case missingOriginalsReport
         case writerFailed(Int32)
         case missingWriterReport
@@ -698,7 +699,12 @@ enum SyncCore {
                 }
             }
         }
-        guard status == P2P_SYNC_OK else { throw CoreError.pullFailed(status) }
+        guard status == P2P_SYNC_OK else {
+            if resumed.updated != 0 || resumed.removed != 0 {
+                throw CoreError.pullFailedAfterRecovery(status, resumed.updated, resumed.removed)
+            }
+            throw CoreError.pullFailed(status)
+        }
         let recovered = try recoverPending(configuration: configuration, state: state,
                                            destination: destination, cancellation: cancellation)
         let (snapshot, details) = try receiverSnapshot(configuration: configuration,

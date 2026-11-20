@@ -321,15 +321,10 @@ struct DirectSyncView: View {
             conflicts = []
             history = []
             result = "接続設定フォルダーへのアクセスを失いました。もう一度選択してください。"
+        } catch SyncCore.CoreError.pullFailedAfterRecovery(let status, let updated, let removed) {
+            result = "保存済みの変更を反映しました（更新 \(updated) 件、削除 \(removed) 件）。\n" + pullFailureMessage(status)
         } catch SyncCore.CoreError.pullFailed(let status) {
-            switch status {
-            case 1, 2: result = "接続設定または保存先を確認してください。"
-            case 3: result = "設定ファイルや保存領域にアクセスできませんでした。"
-            case 4: result = "TLS 証明書または秘密鍵を読み込めませんでした。"
-            case 7: result = "同期を中断しました。次回は保存済みのデータを再利用します。"
-            case 8: result = "古い同期状態が復元された可能性があります。共有元を変更せず、状態の復旧が必要です。"
-            default: result = "同期に失敗しました。接続先、証明書、同期先を確認してください。"
-            }
+            result = pullFailureMessage(status)
         } catch SyncCore.CoreError.pendingFailed(let status) {
             switch status {
             case 8: result = "古い同期状態が復元された可能性があります。共有元を変更せず、状態の復旧が必要です。"
@@ -347,6 +342,17 @@ struct DirectSyncView: View {
             result = "保護原本の一覧を読み込めませんでした。"
         } catch {
             result = "同期先を開けませんでした。"
+        }
+    }
+
+    private func pullFailureMessage(_ status: Int32) -> String {
+        switch status {
+        case 1, 2: return "接続設定または保存先を確認してください。"
+        case 3: return "設定ファイルや保存領域にアクセスできませんでした。"
+        case 4: return "TLS 証明書または秘密鍵を読み込めませんでした。"
+        case 7: return "同期を中断しました。次回は保存済みのデータを再利用します。"
+        case 8: return "古い同期状態が復元された可能性があります。共有元を変更せず、状態の復旧が必要です。"
+        default: return "同期に失敗しました。接続先、証明書、同期先を確認してください。"
         }
     }
 }
