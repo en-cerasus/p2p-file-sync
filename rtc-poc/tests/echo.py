@@ -10,8 +10,10 @@ if sys.argv[1] == "server":
         listener.listen(1)
         for _ in range(int(sys.argv[2]) if len(sys.argv) > 2 else 1):
             with listener.accept()[0] as connection:
+                print("echo session accepted", flush=True)
                 while data := connection.recv(16384):
                     connection.sendall(data)
+                print("echo session ended", flush=True)
 elif sys.argv[1] == "client":
     data = os.urandom(100_000)
     with socket.create_connection(ADDRESS, timeout=15) as connection:

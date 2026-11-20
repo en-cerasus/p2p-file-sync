@@ -222,6 +222,7 @@ async fn run_async(config: &BridgeConfig, cancelled: &dyn Fn() -> bool,
     let mut report_ticks = 0u8;
     let mut reported_route = None;
     let mut relay_limit_reached = false;
+    let mut tunnels = Vec::new();
     loop {
         tokio::select! {
             _ = timer.tick() => {
@@ -263,11 +264,11 @@ async fn run_async(config: &BridgeConfig, cancelled: &dyn Fn() -> bool,
             },
             Some(channel) = channel_rx.recv() => {
                 let sender = status_tx.clone();
-                tokio::spawn(async move {
+                tunnels.push(tokio::spawn(async move {
                     if tunnel(channel, mode, local_tcp, sender.clone()).await.is_err() {
                         let _ = sender.send("failed");
                     }
-                });
+                }));
             },
             Some(candidate) = candidate_rx.recv() => {
                 outgoing.send(Message::Text(candidate.to_string().into())).await?;
@@ -294,11 +295,11 @@ async fn run_async(config: &BridgeConfig, cancelled: &dyn Fn() -> bool,
                         let conn = pc.as_ref().unwrap();
                         let channel = conn.create_data_channel("p2p-sync", None).await?;
                         let sender = status_tx.clone();
-                        tokio::spawn(async move {
+                        tunnels.push(tokio::spawn(async move {
                             if tunnel(channel, mode, local_tcp, sender.clone()).await.is_err() {
                                 let _ = sender.send("failed");
                             }
-                        });
+                        }));
                         conn.set_local_description(conn.create_offer(None).await?).await?;
                         let offer = conn.local_description().await.context("missing local offer")?;
                         outgoing.send(Message::Text(json!({"type":"offer","to":possible,"payload":offer}).to_string().into())).await?;
@@ -329,6 +330,10 @@ async fn run_async(config: &BridgeConfig, cancelled: &dyn Fn() -> bool,
                 }
             },
         }
+    }
+    for tunnel in tunnels {
+        tunnel.abort();
+        let _ = tunnel.await;
     }
     if let Some(conn) = pc { conn.close().await?; }
     status("closed");
