@@ -1013,11 +1013,13 @@ fn pending_local_file(store: &Store, intent: &crate::materialize::FileIntent,
         return Ok(None);
     };
     let Some(source) = applied.path else { return Ok(None) };
+    if source.is_empty() { return Ok(None) }
     let (kind, destination) = if intent.desired.is_none() {
         if staged_path.as_ref() != Some(&source) { return Ok(None) }
         (PendingLocalKind::Delete, None)
     } else {
         let Some(path) = staged_path else { return Ok(None) };
+        if path.is_empty() { return Ok(None) }
         if path == source {
             (PendingLocalKind::Update, Some(path))
         } else {
