@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="ja">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>P2P 経路診断</title>
+<style>
+  body { font: 16px system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; padding: 0 1rem; }
+  label { display: block; margin: 1rem 0; }
+  input { display: block; box-sizing: border-box; width: 100%; padding: .5rem; font: inherit; }
+  button { padding: .6rem 1rem; font: inherit; }
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #f3f3f3; padding: 1rem; }
+</style>
+<h1>P2P 経路診断</h1>
+<p>WindowsとiPhoneで同じ32桁のルーム値を入力してください。ルーム値は秘密にしてください。ファイルは送信しません。</p>
+<label>ルーム値（16進数32桁）<input id="room" pattern="[a-f0-9]{32}" maxlength="32" autocomplete="off" required></label>
+<details><summary>TURNを試す場合だけ開く</summary>
+  <label>TURNユーザー名<input id="turn-user" autocomplete="off"></label>
+  <label>TURNパスワード<input id="turn-password" type="password" autocomplete="off"></label>
+  <p>Cloudflare Realtimeで発行した短期資格情報を使います。利用料金が発生し得るため、許可済みのアカウントでのみ試してください。</p>
+</details>
+<button id="start">接続を開始</button>
+<pre id="log" aria-live="polite"></pre>
+<script type="module" src="/diagnostic.js"></script>
+</html>

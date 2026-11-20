@@ -2,7 +2,7 @@
   "name": "p2p-file-sync-signaling",
   "private": true,
   "scripts": {
-    "check": "wrangler types && tsc --noEmit && wrangler deploy --dry-run"
+    "check": "node --check public/diagnostic.js && wrangler types && tsc --noEmit && wrangler deploy --dry-run"
   },
   "devDependencies": {
     "typescript": "5.9.3",
