@@ -231,7 +231,19 @@ async fn run_async(config: BridgeConfig, cancelled: &dyn Fn() -> bool,
                     }
                 }
             },
-            Some(text) = status_rx.recv() => status(text),
+            Some(text) = status_rx.recv() => {
+                status(text);
+                if text == "ready" {
+                    if let Some(connection) = pc.as_ref() {
+                        if let Some((relay, sent, received)) = selected_route(connection.as_ref()).await {
+                            status(&format!("route:{} sent={sent} received={received}",
+                                if relay { "relay" } else { "direct" }));
+                            reported_route = Some(relay);
+                            report_ticks = 0;
+                        }
+                    }
+                }
+            },
             Some(channel) = channel_rx.recv() => {
                 let sender = status_tx.clone();
                 tokio::spawn(async move {
