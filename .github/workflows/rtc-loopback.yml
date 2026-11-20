@@ -166,3 +166,32 @@ jobs:
           grep -q 'RTC route:relay' relay-a.log
           grep -q 'RTC route:relay' relay-b.log
           echo 'TURN relay transferred 100000 bytes'
+          kill "$peer_a" "$peer_b" 2>/dev/null || true
+          wait "$peer_a" "$peer_b" 2>/dev/null || true
+          python3 -u rtc-poc/tests/echo.py server > mixed-echo.log 2>&1 &
+          echo_server=$!
+          room=00112233445566778899aabbccddeeff
+          printf '{"signal_url":"ws://127.0.0.1:8787/signal","room":"%s","local_tcp":"127.0.0.1:9765","mode":"connect","turn_username":"test","turn_password":"secret","relay_byte_limit":10000000,"test_turn_url":"turn:127.0.0.1:3478?transport=udp"}\n' "$room" > rtc-a.json
+          printf '{"signal_url":"ws://127.0.0.1:8787/signal","room":"%s","local_tcp":"127.0.0.1:9865","mode":"listen","turn_username":"test","turn_password":"secret","relay_byte_limit":10000000,"test_turn_url":"turn:127.0.0.1:3478?transport=udp"}\n' "$room" > rtc-b.json
+          timeout 45s target/rtc-test/debug/p2p-send rtc-bridge rtc-a.json > mixed-a.log 2>&1 &
+          peer_a=$!
+          sleep 1
+          timeout 45s target/rtc-test/debug/p2p-send rtc-bridge rtc-b.json > mixed-b.log 2>&1 &
+          peer_b=$!
+          for attempt in {1..25}; do
+            if grep -q 'RTC ready' mixed-a.log && grep -q 'RTC ready' mixed-b.log; then break; fi
+            sleep 1
+          done
+          if ! grep -q 'RTC ready' mixed-a.log || ! grep -q 'RTC ready' mixed-b.log ||
+             ! python3 rtc-poc/tests/echo.py client; then
+            cat mixed-a.log mixed-b.log mixed-echo.log turn.log worker.log
+            exit 1
+          fi
+          for attempt in {1..10}; do
+            if grep -q 'RTC route:direct' mixed-a.log && grep -q 'RTC route:direct' mixed-b.log; then break; fi
+            sleep 1
+          done
+          cat mixed-a.log mixed-b.log
+          grep -q 'RTC route:direct' mixed-a.log
+          grep -q 'RTC route:direct' mixed-b.log
+          echo 'Direct route preferred with TURN available'
