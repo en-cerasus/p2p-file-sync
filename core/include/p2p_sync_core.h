@@ -166,6 +166,15 @@ int32_t p2p_sync_writer_serve(const uint8_t *config, size_t config_len,
                               p2p_sync_originals_callback ready,
                               p2p_sync_cancel_callback cancellation, void *context);
 
+/* Blocking WebRTC DataChannel to local TCP bridge. Run on a background thread
+   beside a receiver pull or writer listener. The manual JSON config supplies
+   signaling URL, room, loopback address, mode and optional short-lived TURN
+   credentials. The status callback receives borrowed UTF-8: signaling,
+   datachannel, ready, closed or failed. Returns 7 after requested cancellation. */
+int32_t p2p_sync_rtc_bridge_run_v1(const uint8_t *config, size_t config_len,
+                                   p2p_sync_originals_callback status,
+                                   p2p_sync_cancel_callback cancellation, void *context);
+
 /* Publish new and changed regular files from a selected source folder.
    The source must not contain private keys or the state directory. Missing
    source files do not become deletions. Callback JSON has files,

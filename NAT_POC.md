@@ -13,12 +13,18 @@
 
 ## 既存の同期処理を通すWindows間の試験
 
-Windows用PoCは環境変数`P2P_RTC_TCP_CONNECT`または`P2P_RTC_TCP_LISTEN`を指定すると、DataChannelとローカルTCP接続の間でバイト列を転送する。指定できるアドレスは`127.0.0.1`などのループバックのみ。元の相互TLSと証明書ピンはDataChannelの内側でそのまま検証する。
+Rust共通コアの`p2p-send rtc-bridge <rtc.json>`は、DataChannelとローカルTCP接続の間でバイト列を転送する。`p2p_sync_rtc_bridge_run_v1`からも同じ処理を呼べる。指定できるTCPアドレスは`127.0.0.1`などのループバックのみ。元の相互TLSと証明書ピンはDataChannelの内側でそのまま検証する。`rtc-poc`の環境変数方式も診断用に残している。
+
+`rtc.json`の例。ルーム値は16バイトの乱数を16進数32桁にしたもので、両端末に同じ値を設定する。`signal_url`には公開済みWorkerの`wss://.../signal`を指定する。TURNを許可して試す場合だけ、短期の`turn_username`と`turn_password`を両方指定する。
+
+```json
+{"signal_url":"wss://<WorkerのURL>/signal","room":"0123456789abcdef0123456789abcdef","local_tcp":"127.0.0.1:8765","mode":"connect"}
+```
 
 1. 配信側は既存の`p2p-send setup`で`server.json`の待受を`127.0.0.1:8765`にし、`publish`後に`serve`を起動する。
-2. 配信側で`P2P_RTC_TCP_CONNECT=127.0.0.1:8765`を設定し、Windows用PoCを起動する。
-3. 受信側で`P2P_RTC_TCP_LISTEN=127.0.0.1:9865`を設定し、同じルーム値でWindows用PoCを起動する。受信側の`direct.json`の`address`だけを`127.0.0.1:9865`へ変更する。証明書ピンは変更しない。
-4. `Local TCP bridge listening`と`Local TCP bridge connected`が出た後、受信側GUIから同期する。CLIで試す場合は`p2p-send pull <direct.json> <receiver-state-dir> <destination>`を使う。接続が切れたらPoCを再起動する。現時点では同時に1接続だけ扱う。
+2. 配信側の`rtc.json`は`mode: "connect"`と`local_tcp: "127.0.0.1:8765"`にして、`p2p-send rtc-bridge`を起動する。
+3. 受信側の`rtc.json`は`mode: "listen"`と`local_tcp: "127.0.0.1:9865"`にして、同じルーム値で`p2p-send rtc-bridge`を起動する。受信側の`direct.json`の`address`だけを`127.0.0.1:9865`へ変更する。証明書ピンは変更しない。
+4. 受信側に`RTC ready`が出た後、GUIから同期する。CLIで試す場合は`p2p-send pull <direct.json> <receiver-state-dir> <destination>`を使う。現時点では同時に1接続だけ扱い、切断後の自動再接続は未実装。
 
 この試験はWindows間の同期経路に限る。iOSアプリへのWebRTC組み込みと別LANの実機試験は未完了。
 

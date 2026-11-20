@@ -15,6 +15,7 @@ pub mod projection;
 pub mod publish;
 pub mod replica;
 pub mod retention;
+pub mod rtc;
 pub mod store;
 pub mod sync;
 pub mod tls;
@@ -240,6 +241,41 @@ pub unsafe extern "C" fn p2p_sync_pull_v4(
 }
 
 type CancellationCallback = extern "C" fn(*mut std::ffi::c_void) -> u8;
+
+/// Run a manually configured WebRTC DataChannel to loopback TCP bridge.
+/// Status callbacks receive borrowed UTF-8: signaling, datachannel, ready,
+/// closed. The caller runs this on a background thread beside sync/serve.
+///
+/// # Safety
+/// The config path is readable UTF-8. Callbacks and context remain valid for
+/// the call; callbacks must not unwind or retain the status buffer.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_rtc_bridge_run_v1(
+    config: *const u8,
+    config_len: usize,
+    status: Option<OriginalsCallback>,
+    cancellation: Option<CancellationCallback>,
+    context: *mut std::ffi::c_void,
+) -> i32 {
+    let (Some(status), Some(cancellation)) = (status, cancellation) else {
+        return INVALID_ARGUMENT;
+    };
+    let Some(config) = (unsafe { borrowed_text(config, config_len, 32_768) }) else {
+        return INVALID_ARGUMENT;
+    };
+    let cancelled = || cancellation(context) != 0;
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rtc::run(std::path::Path::new(config), &cancelled, &|state| {
+            status(context, state.as_ptr(), state.len());
+        })
+    }));
+    if cancelled() { return 7; }
+    match outcome {
+        Ok(Ok(())) => OK,
+        Ok(Err(_)) => 4,
+        Err(_) => 6,
+    }
+}
 
 /// Pull with optional cancellation. Return 7 when cancellation is observed.
 ///

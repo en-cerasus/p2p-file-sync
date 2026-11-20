@@ -60,14 +60,16 @@ jobs:
           echo_server=$!
           sleep 1
           room=fedcba9876543210fedcba9876543210
-          P2P_RTC_TCP_CONNECT=127.0.0.1:9765 timeout 45s target/rtc-test/debug/p2p-rtc-poc ws://127.0.0.1:8787/signal "$room" > tunnel-a.log 2>&1 &
+          printf '{"signal_url":"ws://127.0.0.1:8787/signal","room":"%s","local_tcp":"127.0.0.1:9765","mode":"connect"}\n' "$room" > rtc-a.json
+          printf '{"signal_url":"ws://127.0.0.1:8787/signal","room":"%s","local_tcp":"127.0.0.1:9865","mode":"listen"}\n' "$room" > rtc-b.json
+          timeout 45s target/rtc-test/debug/p2p-send rtc-bridge rtc-a.json > tunnel-a.log 2>&1 &
           peer_a=$!
           sleep 1
-          P2P_RTC_TCP_LISTEN=127.0.0.1:9865 timeout 45s target/rtc-test/debug/p2p-rtc-poc ws://127.0.0.1:8787/signal "$room" > tunnel-b.log 2>&1 &
+          timeout 45s target/rtc-test/debug/p2p-send rtc-bridge rtc-b.json > tunnel-b.log 2>&1 &
           peer_b=$!
           trap 'kill "$peer_a" "$peer_b" "$echo_server" "$worker" 2>/dev/null || true' EXIT
           for attempt in {1..20}; do
-            if grep -q 'Local TCP bridge listening' tunnel-b.log; then break; fi
+            if grep -q 'RTC ready' tunnel-b.log; then break; fi
             sleep 1
           done
           if ! python3 rtc-poc/tests/echo.py client; then
@@ -85,14 +87,16 @@ jobs:
           target/rtc-test/debug/p2p-send serve "$trial/setup/sender/server.json" "$trial/sender-state" > sync-server.log 2>&1 &
           sync_server=$!
           room=1234567890abcdef1234567890abcdef
-          P2P_RTC_TCP_CONNECT=127.0.0.1:9766 timeout 45s target/rtc-test/debug/p2p-rtc-poc ws://127.0.0.1:8787/signal "$room" > sync-a.log 2>&1 &
+          printf '{"signal_url":"ws://127.0.0.1:8787/signal","room":"%s","local_tcp":"127.0.0.1:9766","mode":"connect"}\n' "$room" > rtc-a.json
+          printf '{"signal_url":"ws://127.0.0.1:8787/signal","room":"%s","local_tcp":"127.0.0.1:9866","mode":"listen"}\n' "$room" > rtc-b.json
+          timeout 45s target/rtc-test/debug/p2p-send rtc-bridge rtc-a.json > sync-a.log 2>&1 &
           peer_a=$!
           sleep 1
-          P2P_RTC_TCP_LISTEN=127.0.0.1:9866 timeout 45s target/rtc-test/debug/p2p-rtc-poc ws://127.0.0.1:8787/signal "$room" > sync-b.log 2>&1 &
+          timeout 45s target/rtc-test/debug/p2p-send rtc-bridge rtc-b.json > sync-b.log 2>&1 &
           peer_b=$!
           trap 'kill "$peer_a" "$peer_b" "$sync_server" "$worker" 2>/dev/null || true' EXIT
           for attempt in {1..20}; do
-            if grep -q 'Local TCP bridge listening' sync-b.log; then break; fi
+            if grep -q 'RTC ready' sync-b.log; then break; fi
             sleep 1
           done
           if ! timeout 35s target/rtc-test/debug/p2p-send catch-up "$trial/setup/receiver/server.json" "$trial/receiver-state" "$trial/setup/receiver/direct.json"; then
