@@ -77,9 +77,24 @@ pub(crate) fn pull_with_reader(
     if cancelled() {
         return Err(DirectError::Cancelled);
     }
+    let stream = connect(client, peer, timeout)?;
+    pull_authenticated_stream(stream, store, roster, destination, reader, cancelled)
+}
+
+fn pull_authenticated_stream(
+    stream: impl io::Read + io::Write,
+    store: &mut Store,
+    roster: &Roster,
+    destination: Destination<'_>,
+    reader: Option<&PeerSigningKey>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<SyncReport, DirectError> {
+    if cancelled() {
+        return Err(DirectError::Cancelled);
+    }
     let result = (|| {
         let mut connection = CancellableStream {
-            inner: connect(client, peer, timeout)?,
+            inner: stream,
             cancelled,
         };
         let root = destination.root;
@@ -97,6 +112,21 @@ pub(crate) fn pull_with_reader(
     } else {
         result
     }
+}
+
+/// Pull through a supplied byte stream, such as a future WebRTC DataChannel
+/// stream. The existing mutual TLS and certificate pin remain mandatory.
+pub fn pull_over_stream(
+    client: &Client,
+    stream: impl io::Read + io::Write,
+    peer: &PeerEndpoint,
+    store: &mut Store,
+    roster: &Roster,
+    destination: Destination<'_>,
+) -> Result<SyncReport, DirectError> {
+    let authenticated = client.connect(stream, peer.server_name.clone(), peer.certificate)
+        .map_err(DirectError::Tls)?;
+    pull_authenticated_stream(authenticated, store, roster, destination, None, &|| false)
 }
 
 struct CancellableStream<'a, S> {
@@ -337,8 +367,20 @@ pub fn serve(
     completed: &BlobStore,
 ) -> Result<(), DirectError> {
     configure(&socket, timeout).map_err(DirectError::Socket)?;
+    serve_over_stream(server, socket, peers, store, roster, completed)
+}
+
+/// Serve a supplied byte stream with the same TLS peer checks as TCP.
+pub fn serve_over_stream(
+    server: &Server,
+    stream: impl io::Read + io::Write,
+    peers: &[CertificatePin],
+    store: &mut Store,
+    roster: &Roster,
+    completed: &BlobStore,
+) -> Result<(), DirectError> {
     let mut connection = server
-        .accept_registered(socket, peers)
+        .accept_registered(stream, peers)
         .map_err(DirectError::Tls)?;
     let mut session = ShareSession::default();
     while session
