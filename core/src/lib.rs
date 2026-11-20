@@ -6,6 +6,7 @@ pub mod chunks;
 pub mod direct;
 pub mod generation;
 pub mod host;
+pub mod invite;
 mod local_target;
 pub mod materialize;
 pub mod names;
