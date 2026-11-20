@@ -2,6 +2,8 @@
 
 キー入力による参加と旧キー失効の実装ゲートは [JOIN_DESIGN.md](JOIN_DESIGN.md) に記録する。
 
+現在の最優先は、既存の手動設定を使った異なるLAN間のNAT越えである。共有キー入力UIと参加手順の完成は後回しにする。WebRTC DataChannelで直接接続を優先し、失敗時のみCloudflare Realtime TURNへ切り替える。シグナリングはCloudflare Workers / Durable Objectsを用いる。`signaling/` はSDPとICE候補のみを転送する初期実装であり、クライアントのWebRTC経路、TURN使用量上限、実機検証は未完了。課金が生じ得るTURNサービスは明示的承認まで有効化しない。
+
 設計レビュー後の計画。各段階は実装・検証中で、表の成功条件はまだ全て満たしていない。WindowsとiOSの基本GUI、署名付きイベント、履歴・原本保護、既存ファイル反映の試験実装はある。iPhone 11での実動作、NAT越え、失効後の旧端末の扱いなどは個別の検証が残る。
 
 |段階|作業|成功条件と検証|
