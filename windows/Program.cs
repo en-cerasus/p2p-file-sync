@@ -490,11 +490,23 @@ internal sealed class SyncWindow : Window
         UpdateControls();
         try
         {
+            var rtc = Path.Combine(Path.GetDirectoryName(config)!, "rtc.json");
+            var bridgeStarted = 0;
             var status = await Task.Run(() => SyncCore.ServeWriter(config, state, operation.Token, address =>
+            {
                 Dispatcher.BeginInvoke(new Action(() =>
                 {
                     if (!closing) serverStatus.Text = $"配信中: {address}";
-                }))));
+                }));
+                if (File.Exists(rtc) && Interlocked.Exchange(ref bridgeStarted, 1) == 0)
+                {
+                    _ = Task.Run(() => SyncCore.RunRtcBridge(rtc, operation.Token, phase =>
+                        Dispatcher.BeginInvoke(new Action(() =>
+                        {
+                            if (!closing && writerServing) serverStatus.Text = $"配信中: {address} · WebRTC {phase}";
+                        }))));
+                }
+            }));
             if (!closing)
             {
                 serverStatus.Text = status == 7 ? "配信を停止しました。" :
@@ -776,9 +788,28 @@ internal sealed class SyncWindow : Window
         UpdateControls();
         result.Text = "同期中…";
         var state = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "P2PSync");
+        using var bridgeStop = CancellationTokenSource.CreateLinkedTokenSource(operation.Token);
         try
         {
+            var rtc = Path.Combine(Path.GetDirectoryName(config)!, "rtc.json");
+            if (File.Exists(rtc))
+            {
+                var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                _ = Task.Run(() =>
+                {
+                    var status = SyncCore.RunRtcBridge(rtc, bridgeStop.Token, phase =>
+                    {
+                        if (phase == "ready") ready.TrySetResult();
+                        if (phase == "failed") ready.TrySetException(new IOException("WebRTC 接続に失敗しました。"));
+                    });
+                    ready.TrySetException(new IOException($"WebRTC 接続が終了しました: {status}"));
+                });
+                var completed = await Task.WhenAny(ready.Task, Task.Delay(TimeSpan.FromSeconds(20), operation.Token));
+                if (completed != ready.Task) throw new IOException("WebRTC 接続がタイムアウトしました。");
+                await ready.Task;
+            }
             var pull = await Task.Run(() => SyncCore.Pull(config, state, root, operation.Token));
+            bridgeStop.Cancel();
             result.Text = pull.Status == 0
                 ? $"イベント {pull.Summary.EventsAdded} 件、新規 {pull.Summary.FilesPublished} 件、更新 {pull.Summary.FilesUpdated} 件、削除 {pull.Summary.FilesRemoved} 件、変更なし {pull.Summary.FilesPresent} 件、保留 {pull.Summary.FilesBlocked} 件\n保護原本 {pull.Summary.ProtectedFiles} 件 ({pull.Summary.ProtectedBytes:N0} バイト)、未取得 {pull.Summary.ProtectedMissing} 件\n履歴の保存容量 {pull.HistoryBytes:N0} バイト、未取得 {pull.HistoryMissing} 件"
                 : SyncCore.ErrorMessage(pull.Status);
@@ -802,12 +833,17 @@ internal sealed class SyncWindow : Window
         {
             result.Text = "保護原本の一覧を読み込めませんでした。";
         }
+        catch (IOException error)
+        {
+            result.Text = error.Message;
+        }
         catch (Exception error) when (error is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
         {
             result.Text = "対応する Rust ライブラリを読み込めませんでした。";
         }
         finally
         {
+            bridgeStop.Cancel();
             syncing = false;
             cancellation = null;
             UpdateControls();
@@ -1247,6 +1283,19 @@ internal static class SyncCore
             }, _ => cancellation.IsCancellationRequested ? (byte)1 : (byte)0, IntPtr.Zero);
     }
 
+    internal static int RunRtcBridge(string config, CancellationToken cancellation, Action<string> onStatus)
+    {
+        var configBytes = Encoding.UTF8.GetBytes(config);
+        return RtcBridgeNative(configBytes, (nuint)configBytes.Length,
+            (_, data, length) =>
+            {
+                if (length > 64) return;
+                var bytes = new byte[(int)length];
+                Marshal.Copy(data, bytes, 0, bytes.Length);
+                onStatus(Encoding.UTF8.GetString(bytes));
+            }, _ => cancellation.IsCancellationRequested ? (byte)1 : (byte)0, IntPtr.Zero);
+    }
+
     internal static (int Status, TreeSummary Summary) RefreshWriterTree(string config, string state, string source)
     {
         var configBytes = Encoding.UTF8.GetBytes(config);
@@ -1339,6 +1388,10 @@ internal static class SyncCore
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate byte CancellationCallback(IntPtr context);
+
+    [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_rtc_bridge_run_v1", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int RtcBridgeNative(byte[] config, nuint configLength,
+        OriginalsCallback status, CancellationCallback cancellation, IntPtr context);
 
     [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_pull_v6", CallingConvention = CallingConvention.Cdecl)]
     private static extern int PullNative(

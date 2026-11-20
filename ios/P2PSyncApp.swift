@@ -86,6 +86,27 @@ private actor SyncRunner {
                                                   appropriateFor: nil, create: true)
                     .appendingPathComponent("P2PSync", isDirectory: true)
                 try manager.createDirectory(at: destination, withIntermediateDirectories: true)
+                let rtc = folder.appendingPathComponent("rtc.json")
+                let bridgeStop = SyncCore.Cancellation()
+                defer { bridgeStop.cancel() }
+                if manager.fileExists(atPath: rtc.path) {
+                    let ready = DispatchSemaphore(value: 0)
+                    Task.detached(priority: .utility) {
+                        try? SyncCore.runRTCBridge(configuration: rtc, cancellation: bridgeStop) { status in
+                            if status == "ready" { ready.signal() }
+                        }
+                    }
+                    var connected = false
+                    for _ in 0..<80 where !cancellation.isCancelled() {
+                        if ready.wait(timeout: .now() + 0.25) == .success {
+                            connected = true
+                            break
+                        }
+                    }
+                    guard connected && !cancellation.isCancelled() else {
+                        throw SyncCore.CoreError.rtcFailed(5)
+                    }
+                }
                 return try SyncCore.pull(configuration: folder.appendingPathComponent("direct.json"),
                                          state: state, destination: destination, cancellation: cancellation)
             }.value

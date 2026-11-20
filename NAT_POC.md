@@ -1,6 +1,6 @@
 # NAT越え実機検証メモ
 
-現在の`signaling/`はWebRTCの接続情報だけを交換するCloudflare Workers / Durable Objectsの試験実装。`/diagnostic.html`は、異なる回線のWindowsブラウザーとiPhoneブラウザーでDataChannelの接続経路を確認するための画面。同期ファイルは送らない。同期アプリ自身のNAT越えはまだ未実装。
+`signaling/`はWebRTCの接続情報だけを交換するCloudflare Workers / Durable Objectsの試験実装。`/diagnostic.html`は、異なる回線のWindowsブラウザーとiPhoneブラウザーでDataChannelの接続経路を確認するための画面。同期ファイルは送らない。同期アプリでは、手動設定でWebRTC経路を有効にできる。
 
 ## 検証の順序
 
@@ -26,11 +26,11 @@ Rust共通コアの`p2p-send rtc-bridge <rtc.json>`は、DataChannelとローカ
 3. 受信側の`rtc.json`は`mode: "listen"`と`local_tcp: "127.0.0.1:9865"`にして、同じルーム値で`p2p-send rtc-bridge`を起動する。受信側の`direct.json`の`address`だけを`127.0.0.1:9865`へ変更する。証明書ピンは変更しない。
 4. 受信側に`RTC ready`が出た後、GUIから同期する。CLIで試す場合は`p2p-send pull <direct.json> <receiver-state-dir> <destination>`を使う。現時点では同時に1接続だけ扱い、切断後の自動再接続は未実装。
 
-この試験はWindows間の同期経路に限る。iOSアプリへのWebRTC組み込みと別LANの実機試験は未完了。
+WindowsとiOSのアプリでは、選択した既存設定フォルダーに`rtc.json`を置くと、配信開始時または同期開始時にRust共通コアのWebRTC経路を起動する。配信側は`connect`、受信側は`listen`とし、受信側の`direct.json`の接続先は`rtc.json`のループバックアドレスに合わせる。`rtc.json`がなければ従来の直接TCPを使う。iOSアプリを含むビルドと別LANの実機試験は引き続き確認が必要。
 
 ## 残る実装
 
-- Windows・iOSアプリ内にWebRTC接続を組み込み、DataChannelをRustの`channel_stream`へ接続する。現状の手動設定の共有ID・証明書ピン・端末IDを使う。
+- Windows・iOSアプリで手動設定によるWebRTC接続を検証し、失敗時の表示と切断後の再接続を確認する。
 - 接続候補を直接優先にし、直接接続失敗時にTURNを使用する。TURNの利用者上限とGUI使用量表示を追加する。上限に達した時は中継を閉じる。
 - 別LANのWindowsとiPhone 11で、同期ファイルの取得・切断後の再開まで実測する。
 

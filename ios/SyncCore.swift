@@ -31,6 +31,36 @@ enum SyncCore {
         case snapshotFailed(Int32)
         case coordinatedPathChanged
         case missingPendingDestination
+        case rtcFailed(Int32)
+    }
+
+    private struct RTCContext {
+        let cancellation: Cancellation
+        let onStatus: @Sendable (String) -> Void
+    }
+
+    static func runRTCBridge(configuration: URL, cancellation: Cancellation,
+                             onStatus: @escaping @Sendable (String) -> Void) throws {
+        let config = Array(configuration.path.utf8)
+        var callbacks = RTCContext(cancellation: cancellation, onStatus: onStatus)
+        let status = withUnsafeMutablePointer(to: &callbacks) { context in
+            config.withUnsafeBufferPointer { bytes in
+                p2p_sync_rtc_bridge_run_v1(bytes.baseAddress, bytes.count,
+                    { context, data, length in
+                        guard let context, let data else { return }
+                        let callbacks = context.assumingMemoryBound(to: RTCContext.self).pointee
+                        if let value = String(data: Data(bytes: data, count: length), encoding: .utf8) {
+                            callbacks.onStatus(value)
+                        }
+                    },
+                    { context in
+                        guard let context else { return 0 }
+                        return context.assumingMemoryBound(to: RTCContext.self)
+                            .pointee.cancellation.isCancelled() ? 1 : 0
+                    }, UnsafeMutableRawPointer(context))
+            }
+        }
+        guard status == 7 else { throw CoreError.rtcFailed(status) }
     }
 
     static var abiVersion: UInt32 { p2p_sync_abi_version() }

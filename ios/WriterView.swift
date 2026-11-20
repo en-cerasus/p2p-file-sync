@@ -549,9 +549,20 @@ struct WriterView: View {
                 throw WriterFailure.permissionUnavailable
             }
             defer { configFolder.stopAccessingSecurityScopedResource() }
+            let rtc = configFolder.appendingPathComponent("rtc.json")
             try SyncCore.serveWriter(configuration: configFolder.appendingPathComponent("server.json"),
                                      state: state, cancellation: stop,
-                                     onReady: { address in continuation.yield(address) })
+                                     onReady: { address in
+                                         continuation.yield(address)
+                                         if FileManager.default.fileExists(atPath: rtc.path) {
+                                             Task.detached(priority: .utility) {
+                                                 try? SyncCore.runRTCBridge(configuration: rtc,
+                                                                            cancellation: stop) { status in
+                                                     continuation.yield("\(address) · WebRTC \(status)")
+                                                 }
+                                             }
+                                         }
+                                     })
         }
         Task {
             for await address in ready where serving && !stop.isCancelled() {
