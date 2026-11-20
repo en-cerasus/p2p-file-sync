@@ -86,7 +86,8 @@ private actor SyncRunner {
         case permissionUnavailable
     }
 
-    func run(folder: URL, cancellation: SyncCore.Cancellation) async throws -> SyncCore.PullSummary {
+    func run(folder: URL, cancellation: SyncCore.Cancellation,
+             onRoute: @escaping @Sendable (String) -> Void = { _ in }) async throws -> SyncCore.PullSummary {
         guard !running else { throw Failure.busy }
         try Task.checkCancellation()
         running = true
@@ -114,6 +115,7 @@ private actor SyncRunner {
                         try? SyncCore.runRTCBridge(configuration: rtc, cancellation: bridgeStop) { status in
                             if status == "ready" { ready.finish(connected: true) }
                             if status == "failed" { ready.finish(connected: false) }
+                            if status.hasPrefix("route:") || status == "relay-limit" { onRoute(status) }
                         }
                         ready.finish(connected: false)
                     }
@@ -346,7 +348,11 @@ struct DirectSyncView: View {
             // Leaving the foreground stops polling, while UIKit may still
             // grant time for this already-started sync to finish.
             let operation = Task {
-                try await SyncRunner.shared.run(folder: configFolder, cancellation: cancellation)
+                try await SyncRunner.shared.run(folder: configFolder, cancellation: cancellation) { route in
+                    Task { @MainActor in
+                        result = route == "relay-limit" ? "TURN中継の使用量上限に達しました。" : route
+                    }
+                }
             }
             let summary = try await operation.value
             originals = summary.originals

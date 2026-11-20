@@ -802,6 +802,9 @@ internal sealed class SyncWindow : Window
                     {
                         if (phase == "ready") ready.TrySetResult();
                         if (phase == "failed") ready.TrySetException(new IOException("WebRTC 接続に失敗しました。"));
+                        if (phase.StartsWith("route:") || phase == "relay-limit")
+                            Dispatcher.BeginInvoke(new Action(() => result.Text = phase == "relay-limit"
+                                ? "TURN中継の使用量上限に達しました。" : phase));
                     });
                     ready.TrySetException(new IOException($"WebRTC 接続が終了しました: {status}"));
                 });

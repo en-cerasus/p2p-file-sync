@@ -1,7 +1,7 @@
 //! Manually configured WebRTC route for the existing TLS sync protocol.
 //! The route never handles credentials or file contents beyond opaque bytes.
 
-use std::{fs, net::{SocketAddr, UdpSocket}, path::Path, sync::Arc, time::Duration};
+use std::{fs, net::{SocketAddr, UdpSocket}, path::Path, sync::Arc, time::{Duration, Instant}};
 
 use anyhow::{bail, Context, Result};
 use bytes::BytesMut;
@@ -15,7 +15,8 @@ use webrtc::{
     peer_connection::{
         MediaEngine, PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler,
         RTCConfigurationBuilder, RTCIceCandidateInit, RTCIceServer, RTCSessionDescription,
-        RTCPeerConnectionIceEvent, Registry, register_default_interceptors,
+        RTCPeerConnectionIceEvent, RTCStatsReportEntry, Registry, StatsSelector,
+        register_default_interceptors,
     },
     runtime::{default_runtime, Runtime},
 };
@@ -33,6 +34,7 @@ pub struct BridgeConfig {
     pub mode: BridgeMode,
     pub turn_username: Option<String>,
     pub turn_password: Option<String>,
+    pub relay_byte_limit: Option<u64>,
 }
 
 impl BridgeConfig {
@@ -46,6 +48,7 @@ impl BridgeConfig {
             || !self.local_tcp.ip().is_loopback()
             || self.local_tcp.port() == 0
             || self.turn_username.is_some() != self.turn_password.is_some()
+            || self.turn_username.is_some() && self.relay_byte_limit.unwrap_or(0) == 0
         { bail!("invalid WebRTC bridge configuration"); }
         Ok(())
     }
@@ -202,9 +205,32 @@ async fn run_async(config: BridgeConfig, cancelled: &dyn Fn() -> bool,
     let mut pc: Option<Box<dyn PeerConnection>> = None;
     let mut pending = Vec::<RTCIceCandidateInit>::new();
     let mut timer = tokio::time::interval(Duration::from_millis(250));
+    let mut stats_ticks = 0u8;
+    let mut report_ticks = 0u8;
+    let mut reported_route = None;
     loop {
         tokio::select! {
-            _ = timer.tick() => { if cancelled() { break; } },
+            _ = timer.tick() => {
+                if cancelled() { break; }
+                stats_ticks += 1;
+                if stats_ticks < 4 { continue; }
+                stats_ticks = 0;
+                if let Some(connection) = pc.as_ref() {
+                    if let Some((relay, sent, received)) = selected_route(connection.as_ref()).await {
+                        report_ticks += 1;
+                        if reported_route != Some(relay) || report_ticks >= 4 {
+                            status(&format!("route:{} sent={sent} received={received}",
+                                if relay { "relay" } else { "direct" }));
+                            reported_route = Some(relay);
+                            report_ticks = 0;
+                        }
+                        if relay && config.relay_byte_limit.is_some_and(|limit| sent.saturating_add(received) >= limit) {
+                            status("relay-limit");
+                            break;
+                        }
+                    }
+                }
+            },
             Some(text) = status_rx.recv() => status(text),
             Some(channel) = channel_rx.recv() => {
                 let sender = status_tx.clone();
@@ -279,6 +305,23 @@ async fn run_async(config: BridgeConfig, cancelled: &dyn Fn() -> bool,
     Ok(())
 }
 
+async fn selected_route(connection: &dyn PeerConnection) -> Option<(bool, u64, u64)> {
+    let report = connection.get_stats(Instant::now(), StatsSelector::None).await;
+    for entry in report.iter() {
+        let RTCStatsReportEntry::Transport(transport) = entry else { continue };
+        let Some(RTCStatsReportEntry::IceCandidatePair(pair)) =
+            report.get(&transport.selected_candidate_pair_id) else { continue };
+        let (Some(RTCStatsReportEntry::LocalCandidate(local)),
+             Some(RTCStatsReportEntry::RemoteCandidate(remote))) =
+            (report.get(&pair.local_candidate_id), report.get(&pair.remote_candidate_id))
+        else { continue };
+        let relay = format!("{:?}", local.candidate_type) == "Relay"
+            || format!("{:?}", remote.candidate_type) == "Relay";
+        return Some((relay, transport.bytes_sent, transport.bytes_received));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,6 +335,7 @@ mod tests {
             mode: BridgeMode::Connect,
             turn_username: None,
             turn_password: None,
+            relay_byte_limit: None,
         };
         assert!(config.validate().is_ok());
         config.local_tcp = "192.0.2.1:8765".parse().unwrap();
@@ -299,5 +343,9 @@ mod tests {
         config.local_tcp = "127.0.0.1:8765".parse().unwrap();
         config.turn_username = Some("short-lived".into());
         assert!(config.validate().is_err());
+        config.turn_password = Some("secret".into());
+        assert!(config.validate().is_err());
+        config.relay_byte_limit = Some(10_000);
+        assert!(config.validate().is_ok());
     }
 }

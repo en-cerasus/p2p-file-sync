@@ -15,7 +15,7 @@
 
 Rust共通コアの`p2p-send rtc-bridge <rtc.json>`は、DataChannelとローカルTCP接続の間でバイト列を転送する。`p2p_sync_rtc_bridge_run_v1`からも同じ処理を呼べる。指定できるTCPアドレスは`127.0.0.1`などのループバックのみ。元の相互TLSと証明書ピンはDataChannelの内側でそのまま検証する。`rtc-poc`の環境変数方式も診断用に残している。
 
-`rtc.json`の例。ルーム値は16バイトの乱数を16進数32桁にしたもので、両端末に同じ値を設定する。`signal_url`には公開済みWorkerの`wss://.../signal`を指定する。TURNを許可して試す場合だけ、短期の`turn_username`と`turn_password`を両方指定する。
+`rtc.json`の例。ルーム値は16バイトの乱数を16進数32桁にしたもので、両端末に同じ値を設定する。`signal_url`には公開済みWorkerの`wss://.../signal`を指定する。TURNを許可して試す場合だけ、短期の`turn_username`と`turn_password`に加え、端末ごとの中継送受信量上限`relay_byte_limit`を正のバイト数で指定する。上限を超えた経路は切断する。クライアント側の上限はCloudflareアカウント全体の請求額を保証しない。
 
 ```json
 {"signal_url":"wss://<WorkerのURL>/signal","room":"0123456789abcdef0123456789abcdef","local_tcp":"127.0.0.1:8765","mode":"connect"}
@@ -28,10 +28,12 @@ Rust共通コアの`p2p-send rtc-bridge <rtc.json>`は、DataChannelとローカ
 
 WindowsとiOSのアプリでは、選択した既存設定フォルダーに`rtc.json`を置くと、配信開始時または同期開始時にRust共通コアのWebRTC経路を起動する。配信側は`connect`、受信側は`listen`とし、受信側の`direct.json`の接続先は`rtc.json`のループバックアドレスに合わせる。`rtc.json`がなければ従来の直接TCPを使う。Windows・iOSのビルドとローカルWebRTC通信試験は成功済み。別LANの実機試験とiPhone 11への署名・インストールは未完了。
 
+接続後、アプリの同期・配信状態には`route:direct`または`route:relay`と送受信量（バイト）が表示される。中継量の上限に達すると`relay-limit`を通知して切断する。候補がまだ確定していない間は経路を表示しない。
+
 ## 残る実装
 
 - Windows・iOSアプリで手動設定によるWebRTC接続を検証し、失敗時の表示と切断後の再接続を確認する。
-- 接続候補を直接優先にし、直接接続失敗時にTURNを使用する。TURNの利用者上限とGUI使用量表示を追加する。上限に達した時は中継を閉じる。
+- 異なるLANで直接候補とTURN候補の選択を実測し、直接接続の優先と中継上限停止を確認する。利用者ごとの上限と事業者側の請求制限は別途検証する。
 - 別LANのWindowsとiPhone 11で、同期ファイルの取得・切断後の再開まで実測する。
 
 Cloudflare Realtime TURNはSTUNと異なり、無料枠を超えると料金が生じ得る。現在の仕様では課金が生じ得るサービスを明示的承認なく作成・利用しない。
