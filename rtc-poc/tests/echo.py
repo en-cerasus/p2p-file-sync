@@ -8,9 +8,10 @@ if sys.argv[1] == "server":
     with socket.socket() as listener:
         listener.bind(ADDRESS)
         listener.listen(1)
-        with listener.accept()[0] as connection:
-            while data := connection.recv(16384):
-                connection.sendall(data)
+        for _ in range(int(sys.argv[2]) if len(sys.argv) > 2 else 1):
+            with listener.accept()[0] as connection:
+                while data := connection.recv(16384):
+                    connection.sendall(data)
 elif sys.argv[1] == "client":
     data = os.urandom(100_000)
     with socket.create_connection(ADDRESS, timeout=15) as connection:

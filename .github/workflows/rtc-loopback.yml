@@ -56,7 +56,7 @@ jobs:
           if [ "$success" -ne 1 ]; then cat worker.log; exit 1; fi
           kill "$peer_a" "$peer_b" 2>/dev/null || true
           wait "$peer_a" "$peer_b" 2>/dev/null || true
-          python3 -u rtc-poc/tests/echo.py server > echo-server.log 2>&1 &
+          python3 -u rtc-poc/tests/echo.py server 2 > echo-server.log 2>&1 &
           echo_server=$!
           sleep 1
           room=fedcba9876543210fedcba9876543210
@@ -83,6 +83,15 @@ jobs:
           cat tunnel-a.log tunnel-b.log
           grep -q 'RTC route:direct' tunnel-a.log
           grep -q 'RTC route:direct' tunnel-b.log
+          for attempt in {1..25}; do
+            if [ "$(grep -c 'RTC ready' tunnel-b.log)" -ge 2 ]; then break; fi
+            sleep 1
+          done
+          if [ "$(grep -c 'RTC ready' tunnel-b.log)" -lt 2 ]; then
+            cat tunnel-a.log tunnel-b.log worker.log
+            exit 1
+          fi
+          python3 rtc-poc/tests/echo.py client
           kill "$peer_a" "$peer_b" 2>/dev/null || true
           wait "$peer_a" "$peer_b" 2>/dev/null || true
           trial=$(mktemp -d)

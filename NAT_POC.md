@@ -24,7 +24,7 @@ Rust共通コアの`p2p-send rtc-bridge <rtc.json>`は、DataChannelとローカ
 1. 配信側は既存の`p2p-send setup`で`server.json`の待受を`127.0.0.1:8765`にし、`publish`後に`serve`を起動する。
 2. 配信側の`rtc.json`は`mode: "connect"`と`local_tcp: "127.0.0.1:8765"`にして、`p2p-send rtc-bridge`を起動する。
 3. 受信側の`rtc.json`は`mode: "listen"`と`local_tcp: "127.0.0.1:9865"`にして、同じルーム値で`p2p-send rtc-bridge`を起動する。受信側の`direct.json`の`address`だけを`127.0.0.1:9865`へ変更する。証明書ピンは変更しない。
-4. 受信側に`RTC ready`が出た後、GUIから同期する。CLIで試す場合は`p2p-send pull <direct.json> <receiver-state-dir> <destination>`を使う。現時点では同時に1接続だけ扱い、切断後の自動再接続は未実装。
+4. 受信側に`RTC ready`が出た後、GUIから同期する。CLIで試す場合は`p2p-send pull <direct.json> <receiver-state-dir> <destination>`を使う。同時に1接続だけ扱う。切断後はWebRTC経路を作り直し、受信側で同期を再実行できる。取得済みの内容は既存の同期状態に保存する。
 
 WindowsとiOSのアプリでは、選択した既存設定フォルダーに`rtc.json`を置くと、配信開始時または同期開始時にRust共通コアのWebRTC経路を起動する。配信側は`connect`、受信側は`listen`とし、受信側の`direct.json`の接続先は`rtc.json`のループバックアドレスに合わせる。`rtc.json`がなければ従来の直接TCPを使う。Windows・iOSのビルドとローカルWebRTC通信試験は成功済み。別LANの実機試験とiPhone 11への署名・インストールは未完了。
 
@@ -32,7 +32,7 @@ WindowsとiOSのアプリでは、選択した既存設定フォルダーに`rtc
 
 ## 残る実装
 
-- Windows・iOSアプリで手動設定によるWebRTC接続を検証し、失敗時の表示と切断後の再接続を確認する。
+- Windows・iOSアプリで手動設定によるWebRTC接続を実機検証し、失敗時の表示と中断転送の再開を確認する。
 - 異なるLANで直接候補とTURN候補の選択を実測し、直接接続の優先と中継上限停止を確認する。利用者ごとの上限と事業者側の請求制限は別途検証する。
 - 別LANのWindowsとiPhone 11で、同期ファイルの取得・切断後の再開まで実測する。
 

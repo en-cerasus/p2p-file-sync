@@ -185,11 +185,24 @@ pub fn run(configuration: &Path, cancelled: &dyn Fn() -> bool,
     let config: BridgeConfig = serde_json::from_slice(&bytes)?;
     config.validate()?;
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    runtime.block_on(run_async(config, cancelled, status))
+    loop {
+        if cancelled() { return Ok(()); }
+        match runtime.block_on(run_async(&config, cancelled, status)) {
+            Ok(false) => return Ok(()), // The configured relay limit is terminal.
+            Ok(true) | Err(_) if cancelled() => return Ok(()),
+            Ok(true) | Err(_) => status("reconnecting"),
+        }
+        for _ in 0..4 {
+            if cancelled() { return Ok(()); }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
 }
 
-async fn run_async(config: BridgeConfig, cancelled: &dyn Fn() -> bool,
-    status: &dyn Fn(&str)) -> Result<()> {
+async fn run_async(config: &BridgeConfig, cancelled: &dyn Fn() -> bool,
+    status: &dyn Fn(&str)) -> Result<bool> {
+    let mode = config.mode;
+    let local_tcp = config.local_tcp;
     let mut random = [0u8; 32];
     getrandom::fill(&mut random).map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let me: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -208,6 +221,7 @@ async fn run_async(config: BridgeConfig, cancelled: &dyn Fn() -> bool,
     let mut stats_ticks = 0u8;
     let mut report_ticks = 0u8;
     let mut reported_route = None;
+    let mut relay_limit_reached = false;
     loop {
         tokio::select! {
             _ = timer.tick() => {
@@ -226,13 +240,16 @@ async fn run_async(config: BridgeConfig, cancelled: &dyn Fn() -> bool,
                         }
                         if relay && config.relay_byte_limit.is_some_and(|limit| sent.saturating_add(received) >= limit) {
                             status("relay-limit");
+                            relay_limit_reached = true;
                             break;
                         }
                     }
                 }
             },
             Some(text) = status_rx.recv() => {
+                if text == "failed" { break; }
                 status(text);
+                if text == "closed" { break; }
                 if text == "ready" {
                     if let Some(connection) = pc.as_ref() {
                         if let Some((relay, sent, received)) = selected_route(connection.as_ref()).await {
@@ -247,7 +264,7 @@ async fn run_async(config: BridgeConfig, cancelled: &dyn Fn() -> bool,
             Some(channel) = channel_rx.recv() => {
                 let sender = status_tx.clone();
                 tokio::spawn(async move {
-                    if tunnel(channel, config.mode, config.local_tcp, sender.clone()).await.is_err() {
+                    if tunnel(channel, mode, local_tcp, sender.clone()).await.is_err() {
                         let _ = sender.send("failed");
                     }
                 });
@@ -268,6 +285,7 @@ async fn run_async(config: BridgeConfig, cancelled: &dyn Fn() -> bool,
                         .and_then(|list| list.iter().filter_map(Value::as_str).next())
                         .unwrap_or_default()
                 } else { from };
+                if kind == "left" && remote.as_deref() == Some(from) { break; }
                 if remote.is_none() && !possible.is_empty() && possible != me {
                     remote = Some(possible.to_owned());
                     pc = Some(peer_connection(&config, runtime.clone(), possible,
@@ -277,7 +295,7 @@ async fn run_async(config: BridgeConfig, cancelled: &dyn Fn() -> bool,
                         let channel = conn.create_data_channel("p2p-sync", None).await?;
                         let sender = status_tx.clone();
                         tokio::spawn(async move {
-                            if tunnel(channel, config.mode, config.local_tcp, sender.clone()).await.is_err() {
+                            if tunnel(channel, mode, local_tcp, sender.clone()).await.is_err() {
                                 let _ = sender.send("failed");
                             }
                         });
@@ -314,7 +332,7 @@ async fn run_async(config: BridgeConfig, cancelled: &dyn Fn() -> bool,
     }
     if let Some(conn) = pc { conn.close().await?; }
     status("closed");
-    Ok(())
+    Ok(!relay_limit_reached)
 }
 
 async fn selected_route(connection: &dyn PeerConnection) -> Option<(bool, u64, u64)> {
