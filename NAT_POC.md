@@ -28,6 +28,8 @@ Rust共通コアの`p2p-send rtc-bridge <rtc.json>`は、DataChannelとローカ
 
 WindowsとiOSのアプリでは、選択した既存設定フォルダーに`rtc.json`を置くと、配信開始時または同期開始時にRust共通コアのWebRTC経路を起動する。配信側は`connect`、受信側は`listen`とし、受信側の`direct.json`の接続先は`rtc.json`のループバックアドレスに合わせる。`rtc.json`がなければ従来の直接TCPを使う。Windows・iOSのビルドとローカルWebRTC通信試験は成功済み。ローカル試験では接続を作り直した後の2回目の100KB転送と、試験用TURNを強制した100KB転送も成功した。後者はCloudflareの実サービスを使っていない。別LANの実機試験とiPhone 11への署名・インストールは未完了。
 
+同じローカルTURNを利用可能にした通常のICE設定では、直接経路が選ばれた。直接UDPだけを遮断した場合は、設定を変えずにTURN中継へ切り替わり、100KBを転送できた。これはGitHub Actions内の試験用TURNサーバーでの確認であり、別LANやCloudflare Realtime TURNでの実測ではない。
+
 接続後、アプリの同期・配信状態には`route:direct`または`route:relay`と送受信量（バイト）が表示される。中継量の上限に達すると`relay-limit`を通知して切断する。候補がまだ確定していない間は経路を表示しない。
 
 ## 残る実装
