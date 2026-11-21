@@ -199,8 +199,12 @@ jobs:
           wait "$peer_a" "$peer_b" 2>/dev/null || true
           python3 -u rtc-poc/tests/echo.py server > fallback-echo.log 2>&1 &
           echo_server=$!
-          sudo iptables -I OUTPUT -p udp ! -d 127.0.0.1 -j DROP
-          trap 'sudo iptables -D OUTPUT -p udp ! -d 127.0.0.1 -j DROP 2>/dev/null || true; kill "$peer_a" "$peer_b" "$echo_server" "$turn_server" "$worker" 2>/dev/null || true' EXIT
+          # Keep the local TURN listener and its allocated relay ports working,
+          # while preventing host/srflx candidates from sending to each other.
+          sudo iptables -I OUTPUT 1 -p udp ! -d 127.0.0.1 -j DROP
+          sudo iptables -I OUTPUT 1 -p udp --sport 3478 -j ACCEPT
+          sudo iptables -I OUTPUT 1 -p udp --sport 50000:50050 -j ACCEPT
+          trap 'sudo iptables -D OUTPUT -p udp --sport 50000:50050 -j ACCEPT 2>/dev/null || true; sudo iptables -D OUTPUT -p udp --sport 3478 -j ACCEPT 2>/dev/null || true; sudo iptables -D OUTPUT -p udp ! -d 127.0.0.1 -j DROP 2>/dev/null || true; kill "$peer_a" "$peer_b" "$echo_server" "$turn_server" "$worker" 2>/dev/null || true' EXIT
           room=ffeeddccbbaa99887766554433221100
           printf '{"signal_url":"ws://127.0.0.1:8787/signal","room":"%s","local_tcp":"127.0.0.1:9765","mode":"connect","turn_username":"test","turn_password":"secret","relay_byte_limit":10000000,"test_turn_url":"turn:127.0.0.1:3478?transport=udp"}\n' "$room" > rtc-a.json
           printf '{"signal_url":"ws://127.0.0.1:8787/signal","room":"%s","local_tcp":"127.0.0.1:9865","mode":"listen","turn_username":"test","turn_password":"secret","relay_byte_limit":10000000,"test_turn_url":"turn:127.0.0.1:3478?transport=udp"}\n' "$room" > rtc-b.json
