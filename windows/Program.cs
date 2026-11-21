@@ -503,7 +503,7 @@ internal sealed class SyncWindow : Window
                     _ = Task.Run(() => SyncCore.RunRtcBridge(rtc, operation.Token, phase =>
                         Dispatcher.BeginInvoke(new Action(() =>
                         {
-                            if (!closing && writerServing) serverStatus.Text = $"配信中: {address} · WebRTC {phase}";
+                            if (!closing && writerServing) serverStatus.Text = $"配信中: {address} · {SyncCore.RtcStatusText(phase)}";
                         }))));
                 }
             }));
@@ -803,8 +803,7 @@ internal sealed class SyncWindow : Window
                         if (phase == "ready") ready.TrySetResult();
                         if (phase == "failed") ready.TrySetException(new IOException("WebRTC 接続に失敗しました。"));
                         if (phase.StartsWith("route:") || phase == "relay-limit")
-                            Dispatcher.BeginInvoke(new Action(() => result.Text = phase == "relay-limit"
-                                ? "TURN中継の使用量上限に達しました。" : phase));
+                            Dispatcher.BeginInvoke(new Action(() => result.Text = SyncCore.RtcStatusText(phase)));
                     });
                     ready.TrySetException(new IOException($"WebRTC 接続が終了しました: {status}"));
                 });
@@ -1298,6 +1297,18 @@ internal static class SyncCore
                 Marshal.Copy(data, bytes, 0, bytes.Length);
                 onStatus(Encoding.UTF8.GetString(bytes));
             }, _ => cancellation.IsCancellationRequested ? (byte)1 : (byte)0, IntPtr.Zero);
+    }
+
+    internal static string RtcStatusText(string phase)
+    {
+        if (phase == "relay-limit") return "TURN中継の使用量上限に達しました。";
+        if (phase == "reconnecting") return "WebRTCを再接続しています…";
+        if (!phase.StartsWith("route:")) return $"WebRTC {phase}";
+        var values = phase.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var route = values[0] == "route:relay" ? "TURN中継" : "直接接続";
+        static string Bytes(string value) => ulong.TryParse(value.Split('=')[1], out var bytes)
+            ? $"{bytes:N0} バイト" : "不明";
+        return values.Length >= 3 ? $"WebRTC {route} · 送信 {Bytes(values[1])} / 受信 {Bytes(values[2])}" : $"WebRTC {route}";
     }
 
     internal static (int Status, TreeSummary Summary) RefreshWriterTree(string config, string state, string source)

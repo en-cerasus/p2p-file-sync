@@ -559,7 +559,7 @@ struct WriterView: View {
                                              Task.detached(priority: .utility) {
                                                  try? SyncCore.runRTCBridge(configuration: rtc,
                                                                             cancellation: stop) { status in
-                                                     continuation.yield("\(address) · WebRTC \(status)")
+                                                     continuation.yield("\(address) · \(rtcStatusText(status))")
                                                  }
                                              }
                                          }

@@ -77,6 +77,18 @@ private final class BridgeReady: @unchecked Sendable {
     }
 }
 
+func rtcStatusText(_ status: String) -> String {
+    if status == "relay-limit" { return "TURN中継の使用量上限に達しました。" }
+    if status == "reconnecting" { return "WebRTCを再接続しています…" }
+    guard status.hasPrefix("route:") else { return "WebRTC \(status)" }
+    let parts = status.split(separator: " ")
+    let route = parts.first == "route:relay" ? "TURN中継" : "直接接続"
+    func bytes(_ value: Substring) -> String {
+        UInt64(value.split(separator: "=").last ?? "").map { "\($0.formatted()) バイト" } ?? "不明"
+    }
+    return parts.count >= 3 ? "WebRTC \(route) · 送信 \(bytes(parts[1])) / 受信 \(bytes(parts[2]))" : "WebRTC \(route)"
+}
+
 private actor SyncRunner {
     static let shared = SyncRunner()
     private var running = false
@@ -350,7 +362,7 @@ struct DirectSyncView: View {
             let operation = Task {
                 try await SyncRunner.shared.run(folder: configFolder, cancellation: cancellation) { route in
                     Task { @MainActor in
-                        result = route == "relay-limit" ? "TURN中継の使用量上限に達しました。" : route
+                        result = rtcStatusText(route)
                     }
                 }
             }
