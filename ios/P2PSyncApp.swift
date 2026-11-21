@@ -84,7 +84,7 @@ func rtcStatusText(_ status: String) -> String {
     let parts = status.split(separator: " ")
     let route = parts.first == "route:relay" ? "TURN中継" : "直接接続"
     func bytes(_ value: Substring) -> String {
-        UInt64(value.split(separator: "=").last ?? "").map { "\($0.formatted()) バイト" } ?? "不明"
+        UInt64(String(value.split(separator: "=").last ?? "")).map { "\($0.formatted()) バイト" } ?? "不明"
     }
     return parts.count >= 3 ? "WebRTC \(route) · 送信 \(bytes(parts[1])) / 受信 \(bytes(parts[2]))" : "WebRTC \(route)"
 }
