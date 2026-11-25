@@ -502,11 +502,19 @@ internal sealed class SyncWindow : Window
                 }));
                 if (File.Exists(rtc) && Interlocked.Exchange(ref bridgeStarted, 1) == 0)
                 {
-                    _ = Task.Run(() => SyncCore.RunRtcBridge(rtc, operation.Token, phase =>
-                        Dispatcher.BeginInvoke(new Action(() =>
-                        {
-                            if (!closing && writerServing) serverStatus.Text = $"配信中: {address} · {SyncCore.RtcStatusText(phase)}";
-                        }))));
+                    _ = Task.Run(() =>
+                    {
+                        var bridgeStatus = SyncCore.RunRtcBridge(rtc, operation.Token, phase =>
+                            Dispatcher.BeginInvoke(new Action(() =>
+                            {
+                                if (!closing && writerServing) serverStatus.Text = $"配信中: {address} · {SyncCore.RtcStatusText(phase)}";
+                            })));
+                        if (bridgeStatus != 0 && bridgeStatus != 7 && !operation.IsCancellationRequested)
+                            Dispatcher.BeginInvoke(new Action(() =>
+                            {
+                                if (!closing && writerServing) serverStatus.Text = $"配信中: {address} · WebRTC設定または接続の開始に失敗しました。";
+                            }));
+                    });
                 }
             }));
             if (!closing)

@@ -60,7 +60,7 @@ enum SyncCore {
                     }, UnsafeMutableRawPointer(context))
             }
         }
-        guard status == 7 else { throw CoreError.rtcFailed(status) }
+        guard status == P2P_SYNC_OK || status == 7 else { throw CoreError.rtcFailed(status) }
     }
 
     static var abiVersion: UInt32 { p2p_sync_abi_version() }

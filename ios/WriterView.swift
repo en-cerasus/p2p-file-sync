@@ -557,9 +557,15 @@ struct WriterView: View {
                                          continuation.yield(address)
                                          if FileManager.default.fileExists(atPath: rtc.path) {
                                              Task.detached(priority: .utility) {
-                                                 try? SyncCore.runRTCBridge(configuration: rtc,
-                                                                            cancellation: stop) { status in
-                                                     continuation.yield("\(address) · \(rtcStatusText(status))")
+                                                 do {
+                                                     try SyncCore.runRTCBridge(configuration: rtc,
+                                                                               cancellation: stop) { status in
+                                                         continuation.yield("\(address) · \(rtcStatusText(status))")
+                                                     }
+                                                 } catch {
+                                                     if !stop.isCancelled() {
+                                                         continuation.yield("\(address) · WebRTC設定または接続の開始に失敗しました。")
+                                                     }
                                                  }
                                              }
                                          }
