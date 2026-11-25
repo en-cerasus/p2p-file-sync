@@ -56,6 +56,23 @@ jobs:
           if [ "$success" -ne 1 ]; then cat worker.log; exit 1; fi
           kill "$peer_a" "$peer_b" 2>/dev/null || true
           wait "$peer_a" "$peer_b" 2>/dev/null || true
+          room=ba9876543210fedcba9876543210fedc
+          timeout 50s target/rtc-test/debug/p2p-rtc-poc ws://127.0.0.1:8787/signal "$room" > native-browser.log 2>&1 &
+          native_browser=$!
+          trap 'kill "$native_browser" "$worker" 2>/dev/null || true' EXIT
+          if ! python3 rtc-poc/tests/browser_probe.py http://127.0.0.1:8787/diagnostic.html "$room"; then
+            cat native-browser.log worker.log
+            exit 1
+          fi
+          for attempt in {1..10}; do
+            if grep -q 'DataChannel pong:' native-browser.log; then break; fi
+            sleep 1
+          done
+          cat native-browser.log
+          grep -q 'DataChannel pong:' native-browser.log
+          echo 'Native WebRTC probe exchanged pings with the browser diagnostic page'
+          kill "$native_browser" 2>/dev/null || true
+          wait "$native_browser" 2>/dev/null || true
           python3 -u rtc-poc/tests/echo.py server 2 > echo-server.log 2>&1 &
           echo_server=$!
           sleep 1
