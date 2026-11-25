@@ -64,6 +64,7 @@ internal sealed class SyncWindow : Window
     private readonly Button startServerButton = new() { Content = "配信を開始", Margin = new Thickness(0, 12, 0, 0) };
     private readonly Button stopServerButton = new() { Content = "配信を停止", Margin = new Thickness(0, 8, 0, 0) };
     private readonly TextBlock serverStatus = new() { Text = "配信停止中", TextWrapping = TextWrapping.Wrap };
+    private readonly TextBlock serverRtcRouteStatus = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 4, 0, 0) };
     private readonly TextBlock writerStatus = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
     private readonly TextBlock historyStatus = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
     private readonly TextBlock conflictStatus = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
@@ -131,6 +132,7 @@ internal sealed class SyncWindow : Window
         panel.Children.Add(startServerButton);
         panel.Children.Add(stopServerButton);
         panel.Children.Add(serverStatus);
+        panel.Children.Add(serverRtcRouteStatus);
         panel.Children.Add(writerStatus);
         panel.Children.Add(loadMissingButton);
         panel.Children.Add(missingList);
@@ -489,6 +491,7 @@ internal sealed class SyncWindow : Window
         serverCancellation = operation;
         writerServing = true;
         serverStatus.Text = "配信を開始しています…";
+        serverRtcRouteStatus.Text = "";
         UpdateControls();
         try
         {
@@ -507,7 +510,13 @@ internal sealed class SyncWindow : Window
                         var bridgeStatus = SyncCore.RunRtcBridge(rtc, operation.Token, phase =>
                             Dispatcher.BeginInvoke(new Action(() =>
                             {
-                                if (!closing && writerServing) serverStatus.Text = $"配信中: {address} · {SyncCore.RtcStatusText(phase)}";
+                                if (!closing && writerServing)
+                                {
+                                    if (phase.StartsWith("route:") || phase == "relay-limit")
+                                        serverRtcRouteStatus.Text = SyncCore.RtcStatusText(phase);
+                                    else
+                                        serverStatus.Text = $"配信中: {address} · {SyncCore.RtcStatusText(phase)}";
+                                }
                             })));
                         if (bridgeStatus != 0 && bridgeStatus != 7 && !operation.IsCancellationRequested)
                             Dispatcher.BeginInvoke(new Action(() =>
@@ -1303,7 +1312,7 @@ internal static class SyncCore
         return RtcBridgeNative(configBytes, (nuint)configBytes.Length,
             (_, data, length) =>
             {
-                if (length > 64) return;
+                if (length > 128) return;
                 var bytes = new byte[(int)length];
                 Marshal.Copy(data, bytes, 0, bytes.Length);
                 onStatus(Encoding.UTF8.GetString(bytes));
@@ -1319,7 +1328,9 @@ internal static class SyncCore
         var route = values[0] == "route:relay" ? "TURN中継" : "直接接続";
         static string Bytes(string value) => ulong.TryParse(value.Split('=')[1], out var bytes)
             ? $"{bytes:N0} バイト" : "不明";
-        return values.Length >= 3 ? $"WebRTC {route} · 送信 {Bytes(values[1])} / 受信 {Bytes(values[2])}" : $"WebRTC {route}";
+        if (values.Length < 3) return $"WebRTC {route}";
+        var cumulative = values.Length >= 4 ? $" / TURN累計 {Bytes(values[3])}" : "";
+        return $"WebRTC {route} · 送信 {Bytes(values[1])} / 受信 {Bytes(values[2])}{cumulative}";
     }
 
     internal static (int Status, TreeSummary Summary) RefreshWriterTree(string config, string state, string source)

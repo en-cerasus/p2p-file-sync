@@ -20,6 +20,7 @@ struct WriterView: View {
     @State private var sourceFolder: URL?
     @State private var result = ""
     @State private var serverStatus = "配信停止中"
+    @State private var rtcRouteStatus = ""
     @State private var protectedReport: SyncCore.WriterProtectedReport?
     @State private var historyEntries: [SyncCore.WriterHistoryEntry] = []
     @State private var missingFiles: [SyncCore.MissingSourceFile] = []
@@ -92,6 +93,7 @@ struct WriterView: View {
                 Button("配信を停止") { stopServer() }
                     .disabled(!serving || cancellation?.isCancelled() == true)
                 Text(serverStatus).foregroundStyle(.secondary)
+                if !rtcRouteStatus.isEmpty { Text(rtcRouteStatus).foregroundStyle(.secondary) }
                 Text("取得と共有元の登録・更新は配信を停止してから行います。配信は画面を開いている間に動作し、アプリがバックグラウンドへ移ると停止します。")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -542,6 +544,7 @@ struct WriterView: View {
         cancellation = stop
         serving = true
         serverStatus = "配信を開始しています…"
+        rtcRouteStatus = ""
         let (ready, continuation) = AsyncStream.makeStream(of: String.self)
         let worker = Task.detached(priority: .utility) {
             defer { continuation.finish() }
@@ -560,7 +563,11 @@ struct WriterView: View {
                                                  do {
                                                      try SyncCore.runRTCBridge(configuration: rtc,
                                                                                cancellation: stop) { status in
-                                                         continuation.yield("\(address) · \(rtcStatusText(status))")
+                                                         if status.hasPrefix("route:") || status == "relay-limit" {
+                                                             continuation.yield("rtc:\(status)")
+                                                         } else {
+                                                             continuation.yield("\(address) · \(rtcStatusText(status))")
+                                                         }
                                                      }
                                                  } catch {
                                                      if !stop.isCancelled() {
@@ -572,8 +579,12 @@ struct WriterView: View {
                                      })
         }
         Task {
-            for await address in ready where serving && !stop.isCancelled() {
-                serverStatus = "配信中: \(address)"
+            for await update in ready where serving && !stop.isCancelled() {
+                if update.hasPrefix("rtc:") {
+                    rtcRouteStatus = rtcStatusText(String(update.dropFirst(4)))
+                } else {
+                    serverStatus = "配信中: \(update)"
+                }
             }
         }
         Task {

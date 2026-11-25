@@ -257,8 +257,7 @@ async fn run_async(config: &BridgeConfig, relay_bytes_total: &mut u64,
                         count_relay_bytes(relay_bytes_total, &mut last_relay_bytes, relay, sent, received);
                         report_ticks += 1;
                         if reported_route != Some(relay) || report_ticks >= 4 {
-                            status(&format!("route:{} sent={sent} received={received}",
-                                if relay { "relay" } else { "direct" }));
+                            report_route(status, relay, sent, received, *relay_bytes_total);
                             reported_route = Some(relay);
                             report_ticks = 0;
                         }
@@ -278,8 +277,7 @@ async fn run_async(config: &BridgeConfig, relay_bytes_total: &mut u64,
                     if let Some(connection) = pc.as_ref() {
                         if let Some((relay, sent, received)) = selected_route(connection.as_ref()).await {
                             count_relay_bytes(relay_bytes_total, &mut last_relay_bytes, relay, sent, received);
-                            status(&format!("route:{} sent={sent} received={received}",
-                                if relay { "relay" } else { "direct" }));
+                            report_route(status, relay, sent, received, *relay_bytes_total);
                             reported_route = Some(relay);
                             report_ticks = 0;
                             if relay && config.relay_byte_limit.is_some_and(|limit| *relay_bytes_total >= limit) {
@@ -363,6 +361,7 @@ async fn run_async(config: &BridgeConfig, relay_bytes_total: &mut u64,
     if let Some(connection) = pc.as_ref() {
         if let Some((relay, sent, received)) = selected_route(connection.as_ref()).await {
             count_relay_bytes(relay_bytes_total, &mut last_relay_bytes, relay, sent, received);
+            report_route(status, relay, sent, received, *relay_bytes_total);
         }
     }
     if !relay_limit_reached && config.relay_byte_limit.is_some_and(|limit| *relay_bytes_total >= limit) {
@@ -385,6 +384,11 @@ fn count_relay_bytes(total: &mut u64, last: &mut u64,
         *total = total.saturating_add(current.saturating_sub(*last));
         *last = current;
     }
+}
+
+fn report_route(status: &dyn Fn(&str), relay: bool, sent: u64, received: u64, relay_total: u64) {
+    status(&format!("route:{} sent={sent} received={received} relay_total={relay_total}",
+        if relay { "relay" } else { "direct" }));
 }
 
 async fn selected_route(connection: &dyn PeerConnection) -> Option<(bool, u64, u64)> {

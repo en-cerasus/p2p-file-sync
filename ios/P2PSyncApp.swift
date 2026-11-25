@@ -86,7 +86,9 @@ func rtcStatusText(_ status: String) -> String {
     func bytes(_ value: Substring) -> String {
         UInt64(String(value.split(separator: "=").last ?? "")).map { "\($0.formatted()) バイト" } ?? "不明"
     }
-    return parts.count >= 3 ? "WebRTC \(route) · 送信 \(bytes(parts[1])) / 受信 \(bytes(parts[2]))" : "WebRTC \(route)"
+    guard parts.count >= 3 else { return "WebRTC \(route)" }
+    let cumulative = parts.count >= 4 ? " / TURN累計 \(bytes(parts[3]))" : ""
+    return "WebRTC \(route) · 送信 \(bytes(parts[1])) / 受信 \(bytes(parts[2]))\(cumulative)"
 }
 
 private actor SyncRunner {
