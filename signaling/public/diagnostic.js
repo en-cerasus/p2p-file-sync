@@ -23,7 +23,9 @@ function iceServers() {
       'turn:turn.cloudflare.com:3478?transport=udp',
       'turn:turn.cloudflare.com:443?transport=udp',
       'turn:turn.cloudflare.com:3478?transport=tcp',
+      'turn:turn.cloudflare.com:80?transport=tcp',
       'turns:turn.cloudflare.com:5349?transport=tcp',
+      'turns:turn.cloudflare.com:443?transport=tcp',
     ], username: turnUser.value, credential: turnPassword.value });
   }
   return servers;

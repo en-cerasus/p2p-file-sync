@@ -73,7 +73,9 @@ impl BridgeConfig {
                     "turn:turn.cloudflare.com:3478?transport=udp".into(),
                     "turn:turn.cloudflare.com:443?transport=udp".into(),
                     "turn:turn.cloudflare.com:3478?transport=tcp".into(),
+                    "turn:turn.cloudflare.com:80?transport=tcp".into(),
                     "turns:turn.cloudflare.com:5349?transport=tcp".into(),
+                    "turns:turn.cloudflare.com:443?transport=tcp".into(),
                 ]),
                 username: username.clone(), credential: credential.clone(),
             });
