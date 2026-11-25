@@ -179,6 +179,7 @@ struct DirectSyncView: View {
     @State private var syncCancellation: SyncCore.Cancellation?
     @State private var stopping = false
     @State private var result = ""
+    @State private var rtcRouteStatus = ""
     @State private var originals: [SyncCore.ProtectedOriginal] = []
     @State private var conflicts: [SyncCore.FileConflict] = []
     @State private var history: [SyncCore.HistoryEntry] = []
@@ -214,6 +215,7 @@ struct DirectSyncView: View {
             }
             if !result.isEmpty {
                 Text(result)
+                if !rtcRouteStatus.isEmpty { Text(rtcRouteStatus).foregroundStyle(.secondary) }
             }
             if !originals.isEmpty {
                 DisclosureGroup("保護原本の一覧") {
@@ -346,6 +348,7 @@ struct DirectSyncView: View {
         guard let configFolder, !syncing, phase == .active, !pickingFolder else { return }
         syncing = true
         result = ""
+        rtcRouteStatus = ""
         let cancellation = SyncCore.Cancellation()
         syncCancellation = cancellation
         stopping = false
@@ -362,7 +365,7 @@ struct DirectSyncView: View {
             let operation = Task {
                 try await SyncRunner.shared.run(folder: configFolder, cancellation: cancellation) { route in
                     Task { @MainActor in
-                        result = rtcStatusText(route)
+                        rtcRouteStatus = rtcStatusText(route)
                     }
                 }
             }

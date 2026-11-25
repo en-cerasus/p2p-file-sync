@@ -23,6 +23,7 @@ internal sealed class SyncWindow : Window
     private readonly TextBlock configLabel = new() { TextWrapping = TextWrapping.Wrap };
     private readonly TextBlock destinationLabel = new() { TextWrapping = TextWrapping.Wrap };
     private readonly TextBlock result = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 16, 0, 0) };
+    private readonly TextBlock rtcRouteStatus = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 4, 0, 0) };
     private readonly Button configButton = new() { Content = "設定ファイルを選択" };
     private readonly Button destinationButton = new() { Content = "保存先を選択" };
     private readonly Button syncButton = new() { Content = "同期を開始", IsEnabled = false };
@@ -113,6 +114,7 @@ internal sealed class SyncWindow : Window
         panel.Children.Add(cancelButton);
         panel.Children.Add(autoSync);
         panel.Children.Add(result);
+        panel.Children.Add(rtcRouteStatus);
         originals.Content = originalList;
         panel.Children.Add(originals);
         conflicts.Content = conflictList;
@@ -788,6 +790,7 @@ internal sealed class SyncWindow : Window
         cancellation = operation;
         UpdateControls();
         result.Text = "同期中…";
+        rtcRouteStatus.Text = "";
         var state = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "P2PSync");
         using var bridgeStop = CancellationTokenSource.CreateLinkedTokenSource(operation.Token);
         try
@@ -803,7 +806,7 @@ internal sealed class SyncWindow : Window
                         if (phase == "ready") ready.TrySetResult();
                         if (phase == "failed") ready.TrySetException(new IOException("WebRTC 接続に失敗しました。"));
                         if (phase.StartsWith("route:") || phase == "relay-limit")
-                            Dispatcher.BeginInvoke(new Action(() => result.Text = SyncCore.RtcStatusText(phase)));
+                            Dispatcher.BeginInvoke(new Action(() => rtcRouteStatus.Text = SyncCore.RtcStatusText(phase)));
                     });
                     ready.TrySetException(new IOException($"WebRTC 接続が終了しました: {status}"));
                 });
