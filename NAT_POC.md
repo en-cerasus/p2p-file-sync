@@ -26,13 +26,15 @@ Windowsの「Test and build Windows client」成果物には、GUIと共通コ�
 1. 配信側は既存の`p2p-send setup`で`server.json`の待受を`127.0.0.1:8765`にし、`publish`後に`serve`を起動する。
 2. 配信側の`rtc.json`は`mode: "connect"`と`local_tcp: "127.0.0.1:8765"`にして、`p2p-send rtc-bridge`を起動する。
 3. 受信側の`rtc.json`は`mode: "listen"`と`local_tcp: "127.0.0.1:9865"`にして、同じルーム値で`p2p-send rtc-bridge`を起動する。受信側の`direct.json`の`address`だけを`127.0.0.1:9865`へ変更する。証明書ピンは変更しない。
-4. 受信側に`RTC ready`が出た後、GUIから同期する。CLIで試す場合は`p2p-send pull <direct.json> <receiver-state-dir> <destination>`を使う。同時に1接続だけ扱う。切断後はWebRTC経路を作り直し、受信側で同期を再実行できる。取得済みの内容は既存の同期状態に保存する。
+4. 受信側に`RTC ready`が出た後、GUIから同期する。CLIで試す場合は、先に`<destination>`フォルダーを作り、`p2p-send pull <direct.json> <receiver-state-dir> <destination>`を使う。同時に1接続だけ扱う。切断後はWebRTC経路を作り直し、受信側で同期を再実行できる。取得済みの内容は既存の同期状態に保存する。
 
 WindowsとiOSのアプリでは、選択した既存設定フォルダーに`rtc.json`を置くと、配信開始時または同期開始時にRust共通コアのWebRTC経路を起動する。配信側は`connect`、受信側は`listen`とし、受信側の`direct.json`の接続先は`rtc.json`のループバックアドレスに合わせる。`rtc.json`がなければ従来の直接TCPを使う。Windows・iOSのビルドとローカルWebRTC通信試験は成功済み。ローカル試験では接続を作り直した後の2回目の100KB転送と、試験用TURNを強制した100KB転送も成功した。後者はCloudflareの実サービスを使っていない。別LANの実機試験とiPhone 11への署名・インストールは未完了。
 
 同じローカルTURNを利用可能にした通常のICE設定では、直接経路が選ばれた。直接UDPだけを遮断した場合は、設定を変えずにTURN中継へ切り替わり、100KBを転送できた。これはGitHub Actions内の試験用TURNサーバーでの確認であり、別LANやCloudflare Realtime TURNでの実測ではない。
 
 2026-11-26にWindowsの`p2p-rtc-poc.exe`とChromeの診断画面を、ローカルWorker経由で接続した。双方でDataChannelの応答を確認し、Chrome側の選択経路は`host → host`（直接接続）だった。Rust側が1行を複数のDataChannelメッセージに分けて送る場合にも診断画面が行を組み立てるよう修正した。この試験は同じPC上で行い、iPhone Safariや別LANの確認ではない。
+
+同日、ローカルWorkerを介してWindows上の配信側と受信側それぞれで`p2p-send rtc-bridge`を起動し、既存の相互TLS同期をDataChannel越しに実行した。受信側の`direct.json`の接続先だけをローカル待受ポートへ変更した。`pull`は1イベント・1ファイルを取得し、元ファイルと取得ファイルのSHA-256が一致した。両側の経路ログは`direct`、`relay_total=0`を示した。これは同一PC上の二つのWindowsプロセスでの確認であり、別LANやiOSでの転送成功を示さない。
 
 接続後、アプリの同期・配信状態には「直接接続」または「TURN中継」と接続ごとの送受信量、起動中のTURN累計量（バイト）が表示される。転送終了時にも最終値を通知し、配信画面では再接続後も最後に確認した経路と量を残す。中継量の上限に達すると通知して切断する。候補がまだ確定していない間は経路を表示しない。
 
