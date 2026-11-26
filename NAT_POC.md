@@ -44,7 +44,7 @@ WindowsとiOSのアプリでは、選択した既存設定フォルダーに`rtc
 
 ### iPhone 11との別回線試験の準備（2026-11-26）
 
-GitHub Actionsの既存iOSビルドを`364ea79`から実行し、未署名IPAの生成が成功した（[実行結果](https://github.com/en-cerasus/p2p-file-sync/actions/runs/45771039337)）。iPhone 11での署名・インストールと起動は未確認。
+GitHub Actionsの既存iOSビルドを`364ea79`から実行し、未署名IPAの生成が成功した（[実行結果](https://github.com/en-cerasus/p2p-file-sync/actions/runs/45771039337)）。利用者からiPhone 11へのIPAインストール完了の報告を受けた。アプリでの同期動作は未確認。
 
 Windowsの検証用に、既存の共有や同期状態とは別の無視対象`.toolchain/nat-device-20261126/`へ新規ピア設定・送受信用状態・ランダムな2 MiBのファイルを作成した。配信側はループバック`127.0.0.1:41985`で起動し、公開WorkerへのWebRTCシグナリング待機を確認した。iPhone用の受信設定は暗号鍵を含むためGitHubへ登録せず、私的な転送経路だけで端末へ渡す。ブラウザー診断用ルームと同期用ルームは分離した。TURN設定はどちらにも入れていない。
 
@@ -52,7 +52,9 @@ Windowsの検証用に、既存の共有や同期状態とは別の無視対象`
 
 iPhoneへ渡すものと同一の`direct.json`・証明書・鍵を使い、Windowsの新規受信状態からループバックTCPで2 MiBの試験ファイルを取得した。別の新規受信状態でも再取得でき、どちらも送信元とのSHA-256一致を確認した。これにより今回の配信内容と受信設定をローカルで確認できたが、WebRTC経路やiOSでの動作を証明する試験ではない。
 
-Windowsのネイティブ診断プロセスは公開Workerの別ルームで待機を確認した。iPhoneをモバイル回線にしてSafariの診断画面から接続し、DataChannelの応答、候補種別、経路、RTTを記録する段階。現時点でiPhoneからの接続とファイル受信は未確認。
+Windowsのネイティブ診断プロセスは公開Workerの別ルームで待機を確認した。2026-11-26 19:31 JST、利用者のiPhone 11 Safari画面には同じWindowsピアへの`connected`、`DataChannel接続`、`srflx → srflx (直接接続)`、応答`49 ms`が表示された。Windows側ログも`connected`、`DataChannel open`、`DataChannel pong: 44 ms`を記録した。その後Windows側では`disconnected`と`failed`を記録した。候補の種類はiPhone画面の報告に基づく。診断時にWi-Fiがオフでモバイル通信だったかは利用者へ再確認中であり、確認までは別回線での成功とは断定しない。この診断はデータチャネルの疎通のみで、ファイル受信・SHA-256・中断再開を証明しない。
+
+設定ZIPは秘密鍵を含むためGitHubには置かず、利用者本人のGoogle Driveへアップロードした。Driveのメタデータで`shared: false`、権限は本人の`owner`のみと確認した。iPhoneでの保存・展開と設定フォルダー選択は利用者の操作待ち。
 
 接続後、アプリの同期・配信状態には「直接接続」または「TURN中継」と接続ごとの送受信量、起動中のTURN累計量（バイト）が表示される。転送終了時にも最終値を通知し、配信画面では再接続後も最後に確認した経路と量を残す。中継量の上限に達すると通知して切断する。候補がまだ確定していない間は経路を表示しない。
 
