@@ -52,9 +52,13 @@ Windowsの検証用に、既存の共有や同期状態とは別の無視対象`
 
 iPhoneへ渡すものと同一の`direct.json`・証明書・鍵を使い、Windowsの新規受信状態からループバックTCPで2 MiBの試験ファイルを取得した。別の新規受信状態でも再取得でき、どちらも送信元とのSHA-256一致を確認した。これにより今回の配信内容と受信設定をローカルで確認できたが、WebRTC経路やiOSでの動作を証明する試験ではない。
 
-Windowsのネイティブ診断プロセスは公開Workerの別ルームで待機を確認した。2026-11-26 19:31 JST、利用者のiPhone 11 Safari画面には同じWindowsピアへの`connected`、`DataChannel接続`、`srflx → srflx (直接接続)`、応答`49 ms`が表示された。Windows側ログも`connected`、`DataChannel open`、`DataChannel pong: 44 ms`を記録した。その後Windows側では`disconnected`と`failed`を記録した。候補の種類はiPhone画面の報告に基づく。診断時にWi-Fiがオフでモバイル通信だったかは利用者へ再確認中であり、確認までは別回線での成功とは断定しない。この診断はデータチャネルの疎通のみで、ファイル受信・SHA-256・中断再開を証明しない。
+Windowsのネイティブ診断プロセスは公開Workerの別ルームで待機を確認した。2026-11-26 19:31 JST、Wi-FiをオフにしたiPhone 11のSafari画面には同じWindowsピアへの`connected`、`DataChannel接続`、`srflx → srflx (直接接続)`、応答`49 ms`が表示された。Windows側ログも`connected`、`DataChannel open`、`DataChannel pong: 44 ms`を記録した。その後Windows側では`disconnected`と`failed`を記録した。候補の種類とiPhone側の回線状態は利用者の報告に基づく。これで別回線のDataChannel直接接続を確認したが、この診断だけではファイル受信・SHA-256・中断再開を証明しない。
 
-設定ZIPは秘密鍵を含むためGitHubには置かず、利用者本人のGoogle Driveへアップロードした。Driveのメタデータで`shared: false`、権限は本人の`owner`のみと確認した。iPhoneでの保存・展開と設定フォルダー選択は利用者の操作待ち。
+設定ZIPは秘密鍵を含むためGitHubには置かず、利用者本人のGoogle Driveへアップロードした。Driveのメタデータで`shared: false`、権限は本人の`owner`のみと確認した。iPhoneでの設定フォルダー選択は次の同期成功報告から確認できた。
+
+利用者はiPhoneへ設定フォルダーを読み込ませ、手動の同期操作で新規1件と表示されたと報告した。iPhoneのFilesアプリで`nat-test-fc028bc9.bin`（2 MiB）が存在することも確認した。WindowsのRTCログではこの同期のDataChannel接続と`route:direct`、`relay_total=0`、約1.95 MBと約0.56 MBの送信カウンタを記録した。カウンタは接続ごとの通信量であり、ファイル内容のハッシュや単一セッションでの完了を直接示さない。
+
+自動同期をオンにした状態でWindowsから50バイトの新規`nat-auto-20261126-1931.txt`をイベント2として登録した。利用者はアプリを前面に置いて待った後、iPhoneのFilesにこのファイルが自動で増えたと報告した。その間のWindows RTCログは`route:direct`と`relay_total=0`を示した。iPhoneで受信したファイルのSHA-256を直接読み戻す確認と、意図的な中断・再開の試験は残る。
 
 接続後、アプリの同期・配信状態には「直接接続」または「TURN中継」と接続ごとの送受信量、起動中のTURN累計量（バイト）が表示される。転送終了時にも最終値を通知し、配信画面では再接続後も最後に確認した経路と量を残す。中継量の上限に達すると通知して切断する。候補がまだ確定していない間は経路を表示しない。
 
