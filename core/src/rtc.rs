@@ -252,7 +252,7 @@ async fn run_async(config: &BridgeConfig, relay_bytes_total: &mut u64,
     let mut report_ticks = 0u8;
     let mut reported_route = None;
     let mut relay_limit_reached = false;
-    let mut last_relay_bytes = 0u64;
+    let mut last_transport_bytes = 0u64;
     let mut tunnels = Vec::new();
     loop {
         tokio::select! {
@@ -263,7 +263,7 @@ async fn run_async(config: &BridgeConfig, relay_bytes_total: &mut u64,
                 stats_ticks = 0;
                 if let Some(connection) = pc.as_ref() {
                     if let Some((relay, sent, received)) = selected_route(connection.as_ref()).await {
-                        count_relay_bytes(relay_bytes_total, &mut last_relay_bytes, relay, sent, received);
+                        count_relay_bytes(relay_bytes_total, &mut last_transport_bytes, relay, sent, received);
                         report_ticks += 1;
                         if reported_route != Some(relay) || report_ticks >= 4 {
                             report_route(status, relay, sent, received, *relay_bytes_total);
@@ -285,7 +285,7 @@ async fn run_async(config: &BridgeConfig, relay_bytes_total: &mut u64,
                 if text == "ready" {
                     if let Some(connection) = pc.as_ref() {
                         if let Some((relay, sent, received)) = selected_route(connection.as_ref()).await {
-                            count_relay_bytes(relay_bytes_total, &mut last_relay_bytes, relay, sent, received);
+                            count_relay_bytes(relay_bytes_total, &mut last_transport_bytes, relay, sent, received);
                             report_route(status, relay, sent, received, *relay_bytes_total);
                             reported_route = Some(relay);
                             report_ticks = 0;
@@ -369,7 +369,7 @@ async fn run_async(config: &BridgeConfig, relay_bytes_total: &mut u64,
     }
     if let Some(connection) = pc.as_ref() {
         if let Some((relay, sent, received)) = selected_route(connection.as_ref()).await {
-            count_relay_bytes(relay_bytes_total, &mut last_relay_bytes, relay, sent, received);
+            count_relay_bytes(relay_bytes_total, &mut last_transport_bytes, relay, sent, received);
             report_route(status, relay, sent, received, *relay_bytes_total);
         }
     }
@@ -388,11 +388,11 @@ async fn run_async(config: &BridgeConfig, relay_bytes_total: &mut u64,
 
 fn count_relay_bytes(total: &mut u64, last: &mut u64,
     relay: bool, sent: u64, received: u64) {
+    let current = sent.saturating_add(received);
     if relay {
-        let current = sent.saturating_add(received);
         *total = total.saturating_add(current.saturating_sub(*last));
-        *last = current;
     }
+    *last = current;
 }
 
 fn report_route(status: &dyn Fn(&str), relay: bool, sent: u64, received: u64, relay_total: u64) {
@@ -464,5 +464,7 @@ mod tests {
         assert_eq!(total, 130);
         count_relay_bytes(&mut total, &mut last, false, 1000, 1000);
         assert_eq!(total, 130);
+        count_relay_bytes(&mut total, &mut last, true, 1050, 1010);
+        assert_eq!(total, 190);
     }
 }
