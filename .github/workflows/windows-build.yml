@@ -25,12 +25,17 @@ jobs:
           rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal
           cargo test --locked --workspace
           cargo build --locked --release -p p2p-sync-core --lib
+          cargo build --locked --release -p p2p-sync-core --bin p2p-send
           dotnet build windows/P2PSync.csproj --configuration Release
+          Copy-Item target/release/p2p-send.exe windows/bin/Release/net10.0-windows/
           if (-not (Test-Path 'windows/bin/Release/net10.0-windows/P2PSync.exe')) {
             throw 'Windows GUI executable was not produced.'
           }
           if (-not (Test-Path 'windows/bin/Release/net10.0-windows/p2p_sync_core.dll')) {
             throw 'Rust core DLL was not copied beside the GUI.'
+          }
+          if (-not (Test-Path 'windows/bin/Release/net10.0-windows/p2p-send.exe')) {
+            throw 'Manual setup command was not included beside the GUI.'
           }
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
