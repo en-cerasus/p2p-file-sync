@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -73,7 +74,8 @@ def main():
         deadline = time.monotonic() + 35
         while time.monotonic() < deadline:
             log = execute(session, "return document.querySelector('#log').textContent")
-            if "応答 " in log and "DataChannel接続" in log:
+            response_times = [int(value) for value in re.findall(r"応答 (\d+) ms", log)]
+            if "DataChannel接続" in log and any(0 <= value < 10_000 for value in response_times):
                 print(log)
                 return
             time.sleep(0.5)

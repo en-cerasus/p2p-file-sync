@@ -42,14 +42,30 @@ async function pathReport(pc) {
 
 function wireChannel(channel, remote) {
   channel.binaryType = 'arraybuffer';
+  let incoming = '';
   channel.onopen = async () => {
     log(`${remote.slice(0, 8)} DataChannel接続。${await pathReport(peers.get(remote).pc)}`);
     channel.send(new TextEncoder().encode(`ping:${Date.now()}\n`));
   };
   channel.onmessage = event => {
     const text = typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data);
-    if (text.startsWith('ping:')) channel.send(new TextEncoder().encode(`pong:${text.slice(5).trim()}\n`));
-    else if (text.startsWith('pong:')) log(`${remote.slice(0, 8)} 応答 ${Date.now() - Number(text.slice(5).trim())} ms`);
+    incoming += text;
+    if (incoming.length > 1024) {
+      log(`${remote.slice(0, 8)} 診断メッセージが長すぎます。`);
+      channel.close();
+      return;
+    }
+    let end;
+    while ((end = incoming.indexOf('\n')) !== -1) {
+      const line = incoming.slice(0, end).trimEnd();
+      incoming = incoming.slice(end + 1);
+      if (line.startsWith('ping:')) {
+        channel.send(new TextEncoder().encode(`pong:${line.slice(5)}\n`));
+      } else if (line.startsWith('pong:')) {
+        const sent = Number(line.slice(5));
+        if (Number.isFinite(sent) && sent > 0) log(`${remote.slice(0, 8)} 応答 ${Date.now() - sent} ms`);
+      }
+    }
   };
   channel.onclose = () => log(`${remote.slice(0, 8)} DataChannel切断`);
 }
