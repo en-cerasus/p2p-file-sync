@@ -9,7 +9,7 @@
 3. 16バイトの乱数を16進数32桁にした秘密のルーム値を作る。WindowsとiPhoneの`https://<WorkerのURL>/diagnostic.html`で同じ値を入力する。両端末は異なるLANまたは片方をモバイル回線にする。
 4. Windowsネイティブ経路を試す場合は、CIの「Build Windows WebRTC route probe」成果物を使う。iPhoneでは診断画面を開き、Windowsで`p2p-rtc-poc.exe wss://<WorkerのURL>/signal <ルーム値>`を実行する。`DataChannel pong`が表示されればWindowsネイティブ実装とiPhoneブラウザー間で経路が成立した。試験用ピアIDは起動のたびに生成する。
 5. TURN資格情報を空欄にして接続し、DataChannelの応答と選択候補の種類を記録する。直接接続できない回線では失敗してよい。
-6. TURN使用を別途許可した場合のみ、Cloudflare Realtimeが発行した短期資格情報を両端末に入れて再試行する。Windows側はコマンド末尾にユーザー名とパスワードを指定する。`relay`候補が選ばれた場合だけTURN中継として記録する。実転送量と請求画面の使用量を確認する。
+6. TURN使用を別途許可した場合のみ、[Cloudflareの手順](https://developers.cloudflare.com/realtime/turn/generate-credentials/)でTURNキーから有効期限付きの`username`と`credential`を発行し、両端末の`turn_username`と`turn_password`へ設定して再試行する。TURNキー自体は端末の設定へ入れない。診断用Windowsコマンドでは末尾に発行済みユーザー名とパスワードを指定する。`relay`候補が選ばれた場合だけTURN中継として記録する。実転送量と請求画面の使用量を確認する。
 
 ## 既存の同期処理を通すWindows間の試験
 
@@ -22,6 +22,8 @@ Windowsの「Test and build Windows client」成果物には、GUIと共通コ�
 ```json
 {"signal_url":"wss://<WorkerのURL>/signal","room":"0123456789abcdef0123456789abcdef","local_tcp":"127.0.0.1:8765","mode":"connect"}
 ```
+
+TURNを試すときは上のJSONに`"turn_username":"<発行されたusername>"`、`"turn_password":"<発行されたcredential>"`、`"relay_byte_limit":10000000`を加える。受信側も同様に設定する。[Cloudflareの料金と無料枠](https://developers.cloudflare.com/realtime/turn/faq/)は実利用の直前に再確認する。
 
 1. 配信側は既存の`p2p-send setup`で`server.json`の待受を`127.0.0.1:8765`にし、`publish`後に`serve`を起動する。
 2. 配信側の`rtc.json`は`mode: "connect"`と`local_tcp: "127.0.0.1:8765"`にして、`p2p-send rtc-bridge`を起動する。
