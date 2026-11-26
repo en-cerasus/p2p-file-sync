@@ -5,7 +5,7 @@
 ## 検証の順序
 
 1. Cloudflareへ公開する前に、`signaling`で`npm install`と`npm run check`を実行する。CIの「Check Cloudflare signaling」でも型検査と公開なしのビルドを確認できる。
-2. 公開を許可されたCloudflareアカウントでWorkerをデプロイする。ここで作成するDurable ObjectsはSQLiteバックエンドを使い、無料プランに対応する設定とする。現時点ではデプロイしていない。
+2. 公開を許可されたCloudflareアカウントでWorkerをデプロイする。ここで作成するDurable ObjectsはSQLiteバックエンドを使い、無料プランに対応する設定とする。2026-11-26に既存の`signaling/wrangler.jsonc`からデプロイし、公開URLの応答を確認した。TURNは作成・利用していない。
 3. 16バイトの乱数を16進数32桁にした秘密のルーム値を作る。WindowsとiPhoneの`https://<WorkerのURL>/diagnostic.html`で同じ値を入力する。両端末は異なるLANまたは片方をモバイル回線にする。
 4. Windowsネイティブ経路を試す場合は、CIの「Build Windows WebRTC route probe」成果物を使う。iPhoneでは診断画面を開き、Windowsで`p2p-rtc-poc.exe wss://<WorkerのURL>/signal <ルーム値>`を実行する。`DataChannel pong`が表示されればWindowsネイティブ実装とiPhoneブラウザー間で経路が成立した。試験用ピアIDは起動のたびに生成する。
 5. TURN資格情報を空欄にして接続し、DataChannelの応答と選択候補の種類を記録する。直接接続できない回線では失敗してよい。
@@ -39,6 +39,8 @@ WindowsとiOSのアプリでは、選択した既存設定フォルダーに`rtc
 同日、ローカルWorkerを介してWindows上の配信側と受信側それぞれで`p2p-send rtc-bridge`を起動し、既存の相互TLS同期をDataChannel越しに実行した。受信側の`direct.json`の接続先だけをローカル待受ポートへ変更した。`pull`は1イベント・1ファイルを取得し、元ファイルと取得ファイルのSHA-256が一致した。両側の経路ログは`direct`、`relay_total=0`を示した。これは同一PC上の二つのWindowsプロセスでの確認であり、別LANやiOSでの転送成功を示さない。
 
 到達不能なローカル試験用TURNだけを候補にした場合、両側のICEが約30秒で失敗を通知し、WebRTC経路が再接続へ進むことを確認した。通常の直接候補へ戻してファイル同期を再実行し、取得ファイルのSHA-256一致を確認した。短時間で終わる転送では、経路統計が出る前に切断される側もある。これらはローカルWorkerでの試験であり、Cloudflare Realtime TURNの実測ではない。
+
+2026-11-26に公開済みCloudflare WorkerのHTTPS診断画面が`200`を返し、WSSで接続した2ピア間のシグナリング転送を確認した。さらに同じPC上のWindows配信・受信プロセスをそのWorker経由で接続し、DataChannel上の`pull`で1ファイルを取得した。元ファイルと取得ファイルのSHA-256は一致し、両側の経路ログは`direct`、`relay_total=0`だった。別LAN、iPhone 11、Cloudflare Realtime TURNでの実測は残る。
 
 接続後、アプリの同期・配信状態には「直接接続」または「TURN中継」と接続ごとの送受信量、起動中のTURN累計量（バイト）が表示される。転送終了時にも最終値を通知し、配信画面では再接続後も最後に確認した経路と量を残す。中継量の上限に達すると通知して切断する。候補がまだ確定していない間は経路を表示しない。
 
