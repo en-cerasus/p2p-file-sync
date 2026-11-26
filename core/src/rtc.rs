@@ -15,7 +15,8 @@ use webrtc::{
     peer_connection::{
         MediaEngine, PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler,
         RTCConfigurationBuilder, RTCIceCandidateInit, RTCIceServer, RTCSessionDescription,
-        RTCPeerConnectionIceEvent, RTCIceTransportPolicy, RTCStatsReportEntry, Registry, StatsSelector,
+        RTCPeerConnectionIceEvent, RTCPeerConnectionState, RTCIceTransportPolicy,
+        RTCStatsReportEntry, Registry, StatsSelector,
         register_default_interceptors,
     },
     runtime::{default_runtime, Runtime},
@@ -88,6 +89,7 @@ struct Handler {
     remote: String,
     candidates: mpsc::UnboundedSender<Value>,
     channels: mpsc::UnboundedSender<Arc<dyn DataChannel>>,
+    status: mpsc::UnboundedSender<&'static str>,
 }
 
 #[async_trait::async_trait]
@@ -102,6 +104,12 @@ impl PeerConnectionEventHandler for Handler {
 
     async fn on_data_channel(&self, channel: Arc<dyn DataChannel>) {
         let _ = self.channels.send(channel);
+    }
+
+    async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
+        if state == RTCPeerConnectionState::Failed {
+            let _ = self.status.send("failed");
+        }
     }
 }
 
@@ -131,6 +139,7 @@ async fn peer_connection(
     remote: &str,
     candidates: mpsc::UnboundedSender<Value>,
     channels: mpsc::UnboundedSender<Arc<dyn DataChannel>>,
+    status: mpsc::UnboundedSender<&'static str>,
 ) -> Result<Box<dyn PeerConnection>> {
     let mut media = MediaEngine::default();
     media.register_default_codecs()?;
@@ -145,7 +154,7 @@ async fn peer_connection(
         .with_media_engine(media)
         .with_interceptor_registry(registry)
         .with_handler(Arc::new(Handler {
-            remote: remote.into(), candidates, channels,
+            remote: remote.into(), candidates, channels, status,
         }))
         .with_runtime(runtime)
         .with_udp_addrs(local_udp_addresses()?)
@@ -270,8 +279,8 @@ async fn run_async(config: &BridgeConfig, relay_bytes_total: &mut u64,
                 }
             },
             Some(text) = status_rx.recv() => {
-                if text == "failed" { break; }
                 status(text);
+                if text == "failed" { break; }
                 if text == "closed" { break; }
                 if text == "ready" {
                     if let Some(connection) = pc.as_ref() {
@@ -317,7 +326,7 @@ async fn run_async(config: &BridgeConfig, relay_bytes_total: &mut u64,
                 if remote.is_none() && !possible.is_empty() && possible != me {
                     remote = Some(possible.to_owned());
                     pc = Some(peer_connection(&config, runtime.clone(), possible,
-                        candidate_tx.clone(), channel_tx.clone()).await?);
+                        candidate_tx.clone(), channel_tx.clone(), status_tx.clone()).await?);
                     if me.as_str() < possible {
                         let conn = pc.as_ref().unwrap();
                         let channel = conn.create_data_channel("p2p-sync", None).await?;

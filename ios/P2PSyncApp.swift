@@ -79,6 +79,7 @@ private final class BridgeReady: @unchecked Sendable {
 
 func rtcStatusText(_ status: String) -> String {
     if status == "relay-limit" { return "TURN中継の使用量上限に達しました。" }
+    if status == "failed" { return "WebRTC接続に失敗しました。再接続します…" }
     if status == "reconnecting" { return "WebRTCを再接続しています…" }
     guard status.hasPrefix("route:") else { return "WebRTC \(status)" }
     let parts = status.split(separator: " ")

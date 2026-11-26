@@ -1322,6 +1322,7 @@ internal static class SyncCore
     internal static string RtcStatusText(string phase)
     {
         if (phase == "relay-limit") return "TURN中継の使用量上限に達しました。";
+        if (phase == "failed") return "WebRTC接続に失敗しました。再接続します…";
         if (phase == "reconnecting") return "WebRTCを再接続しています…";
         if (!phase.StartsWith("route:")) return $"WebRTC {phase}";
         var values = phase.Split(' ', StringSplitOptions.RemoveEmptyEntries);
