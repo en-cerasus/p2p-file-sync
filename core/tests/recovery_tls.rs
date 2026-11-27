@@ -335,6 +335,64 @@ fn receiver_anchor_rejects_restored_old_database_before_touching_destination() {
 }
 
 #[test]
+fn sender_registers_first_anchor_only_after_catching_up() {
+    let root = tempfile::tempdir().unwrap();
+    let setup = root.path().join("setup");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
+        .arg("setup").arg(&setup)
+        .args(["127.0.0.1:8786", "127.0.0.1:8786", "1", "2"])
+        .output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let first_config = setup.join("sender/server.json");
+    let second_config = setup.join("writer-2/server.json");
+    let direct_config = setup.join("writer-2/direct.json");
+    for config in [&first_config, &second_config] {
+        let mut json: serde_json::Value = serde_json::from_slice(&std::fs::read(config).unwrap()).unwrap();
+        json["bind"] = "127.0.0.1:0".into();
+        std::fs::write(config, json.to_string()).unwrap();
+    }
+    let source = root.path().join("song.tja");
+    std::fs::write(&source, b"signed history").unwrap();
+    let mut first = Sender::open(&first_config, &root.path().join("first-state")).unwrap();
+    let trusted = first.publish(&source).unwrap().peer;
+    let listener = first.bind().unwrap();
+    let mut direct: serde_json::Value = serde_json::from_slice(&std::fs::read(&direct_config).unwrap()).unwrap();
+    direct["address"] = listener.local_addr().unwrap().to_string().into();
+    direct.as_object_mut().unwrap().remove("fallback_peers");
+    std::fs::write(&direct_config, direct.to_string()).unwrap();
+    let second_state = root.path().join("second-state");
+    let mut second = Sender::open(&second_config, &second_state).unwrap();
+    let anchor = setup.join("registered-anchor.bin");
+    assert!(matches!(second.register_recovery_anchor(
+        &second_config, &direct_config, trusted, &second_state.join("bad-anchor.bin")),
+        Err(HostError::Configuration)));
+    let original = std::fs::read(&second_config).unwrap();
+    std::thread::scope(|threads| {
+        let server = threads.spawn(|| {
+            for _ in 0..3 {
+                let (socket, _) = listener.accept().unwrap();
+                first.serve(socket).unwrap();
+            }
+        });
+        assert!(matches!(second.register_recovery_anchor(
+            &second_config, &direct_config, trusted, &anchor),
+            Err(HostError::Recovery(RecoveryError::Behind(_)))));
+        assert_eq!(std::fs::read(&second_config).unwrap(), original);
+        assert!(!anchor.exists());
+        assert_eq!(second.catch_up(&direct_config).unwrap(), 1);
+        second.register_recovery_anchor(&second_config, &direct_config, trusted, &anchor).unwrap();
+        server.join().unwrap();
+    });
+    assert!(anchor.is_file());
+    let updated: serde_json::Value = serde_json::from_slice(&std::fs::read(&second_config).unwrap()).unwrap();
+    assert_eq!(updated["recovery_anchor"]["file"].as_str().unwrap(), anchor.canonicalize().unwrap().to_str().unwrap());
+    assert!(Sender::open(&second_config, &second_state).is_ok());
+    assert!(matches!(second.register_recovery_anchor(
+        &second_config, &direct_config, trusted, &setup.join("another-anchor.bin")),
+        Err(HostError::Configuration)));
+}
+
+#[test]
 fn receiver_rejects_a_peer_whose_own_signed_history_was_rolled_back() {
     let root = tempfile::tempdir().unwrap();
     let setup = root.path().join("setup");

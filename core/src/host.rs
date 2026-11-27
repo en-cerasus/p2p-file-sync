@@ -486,6 +486,57 @@ impl Sender {
         write_bundle_file(&parent, name, &wire)
     }
 
+    /// Fetch and register the first external anchor only when it matches the
+    /// current durable history. A failed verification leaves configuration
+    /// unchanged; an interrupted config write may leave an unused new anchor.
+    pub fn register_recovery_anchor(
+        &mut self,
+        configuration: &Path,
+        peers: &Path,
+        trusted_peer: PeerId,
+        output: &Path,
+    ) -> Result<(), HostError> {
+        let original = read_bounded(configuration, MAX_CONFIG_BYTES)?;
+        let config: SenderConfig = serde_json::from_slice(&original)
+            .map_err(|_| HostError::Configuration)?;
+        if config.recovery_anchor.is_some()
+            || build_roster(&config.share, config.generation, config.members)?.membership()
+                != self.roster.membership()
+        {
+            return Err(HostError::Configuration);
+        }
+        let parent = output.parent().ok_or(HostError::Configuration)?;
+        let parent = fs::canonicalize(parent).map_err(HostError::Io)?;
+        let state_root = self.generation_marker.parent()
+            .and_then(Path::parent).ok_or(HostError::Configuration)?;
+        if parent.starts_with(fs::canonicalize(state_root).map_err(HostError::Io)?) {
+            return Err(HostError::Configuration);
+        }
+        let name = output.file_name().and_then(|name| name.to_str())
+            .ok_or(HostError::Configuration)?;
+        let output = parent.join(name);
+        let wire = self.request_recovery_anchor(peers, trusted_peer)?;
+        let _lock = self.lock_state()?;
+        recovery::verify_anchor(&self.roster, &mut self.store, &wire, trusted_peer)
+            .map_err(HostError::Recovery)?;
+        if read_bounded(configuration, MAX_CONFIG_BYTES)? != original {
+            return Err(HostError::Configuration);
+        }
+        let mut updated: serde_json::Value = serde_json::from_slice(&original)
+            .map_err(|_| HostError::Configuration)?;
+        updated.as_object_mut().ok_or(HostError::Configuration)?.insert(
+            "recovery_anchor".into(),
+            serde_json::json!({"file": output.to_str().ok_or(HostError::Configuration)?,
+                               "peer": trusted_peer.iter().map(|byte| format!("{byte:02x}")).collect::<String>()}),
+        );
+        let updated = serde_json::to_vec_pretty(&updated).map_err(|_| HostError::Configuration)?;
+        if updated.len() as u64 > MAX_CONFIG_BYTES {
+            return Err(HostError::Configuration);
+        }
+        write_bundle_file(&parent, name, &wire)?;
+        replace_bundle_file(configuration, &updated)
+    }
+
     /// Advance the configured external anchor only after its old and new
     /// signatures agree with the same fully caught-up local history.
     pub fn refresh_recovery_anchor(
