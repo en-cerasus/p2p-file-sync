@@ -10,6 +10,7 @@ use crate::{
 
 const DOMAIN: &[u8] = b"p2p-file-sync/event/v1\0";
 const CONFIRMATION_DOMAIN: &[u8] = b"p2p-file-sync/confirmation/v1\0";
+const RECOVERY_DOMAIN: &[u8] = b"p2p-file-sync/recovery-anchor/v1\0";
 const HEADER_BYTES: usize = 16 + 8 + 32;
 const SIGNATURE_BYTES: usize = 64;
 const MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
@@ -135,6 +136,26 @@ impl Roster {
         }
         let event = self.verify_event(wire)?;
         Ok(store.apply_signed(event, wire.to_vec())?)
+    }
+
+    pub(crate) fn sign_recovery_payload(
+        &self,
+        key: &SigningKey,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, AuthError> {
+        let author = key.verifying_key().to_bytes();
+        self.check_member(&author)?;
+        if payload.is_empty() || payload.len() > MAX_PAYLOAD_BYTES {
+            return Err(AuthError::InvalidFrame);
+        }
+        Ok(self.sign_payload(RECOVERY_DOMAIN, key, &author, payload))
+    }
+
+    pub(crate) fn verify_recovery_payload<'a>(
+        &self,
+        wire: &'a [u8],
+    ) -> Result<(&'a PeerId, &'a [u8]), AuthError> {
+        self.verify_payload(RECOVERY_DOMAIN, wire, MAX_PAYLOAD_BYTES)
     }
 
     pub(crate) fn check_writer(&self, author: &PeerId) -> Result<(), AuthError> {

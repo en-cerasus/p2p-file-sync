@@ -13,6 +13,7 @@ pub mod materialize;
 pub mod names;
 pub mod projection;
 pub mod publish;
+pub mod recovery;
 pub mod replica;
 pub mod retention;
 pub mod rtc;
