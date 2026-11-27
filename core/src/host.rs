@@ -62,6 +62,7 @@ struct Config {
     private_key_der: PathBuf,
     event_key: Option<PathBuf>,
     migration: Option<MigrationConfig>,
+    recovery_anchor: Option<RecoveryAnchorConfig>,
 }
 
 #[derive(Deserialize)]
@@ -149,6 +150,28 @@ struct SenderConfig {
 struct RecoveryAnchorConfig {
     file: PathBuf,
     peer: String,
+}
+
+fn verify_receiver_anchor(
+    configuration: &Path,
+    state_root: &Path,
+    roster: &Roster,
+    store: &mut Store,
+    anchor: Option<&RecoveryAnchorConfig>,
+    own_peer: Option<PeerId>,
+) -> Result<(), HostError> {
+    let Some(anchor) = anchor else { return Ok(()) };
+    let trusted_peer = hex::<32>(&anchor.peer)?;
+    if own_peer == Some(trusted_peer) {
+        return Err(HostError::Configuration);
+    }
+    let directory = configuration.parent().ok_or(HostError::Configuration)?;
+    let path = fs::canonicalize(directory.join(&anchor.file)).map_err(HostError::Io)?;
+    if path.starts_with(fs::canonicalize(state_root).map_err(HostError::Io)?) {
+        return Err(HostError::Configuration);
+    }
+    let wire = read_bounded(&path, MAX_RECOVERY_ANCHOR_BYTES)?;
+    recovery::verify_anchor(roster, store, &wire, trusted_peer).map_err(HostError::Recovery)
 }
 
 pub struct Sender {
@@ -1214,6 +1237,8 @@ pub struct PendingLocalFile {
 struct LocalReceiverLayout {
     roster: Roster,
     migration: Option<MigrationConfig>,
+    recovery_anchor: Option<RecoveryAnchorConfig>,
+    own_peer: Option<PeerId>,
     generation: u64,
     destination: PathBuf,
     share_root: PathBuf,
@@ -1230,6 +1255,14 @@ fn local_receiver_layout(
     let config: Config = serde_json::from_slice(&read_bounded(configuration, MAX_CONFIG_BYTES)?)
         .map_err(|_| HostError::Configuration)?;
     let roster = build_roster(&config.share, config.generation, config.members)?;
+    let own_peer = if config.recovery_anchor.is_some() {
+        config.event_key.as_ref().map(|name| {
+            let seed: [u8; 32] = read_bounded(
+                &configuration.parent().ok_or(HostError::Configuration)?.join(name), 32,
+            )?.try_into().map_err(|_| HostError::Configuration)?;
+            Ok::<_, HostError>(PeerSigningKey::from_bytes(&seed).verifying_key().to_bytes())
+        }).transpose()?
+    } else { None };
     let destination = destination.canonicalize().map_err(HostError::Io)?;
     if !destination.is_dir() {
         return Err(HostError::Configuration);
@@ -1240,7 +1273,9 @@ fn local_receiver_layout(
     let state = share_root.join(config.generation.to_string()).join(&destination_id);
     let witness = share_root.join("witness").join(config.generation.to_string()).join(&destination_id);
     Ok(LocalReceiverLayout {
-        roster, migration: config.migration, generation: config.generation,
+        roster, migration: config.migration, recovery_anchor: config.recovery_anchor,
+        own_peer,
+        generation: config.generation,
         destination, share_root, state, witness,
     })
 }
@@ -1258,6 +1293,9 @@ fn open_local_receiver(
     )?;
     check_generation(&layout.share_root.join("active-generation"), layout.generation, digest, false)?;
     store.enable_event_witness(layout.witness).map_err(HostError::Store)?;
+    let state_root = layout.share_root.parent().ok_or(HostError::Configuration)?;
+    verify_receiver_anchor(configuration, state_root, &layout.roster, &mut store,
+                           layout.recovery_anchor.as_ref(), layout.own_peer)?;
     store.refresh().map_err(HostError::Store)?;
     Ok((store, completed, layout.destination))
 }
@@ -1702,6 +1740,10 @@ pub(crate) fn pull_with_originals(
         config.migration.as_ref(),
     )?;
     store.enable_event_witness(witness).map_err(HostError::Store)?;
+    verify_receiver_anchor(configuration, share_root.parent().ok_or(HostError::Configuration)?,
+        &roster, &mut store,
+        config.recovery_anchor.as_ref(),
+        reader.as_ref().map(|key| key.verifying_key().to_bytes()))?;
     let client = Client::with_baseline(
         roots,
         credentials,

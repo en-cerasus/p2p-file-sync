@@ -2,7 +2,7 @@ use std::net::TcpListener;
 
 use p2p_sync_core::{
     direct::DirectError,
-    host::{HostError, Sender},
+    host::{pull_from_config, HostError, Sender},
     recovery::RecoveryError,
 };
 
@@ -144,6 +144,155 @@ fn pinned_tls_peer_supplies_anchor_then_catchup_satisfies_startup_gate() {
             b"anchor exchange"
         );
     });
+}
+
+#[test]
+fn receiver_anchor_rejects_restored_old_database_before_touching_destination() {
+    let root = tempfile::tempdir().unwrap();
+    let setup = root.path().join("setup");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
+        .arg("setup")
+        .arg(&setup)
+        .args(["127.0.0.1:8785", "127.0.0.1:8785", "1", "1"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let sender_config = setup.join("sender/server.json");
+    let receiver_config = setup.join("receiver/direct.json");
+    let state = root.path().join("receiver-state");
+    let destination = root.path().join("destination");
+    std::fs::create_dir(&destination).unwrap();
+    let source = root.path().join("song.tja");
+    std::fs::write(&source, b"deleted after first pull").unwrap();
+    let mut settings: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&sender_config).unwrap()).unwrap();
+    settings["bind"] = "127.0.0.1:0".into();
+    std::fs::write(&sender_config, settings.to_string()).unwrap();
+    let mut sender = Sender::open(&sender_config, &root.path().join("sender-state")).unwrap();
+    let trusted_peer = sender.publish(&source).unwrap().peer;
+    let listener = sender.bind().unwrap();
+    let mut receiver: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&receiver_config).unwrap()).unwrap();
+    receiver["address"] = listener.local_addr().unwrap().to_string().into();
+    std::fs::write(&receiver_config, receiver.to_string()).unwrap();
+
+    let pull_once = |sender: &mut Sender| {
+        std::thread::scope(|threads| {
+            let server = threads.spawn(|| {
+                let (socket, _) = listener.accept().unwrap();
+                sender.serve(socket).unwrap();
+            });
+            let result = pull_from_config(&receiver_config, &state, &destination);
+            server.join().unwrap();
+            result.unwrap();
+        });
+    };
+    pull_once(&mut sender);
+    assert_eq!(
+        std::fs::read(destination.join("song.tja")).unwrap(),
+        b"deleted after first pull"
+    );
+    let share = receiver["share"].as_str().unwrap();
+    let destination_id: String = p2p_sync_core::sha256(
+        destination
+            .canonicalize()
+            .unwrap()
+            .as_os_str()
+            .as_encoded_bytes(),
+    )
+    .iter()
+    .map(|byte| format!("{byte:02x}"))
+    .collect();
+    let database = state
+        .join(share)
+        .join("1")
+        .join(&destination_id)
+        .join("sync.db");
+    let witness = state.join(share).join("witness/1").join(&destination_id);
+    let old_database = root.path().join("old-receiver.db");
+    let old_witness = root.path().join("old-receiver-witness");
+    std::fs::copy(&database, &old_database).unwrap();
+    std::fs::create_dir(&old_witness).unwrap();
+    for entry in std::fs::read_dir(&witness).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), old_witness.join(entry.file_name())).unwrap();
+    }
+
+    sender.revise("song.tja", None).unwrap();
+    pull_once(&mut sender);
+    assert!(!destination.join("song.tja").exists());
+    let anchor = setup.join("receiver-anchor.bin");
+    sender.export_recovery_anchor(&anchor).unwrap();
+    let peer: String = trusted_peer
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    receiver["recovery_anchor"] = serde_json::json!({"file":"../receiver-anchor.bin", "peer":peer});
+    std::fs::write(&receiver_config, receiver.to_string()).unwrap();
+    pull_once(&mut sender);
+
+    let reader_key = p2p_sync_core::auth::PeerSigningKey::from_bytes(
+        &std::fs::read(setup.join("receiver/event-key.bin"))
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    );
+    let reader_peer: String = reader_key
+        .verifying_key()
+        .to_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    receiver["recovery_anchor"]["peer"] = reader_peer.into();
+    std::fs::write(&receiver_config, receiver.to_string()).unwrap();
+    assert!(matches!(
+        pull_from_config(&receiver_config, &state, &destination),
+        Err(HostError::Configuration)
+    ));
+    receiver["recovery_anchor"]["peer"] = peer.into();
+    let internal_anchor = state.join("internal-anchor.bin");
+    std::fs::copy(&anchor, &internal_anchor).unwrap();
+    receiver["recovery_anchor"]["file"] = internal_anchor.to_string_lossy().into_owned().into();
+    std::fs::write(&receiver_config, receiver.to_string()).unwrap();
+    assert!(matches!(
+        pull_from_config(&receiver_config, &state, &destination),
+        Err(HostError::Configuration)
+    ));
+    receiver["recovery_anchor"]["file"] = "../receiver-anchor.bin".into();
+    std::fs::write(&receiver_config, receiver.to_string()).unwrap();
+
+    std::fs::copy(&old_database, &database).unwrap();
+    std::fs::remove_dir_all(&witness).unwrap();
+    std::fs::rename(&old_witness, &witness).unwrap();
+    assert!(matches!(
+        pull_from_config(&receiver_config, &state, &destination),
+        Err(HostError::Recovery(RecoveryError::Behind(_)))
+    ));
+    let [config_bytes, state_bytes, destination_bytes] =
+        [&receiver_config, &state, &destination].map(|path| path.to_str().unwrap().as_bytes());
+    let mut report = p2p_sync_core::host::PullSummaryV3::default();
+    assert_eq!(
+        unsafe {
+            p2p_sync_core::p2p_sync_pull_v6(
+                config_bytes.as_ptr(),
+                config_bytes.len(),
+                state_bytes.as_ptr(),
+                state_bytes.len(),
+                destination_bytes.as_ptr(),
+                destination_bytes.len(),
+                &mut report,
+                None,
+                std::ptr::null_mut(),
+                None,
+            )
+        },
+        8
+    );
+    assert!(!destination.join("song.tja").exists());
 }
 
 #[test]
