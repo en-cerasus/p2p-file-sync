@@ -161,6 +161,14 @@ pub struct Sender {
 
 impl Sender {
     pub fn open(configuration: &Path, state_root: &Path) -> Result<Self, HostError> {
+        Self::open_internal(configuration, state_root, false)
+    }
+
+    fn open_internal(
+        configuration: &Path,
+        state_root: &Path,
+        recovery_only: bool,
+    ) -> Result<Self, HostError> {
         let config: SenderConfig =
             serde_json::from_slice(&read_bounded(configuration, MAX_CONFIG_BYTES)?)
                 .map_err(|_| HostError::Configuration)?;
@@ -220,6 +228,9 @@ impl Sender {
                 share_root.join("witness").join(config.generation.to_string()).join("sender"),
             )
             .map_err(HostError::Store)?;
+        if recovery_only && config.recovery_anchor.is_none() {
+            return Err(HostError::Configuration);
+        }
         if let Some(anchor) = &config.recovery_anchor {
             let trusted_peer = hex::<32>(&anchor.peer)?;
             if trusted_peer == signer.verifying_key().to_bytes() {
@@ -230,8 +241,11 @@ impl Sender {
                 return Err(HostError::Configuration);
             }
             let wire = read_bounded(&path, MAX_RECOVERY_ANCHOR_BYTES)?;
-            recovery::verify_anchor(&roster, &mut store, &wire, trusted_peer)
-                .map_err(HostError::Recovery)?;
+            match recovery::verify_anchor(&roster, &mut store, &wire, trusted_peer) {
+                Ok(()) | Err(RecoveryError::Behind(_)) if recovery_only => {}
+                Ok(()) => {}
+                Err(error) => return Err(HostError::Recovery(error)),
+            }
         }
         let server = Server::with_baseline(
             roots,
@@ -270,6 +284,9 @@ impl Sender {
             baseline_digest,
             generation_marker,
         };
+        if recovery_only {
+            return Ok(sender);
+        }
         activate_generation(
             &sender.generation_marker,
             config.generation,
@@ -278,6 +295,21 @@ impl Sender {
         let _lock = sender.lock_state()?;
         sender.sweep_archives()?;
         Ok(sender)
+    }
+
+    /// Import missing signed history before returning to normal startup.
+    /// No source scan, publication, serving, or archive sweep runs while the
+    /// local database remains behind the trusted anchor.
+    pub fn recover_from_anchor(
+        configuration: &Path,
+        state_root: &Path,
+        peers: &Path,
+    ) -> Result<usize, HostError> {
+        let mut sender = Self::open_internal(configuration, state_root, true)?;
+        let added = sender.catch_up(peers)?;
+        drop(sender);
+        Self::open(configuration, state_root)?;
+        Ok(added)
     }
 
     fn lock_state(&self) -> Result<File, HostError> {
@@ -322,6 +354,55 @@ impl Sender {
         let parent = output.parent().ok_or(HostError::Configuration)?;
         let name = output.file_name().and_then(|name| name.to_str()).ok_or(HostError::Configuration)?;
         write_bundle_file(parent, name, &wire)
+    }
+
+    /// Fetch a signed anchor from the manually pinned primary peer and save
+    /// it outside this device's state root without replacing an older file.
+    pub fn fetch_recovery_anchor(
+        &self,
+        configuration: &Path,
+        trusted_peer: PeerId,
+        output: &Path,
+    ) -> Result<(), HostError> {
+        self.check_generation()?;
+        if trusted_peer == self.signer.verifying_key().to_bytes()
+            || !self.roster.membership().members.contains(&trusted_peer)
+        {
+            return Err(HostError::Configuration);
+        }
+        let config: Config = serde_json::from_slice(&read_bounded(configuration, MAX_CONFIG_BYTES)?)
+            .map_err(|_| HostError::Configuration)?;
+        let peer = config.endpoints()?.into_iter().next().ok_or(HostError::Configuration)?;
+        let roster = build_roster(&config.share, config.generation, config.members)?;
+        if roster.membership() != self.roster.membership() {
+            return Err(HostError::Configuration);
+        }
+        let (roots, credentials) = read_credentials(
+            configuration,
+            &config.ca_der,
+            &config.certificate_der,
+            &config.private_key_der,
+        )?;
+        let client = Client::with_baseline(
+            roots,
+            credentials,
+            roster.membership().share,
+            roster.membership().generation,
+            self.baseline_digest,
+        ).map_err(HostError::Tls)?;
+        let parent = output.parent().ok_or(HostError::Configuration)?;
+        let parent = fs::canonicalize(parent).map_err(HostError::Io)?;
+        let state_root = self.generation_marker.parent()
+            .and_then(Path::parent).ok_or(HostError::Configuration)?;
+        let state_root = fs::canonicalize(state_root).map_err(HostError::Io)?;
+        if parent.starts_with(state_root) {
+            return Err(HostError::Configuration);
+        }
+        let name = output.file_name().and_then(|name| name.to_str()).ok_or(HostError::Configuration)?;
+        let wire = direct::fetch_recovery_anchor(
+            &client, &peer, Duration::from_secs(15), &self.roster, trusted_peer,
+        ).map_err(HostError::Direct)?;
+        write_bundle_file(&parent, name, &wire)
     }
 
     pub fn publish(&mut self, source: &Path) -> Result<EventId, HostError> {
@@ -931,7 +1012,7 @@ impl Sender {
                 Err(std::fs::TryLockError::Error(error)) => return Err(HostError::Io(error)),
             }
         }
-        direct::serve(
+        direct::serve_signed(
             &self.server,
             socket,
             &self.client_pins,
@@ -939,6 +1020,7 @@ impl Sender {
             &mut self.store,
             &self.roster,
             &self.completed,
+            &self.signer,
         )
         .map_err(HostError::Direct)
     }

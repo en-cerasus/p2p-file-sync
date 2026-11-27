@@ -8,6 +8,7 @@ use crate::{
     },
     chunks::{Manifest, CHUNK_BYTES, MAX_CHUNKS},
     replica::{ContentHash, EntryKind, EventId, VersionVector},
+    recovery::{self, RecoveryError},
     store::Store,
 };
 
@@ -25,6 +26,9 @@ const FINISHED: u8 = 10;
 const CONTENT_UNAVAILABLE: u8 = 11;
 const GET_CONFIRMATIONS: u8 = 12;
 const CONFIRMATIONS: u8 = 13;
+const GET_RECOVERY_ANCHOR: u8 = 14;
+const RECOVERY_ANCHOR: u8 = 15;
+const MAX_RECOVERY_ANCHOR_FRAME: usize = 1024 * 1024 + 256;
 const MAX_CONFIRMATION_FRAME: usize = 320;
 const CONFIRMATION_PAGE: usize = 128;
 const MAX_CONFIRMATIONS_FRAME: usize = 8 + CONFIRMATION_PAGE * (4 + MAX_CONFIRMATION_FRAME);
@@ -37,6 +41,7 @@ const MAX_PAGE_FRAME: usize = MAX_PAGE_BYTES + MAX_PAGE_EVENTS * 4 + 1;
 pub enum WireError {
     Io(io::Error),
     Catchup(CatchupError),
+    Recovery(RecoveryError),
     InvalidFrame,
     NoProgress,
     UnavailableContent,
@@ -99,6 +104,20 @@ pub fn pull_page(
         return Err(WireError::NoProgress);
     }
     Ok((report, has_more))
+}
+
+/// Fetch a signed history frontier from the configured peer. The caller
+/// chooses the expected signing key from trusted configuration and decides
+/// where to keep the returned bytes outside the peer's restorable state.
+pub fn pull_recovery_anchor(
+    stream: &mut (impl Read + Write),
+    roster: &Roster,
+    trusted_peer: crate::replica::PeerId,
+) -> Result<Vec<u8>, WireError> {
+    write_frame(stream, GET_RECOVERY_ANCHOR, &[])?;
+    let wire = read_frame(stream, RECOVERY_ANCHOR, MAX_RECOVERY_ANCHOR_FRAME)?;
+    recovery::authenticate_anchor(roster, &wire, trusted_peer).map_err(WireError::Recovery)?;
+    Ok(wire)
 }
 
 /// Serve metadata for a version that the caller has authorized for this
@@ -236,11 +255,31 @@ impl ShareSession {
         completed: &BlobStore,
         roster: &Roster,
     ) -> Result<SessionProgress, WireError> {
+        self.serve_next_signed(stream, store, completed, roster, None)
+    }
+
+    pub fn serve_next_signed(
+        &mut self,
+        stream: &mut (impl Read + Write),
+        store: &mut Store,
+        completed: &BlobStore,
+        roster: &Roster,
+        signer: Option<&crate::auth::PeerSigningKey>,
+    ) -> Result<SessionProgress, WireError> {
         if store.membership() != roster.membership() {
             return Err(CatchupError::Authentication(crate::auth::AuthError::WrongScope).into());
         }
         let (kind, length) = read_header(stream)?;
         match kind {
+            GET_RECOVERY_ANCHOR if length == 0 => {
+                let signer = signer.ok_or(WireError::InvalidFrame)?;
+                let wire = recovery::sign_anchor(roster, store, signer)
+                    .map_err(WireError::Recovery)?;
+                if wire.len() > MAX_RECOVERY_ANCHOR_FRAME {
+                    return Err(WireError::InvalidFrame);
+                }
+                write_frame(stream, RECOVERY_ANCHOR, &wire)?;
+            }
             PULL => {
                 let body = read_body(stream, length, MAX_FRONTIER_PEERS * FRONTIER_ENTRY_BYTES)?;
                 write_page(stream, store, &body)?;

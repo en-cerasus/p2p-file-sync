@@ -13,13 +13,14 @@ use crate::{
     local_target::{open_root, NewFileTarget},
     materialize::FileTarget,
     projection::Projection,
-    replica::{Change, EntryKind, EventId, ObjectId, Replica},
+    replica::{Change, EntryKind, EventId, ObjectId, PeerId, Replica},
     retention::{Confirmation, PeerState},
     store::Store,
     sync::{sync_cancellable, sync_serving_cache, Destination, FileResult, SyncError, SyncReport},
     tls::{CertificatePin, Client, Server, TlsError},
     wire::{
-        exchange_confirmations, finish_session, send_confirmation, SessionProgress, ShareSession,
+        exchange_confirmations, finish_session, pull_recovery_anchor, send_confirmation,
+        SessionProgress, ShareSession,
         WireError,
     },
 };
@@ -209,6 +210,21 @@ fn connect(
         .map_err(DirectError::Tls)
 }
 
+/// Fetch an authenticated recovery anchor without changing the local store.
+pub fn fetch_recovery_anchor(
+    client: &Client,
+    peer: &PeerEndpoint,
+    timeout: Duration,
+    roster: &Roster,
+    trusted_peer: PeerId,
+) -> Result<Vec<u8>, DirectError> {
+    let mut connection = connect(client, peer, timeout)?;
+    let anchor = pull_recovery_anchor(&mut connection, roster, trusted_peer)
+        .map_err(DirectError::Wire)?;
+    finish_session(&mut connection).map_err(DirectError::Wire)?;
+    Ok(anchor)
+}
+
 fn confirm_applied(
     connection: &mut (impl io::Read + io::Write),
     store: &mut Store,
@@ -370,6 +386,21 @@ pub fn serve(
     serve_over_stream(server, socket, peers, store, roster, completed)
 }
 
+/// Host-owned serving path that can also answer signed recovery requests.
+pub fn serve_signed(
+    server: &Server,
+    socket: TcpStream,
+    peers: &[CertificatePin],
+    timeout: Duration,
+    store: &mut Store,
+    roster: &Roster,
+    completed: &BlobStore,
+    signer: &PeerSigningKey,
+) -> Result<(), DirectError> {
+    configure(&socket, timeout).map_err(DirectError::Socket)?;
+    serve_over_stream_signed(server, socket, peers, store, roster, completed, Some(signer))
+}
+
 /// Serve a supplied byte stream with the same TLS peer checks as TCP.
 pub fn serve_over_stream(
     server: &Server,
@@ -379,12 +410,24 @@ pub fn serve_over_stream(
     roster: &Roster,
     completed: &BlobStore,
 ) -> Result<(), DirectError> {
+    serve_over_stream_signed(server, stream, peers, store, roster, completed, None)
+}
+
+fn serve_over_stream_signed(
+    server: &Server,
+    stream: impl io::Read + io::Write,
+    peers: &[CertificatePin],
+    store: &mut Store,
+    roster: &Roster,
+    completed: &BlobStore,
+    signer: Option<&PeerSigningKey>,
+) -> Result<(), DirectError> {
     let mut connection = server
         .accept_registered(stream, peers)
         .map_err(DirectError::Tls)?;
     let mut session = ShareSession::default();
     while session
-        .serve_next(&mut connection, store, completed, roster)
+        .serve_next_signed(&mut connection, store, completed, roster, signer)
         .map_err(DirectError::Wire)?
         == SessionProgress::Continue
     {}

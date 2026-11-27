@@ -88,24 +88,7 @@ pub fn verify_anchor(
     if store.membership() != roster.membership() {
         return Err(RecoveryError::WrongScope);
     }
-    let (author, payload) = roster.verify_recovery_payload(wire)?;
-    if *author != trusted_peer {
-        return Err(RecoveryError::UntrustedSigner);
-    }
-    let anchor: Anchor = decode(payload).map_err(|_| RecoveryError::InvalidAnchor)?;
-    if encode(&anchor).map_err(|_| RecoveryError::InvalidAnchor)? != payload {
-        return Err(RecoveryError::InvalidAnchor);
-    }
-    let mut previous = None;
-    for prefix in &anchor.prefixes {
-        if prefix.sequence == 0
-            || !roster.membership().members.contains(&prefix.peer)
-            || previous.is_some_and(|peer| peer >= prefix.peer)
-        {
-            return Err(RecoveryError::InvalidAnchor);
-        }
-        previous = Some(prefix.peer);
-    }
+    let anchor = parse_signed_anchor(roster, wire, trusted_peer)?;
     store.refresh()?;
     for prefix in anchor.prefixes {
         let id = EventId {
@@ -127,6 +110,42 @@ pub fn verify_anchor(
         }
     }
     Ok(())
+}
+
+/// Authenticate an anchor received over a peer connection before storing or
+/// forwarding it. This does not claim the local history has caught up.
+pub fn authenticate_anchor(
+    roster: &Roster,
+    wire: &[u8],
+    trusted_peer: PeerId,
+) -> Result<(), RecoveryError> {
+    parse_signed_anchor(roster, wire, trusted_peer).map(|_| ())
+}
+
+fn parse_signed_anchor(
+    roster: &Roster,
+    wire: &[u8],
+    trusted_peer: PeerId,
+) -> Result<Anchor, RecoveryError> {
+    let (author, payload) = roster.verify_recovery_payload(wire)?;
+    if *author != trusted_peer {
+        return Err(RecoveryError::UntrustedSigner);
+    }
+    let anchor: Anchor = decode(payload).map_err(|_| RecoveryError::InvalidAnchor)?;
+    if encode(&anchor).map_err(|_| RecoveryError::InvalidAnchor)? != payload {
+        return Err(RecoveryError::InvalidAnchor);
+    }
+    let mut previous = None;
+    for prefix in &anchor.prefixes {
+        if prefix.sequence == 0
+            || !roster.membership().members.contains(&prefix.peer)
+            || previous.is_some_and(|peer| peer >= prefix.peer)
+        {
+            return Err(RecoveryError::InvalidAnchor);
+        }
+        previous = Some(prefix.peer);
+    }
+    Ok(anchor)
 }
 
 fn prefix_digest(
