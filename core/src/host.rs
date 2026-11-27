@@ -544,6 +544,18 @@ impl Sender {
         configuration: &Path,
         peers: &Path,
     ) -> Result<usize, HostError> {
+        self.refresh_recovery_anchor_cancellable(configuration, peers, &|| false)
+    }
+
+    fn refresh_recovery_anchor_cancellable(
+        &mut self,
+        configuration: &Path,
+        peers: &Path,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<usize, HostError> {
+        if cancelled() {
+            return Err(HostError::Direct(DirectError::Cancelled));
+        }
         let config: SenderConfig = serde_json::from_slice(&read_bounded(configuration, MAX_CONFIG_BYTES)?)
             .map_err(|_| HostError::Configuration)?;
         let roster = build_roster(&config.share, config.generation, config.members)?;
@@ -560,7 +572,10 @@ impl Sender {
             return Err(HostError::Configuration);
         }
         let candidate = self.request_recovery_anchor(peers, trusted_peer)?;
-        let added = self.catch_up(peers)?;
+        let added = self.catch_up_cancellable(peers, cancelled)?;
+        if cancelled() {
+            return Err(HostError::Direct(DirectError::Cancelled));
+        }
         let _lock = self.lock_state()?;
         let previous = read_bounded(&path, MAX_RECOVERY_ANCHOR_BYTES)?;
         recovery::verify_anchor_advance(
@@ -568,6 +583,31 @@ impl Sender {
         ).map_err(HostError::Recovery)?;
         replace_bundle_file(&path, &candidate)?;
         Ok(added)
+    }
+
+    /// Use a registered external anchor whenever a writer imports peer history.
+    /// The anchor is advanced only after the old and new signatures both match.
+    pub fn catch_up_with_anchor_cancellable(
+        &mut self,
+        configuration: &Path,
+        peers: &Path,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<usize, HostError> {
+        let config: SenderConfig = serde_json::from_slice(&read_bounded(configuration, MAX_CONFIG_BYTES)?)
+            .map_err(|_| HostError::Configuration)?;
+        if config.recovery_anchor.is_some() {
+            self.refresh_recovery_anchor_cancellable(configuration, peers, cancelled)
+        } else {
+            self.catch_up_cancellable(peers, cancelled)
+        }
+    }
+
+    pub fn catch_up_with_anchor(
+        &mut self,
+        configuration: &Path,
+        peers: &Path,
+    ) -> Result<usize, HostError> {
+        self.catch_up_with_anchor_cancellable(configuration, peers, &|| false)
     }
 
     fn request_recovery_anchor(

@@ -274,7 +274,7 @@ fn run() -> Result<(), String> {
     }
     if mode == Some("catch-up") {
         let added = sender
-            .catch_up(Path::new(&args[3]))
+            .catch_up_with_anchor(Path::new(&args[1]), Path::new(&args[3]))
             .map_err(|error| format!("Could not synchronize serving cache: {error:?}"))?;
         println!("Imported {added} event(s).");
         return Ok(());
@@ -403,6 +403,7 @@ fn run() -> Result<(), String> {
         .bind()
         .map_err(|error| format!("Could not bind listener: {error:?}"))?;
     if let Some((mut worker, source, interval)) = polling {
+        let writer_config = Path::new(&args[1]).to_owned();
         thread::Builder::new()
             .name("share-refresh".into())
             .spawn(move || {
@@ -416,7 +417,7 @@ fn run() -> Result<(), String> {
                             .and_then(|root| worker.refresh_tree(&root))
                             .map(|_| ()),
                         PollSource::Peer { config, local } => {
-                            if let Err(error) = worker.catch_up(config) {
+                            if let Err(error) = worker.catch_up_with_anchor(&writer_config, config) {
                                 eprintln!("Peer catch-up failed: {error:?}");
                             }
                             local

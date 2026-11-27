@@ -395,6 +395,31 @@ fn sender_registers_first_anchor_only_after_catching_up() {
     assert!(matches!(second.register_recovery_anchor(
         &second_config, &direct_config, trusted, &setup.join("another-anchor.bin")),
         Err(HostError::Configuration)));
+    let later = root.path().join("writer-later.tja");
+    std::fs::write(&later, b"new signed event").unwrap();
+    first.publish(&later).unwrap();
+    let old_anchor = std::fs::read(&anchor).unwrap();
+    extern "C" fn keep_running(_: *mut std::ffi::c_void) -> u8 { 0 }
+    std::thread::scope(|threads| {
+        let server = threads.spawn(|| {
+            for _ in 0..2 {
+                let (socket, _) = listener.accept().unwrap();
+                first.serve(socket).unwrap();
+            }
+        });
+        let [config, state, peers] = [&second_config, &second_state, &direct_config]
+            .map(|path| path.to_str().unwrap().as_bytes());
+        let mut added = 0;
+        assert_eq!(unsafe { p2p_sync_core::p2p_sync_writer_catch_up_v2(
+            config.as_ptr(), config.len(), state.as_ptr(), state.len(),
+            peers.as_ptr(), peers.len(), &mut added,
+            Some(keep_running), std::ptr::null_mut(),
+        ) }, 0);
+        assert_eq!(added, 1);
+        server.join().unwrap();
+    });
+    assert_ne!(std::fs::read(&anchor).unwrap(), old_anchor);
+    assert!(Sender::open(&second_config, &second_state).is_ok());
 }
 
 #[test]

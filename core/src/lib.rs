@@ -985,7 +985,7 @@ unsafe fn writer_catch_up(
         }
         let mut writer = host::Sender::open(config, state).map_err(host_error_code)?;
         writer
-            .catch_up_cancellable(std::path::Path::new(peers), &cancelled)
+            .catch_up_with_anchor_cancellable(config, std::path::Path::new(peers), &cancelled)
             .map_err(host_error_code)
     }) {
         Ok(Ok(count)) => {
