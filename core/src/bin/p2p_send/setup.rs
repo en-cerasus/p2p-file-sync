@@ -70,6 +70,7 @@ pub fn create(
     let mut servers = Vec::new();
     let mut endpoints = Vec::new();
     let mut client_pins = Vec::new();
+    let mut client_identities = serde_json::Map::new();
     for index in 0..writers {
         let directory = output.join(if index == 0 {
             "sender".into()
@@ -94,6 +95,7 @@ pub fn create(
         write_new(&directory.join("private-key.der"), &key.serialize_der()).map_err(write_error)?;
         let pin = hex(&sha256(certificate.der().as_ref()));
         let event_peer = write_event_key(&directory, "writer", &mut members, write_error)?;
+        client_identities.insert(event_peer.clone(), pin.clone().into());
         let mut address = endpoint;
         address.set_port(endpoint.port() + index);
         endpoints.push(json!({
@@ -103,7 +105,7 @@ pub fn create(
         }));
         let mut listen = bind;
         listen.set_port(bind.port() + index);
-        servers.push((directory.clone(), listen, pin.clone()));
+        servers.push((directory.clone(), listen, pin.clone(), event_peer));
         client_pins.push(pin);
     }
 
@@ -138,6 +140,7 @@ pub fn create(
         let pin = hex(&sha256(client_cert.der().as_ref()));
         client_pins.push(pin.clone());
         let event_peer = write_event_key(&receiver, "reader", &mut members, write_error)?;
+        client_identities.insert(event_peer.clone(), pin.clone().into());
         let mut listen = bind;
         listen.set_port(bind.port() + writers + index as u16 - 1);
         let mut address = endpoint;
@@ -147,7 +150,7 @@ pub fn create(
             "event_peer": event_peer,
             "connect_timeout_ms": 1500,
         }));
-        clients.push((receiver, listen, pin));
+        clients.push((receiver, listen, pin, event_peer));
     }
     let direct_config = |peers: &[serde_json::Value], reader: bool| {
         let first = &peers[0];
@@ -166,7 +169,7 @@ pub fn create(
         }
         client
     };
-    for (index, (receiver, listen, pin)) in clients.into_iter().enumerate() {
+    for (index, (receiver, listen, pin, own_peer)) in clients.into_iter().enumerate() {
         let peers: Vec<_> = endpoints
             .iter()
             .chain(
@@ -182,20 +185,26 @@ pub fn create(
         write_new(&receiver.join("direct.json"), client.to_string().as_bytes())
             .map_err(write_error)?;
         let pins: Vec<_> = client_pins.iter().filter(|peer| **peer != pin).collect();
+        let identities: serde_json::Map<_, _> = client_identities.iter()
+            .filter(|(peer, _)| **peer != own_peer)
+            .map(|(peer, pin)| (peer.clone(), pin.clone())).collect();
         let server = json!({
             "share": share, "generation": 1, "members": members,
-            "bind": listen.to_string(), "client_pins": pins,
+            "bind": listen.to_string(), "client_pins": pins, "client_identities": identities,
             "ca_der": "ca.der", "certificate_der": "certificate.der",
             "private_key_der": "private-key.der", "event_key": "event-key.bin",
         });
         write_new(&receiver.join("server.json"), server.to_string().as_bytes())
             .map_err(write_error)?;
     }
-    for (index, (directory, listen, pin)) in servers.into_iter().enumerate() {
+    for (index, (directory, listen, pin, own_peer)) in servers.into_iter().enumerate() {
         let pins: Vec<_> = client_pins.iter().filter(|peer| **peer != pin).collect();
+        let identities: serde_json::Map<_, _> = client_identities.iter()
+            .filter(|(peer, _)| **peer != own_peer)
+            .map(|(peer, pin)| (peer.clone(), pin.clone())).collect();
         let server = json!({
             "share": share, "generation": 1, "members": members,
-            "bind": listen.to_string(), "client_pins": pins,
+            "bind": listen.to_string(), "client_pins": pins, "client_identities": identities,
             "ca_der": "ca.der", "certificate_der": "certificate.der",
             "private_key_der": "private-key.der", "event_key": "event-key.bin",
         });

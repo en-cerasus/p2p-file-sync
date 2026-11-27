@@ -12,6 +12,7 @@ const DOMAIN: &[u8] = b"p2p-file-sync/event/v1\0";
 const CONFIRMATION_DOMAIN: &[u8] = b"p2p-file-sync/confirmation/v1\0";
 const RECOVERY_DOMAIN: &[u8] = b"p2p-file-sync/recovery-anchor/v1\0";
 const RECOVERY_RESPONSE_DOMAIN: &[u8] = b"p2p-file-sync/recovery-response/v1\0";
+const MEMBER_RESPONSE_DOMAIN: &[u8] = b"p2p-file-sync/member-response/v1\0";
 const HEADER_BYTES: usize = 16 + 8 + 32;
 const SIGNATURE_BYTES: usize = 64;
 const MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
@@ -193,6 +194,29 @@ impl Roster {
         Ok(&payload[32..])
     }
 
+    pub(crate) fn sign_member_response(
+        &self,
+        key: &SigningKey,
+        challenge: &[u8; 32],
+    ) -> Result<Vec<u8>, AuthError> {
+        let author = key.verifying_key().to_bytes();
+        self.check_member(&author)?;
+        Ok(self.sign_payload(MEMBER_RESPONSE_DOMAIN, key, &author, challenge))
+    }
+
+    pub(crate) fn verify_member_response(
+        &self,
+        wire: &[u8],
+        challenge: &[u8; 32],
+        expected: &PeerId,
+    ) -> Result<(), AuthError> {
+        let (author, payload) = self.verify_payload(MEMBER_RESPONSE_DOMAIN, wire, 32)?;
+        if author != expected || payload != challenge {
+            return Err(AuthError::InvalidFrame);
+        }
+        Ok(())
+    }
+
     pub(crate) fn check_writer(&self, author: &PeerId) -> Result<(), AuthError> {
         match self.roles.get(author) {
             Some(Role::Writer) => Ok(()),
@@ -273,5 +297,74 @@ mod recovery_response_tests {
         let mut tampered = response;
         *tampered.last_mut().unwrap() ^= 1;
         assert!(matches!(roster.verify_recovery_response(&tampered, &[1; 32], &peer), Err(AuthError::BadSignature)));
+    }
+}
+
+#[cfg(test)]
+mod member_response_tests {
+    use super::*;
+
+    #[test]
+    fn member_proof_rejects_old_identity_wrong_identity_and_replay() {
+        let allowed = SigningKey::from_bytes(&[41; 32]);
+        let other = SigningKey::from_bytes(&[42; 32]);
+        let revoked = SigningKey::from_bytes(&[43; 32]);
+        let revoked_writer = SigningKey::from_bytes(&[44; 32]);
+        let roster = Roster::new(
+            [9; 16],
+            2,
+            [
+                (allowed.verifying_key().to_bytes(), Role::Reader),
+                (other.verifying_key().to_bytes(), Role::Writer),
+            ]
+            .into(),
+        );
+        let challenge = [7; 32];
+        let proof = roster.sign_member_response(&allowed, &challenge).unwrap();
+        assert!(roster.verify_member_response(
+            &proof, &challenge, &allowed.verifying_key().to_bytes()
+        ).is_ok());
+        assert!(matches!(
+            roster.verify_member_response(&proof, &challenge, &other.verifying_key().to_bytes()),
+            Err(AuthError::InvalidFrame)
+        ));
+        assert!(matches!(
+            roster.verify_member_response(&proof, &[8; 32], &allowed.verifying_key().to_bytes()),
+            Err(AuthError::InvalidFrame)
+        ));
+        assert!(matches!(
+            roster.sign_member_response(&revoked, &challenge),
+            Err(AuthError::UnknownPeer)
+        ));
+        let stale_roster = Roster::new(
+            [9; 16], 2,
+            [(revoked.verifying_key().to_bytes(), Role::Reader)].into(),
+        );
+        let stale_proof = stale_roster.sign_member_response(&revoked, &challenge).unwrap();
+        assert!(matches!(
+            roster.verify_member_response(&stale_proof, &challenge, &revoked.verifying_key().to_bytes()),
+            Err(AuthError::UnknownPeer)
+        ));
+        let stale_writer_roster = Roster::new(
+            [9; 16], 2,
+            [(revoked_writer.verifying_key().to_bytes(), Role::Writer)].into(),
+        );
+        let stale_writer_proof = stale_writer_roster
+            .sign_member_response(&revoked_writer, &challenge).unwrap();
+        assert!(matches!(
+            roster.verify_member_response(
+                &stale_writer_proof, &challenge, &revoked_writer.verifying_key().to_bytes()
+            ),
+            Err(AuthError::UnknownPeer)
+        ));
+        let old = Roster::new(
+            [9; 16], 1,
+            [(allowed.verifying_key().to_bytes(), Role::Reader)].into(),
+        );
+        let old_proof = old.sign_member_response(&allowed, &challenge).unwrap();
+        assert!(matches!(
+            roster.verify_member_response(&old_proof, &challenge, &allowed.verifying_key().to_bytes()),
+            Err(AuthError::WrongScope)
+        ));
     }
 }

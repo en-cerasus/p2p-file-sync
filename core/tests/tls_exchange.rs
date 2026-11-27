@@ -1057,6 +1057,7 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
         serde_json::from_slice(&std::fs::read(&server_config).unwrap()).unwrap();
     let pin = legacy["client_pins"][0].clone();
     legacy.as_object_mut().unwrap().remove("client_pins");
+    legacy.as_object_mut().unwrap().remove("client_identities");
     legacy["client_pin"] = pin;
     std::fs::write(&server_config, legacy.to_string()).unwrap();
     assert!(Sender::open(&server_config, &server_state).is_ok());
@@ -1105,6 +1106,18 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
         .unwrap()
         .remove(&revoked_peer)
         .is_some());
+    let stale_config = setup.join("sender/stale-next.json");
+    let mut stale = settings.clone();
+    stale["generation"] = 2.into();
+    stale["members"] = legacy["members"].clone();
+    std::fs::write(&stale_config, stale.to_string()).unwrap();
+    assert!(matches!(
+        Sender::open(&stale_config, &server_state),
+        Err(p2p_sync_core::host::HostError::Configuration)
+    ));
+    let mut identities = settings["client_identities"].clone();
+    assert!(identities.as_object_mut().unwrap().remove(&revoked_peer).is_some());
+    legacy["client_identities"] = identities;
     std::fs::write(&next_config, legacy.to_string()).unwrap();
     let admin = path.join("admin-test.bin");
     std::fs::write(&admin, [47; 32]).unwrap();
@@ -1367,6 +1380,59 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
         std::fs::read(destination.join("after-migration.tja")).unwrap(),
         b"new generation"
     );
+}
+
+#[test]
+fn a_pinned_certificate_cannot_claim_another_current_member_identity() {
+    use p2p_sync_core::host::{pull_from_config, Sender};
+
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    let setup = root.join("setup");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
+        .arg("setup")
+        .arg(&setup)
+        .args(["127.0.0.1:8763", "127.0.0.1:8763", "2"])
+        .output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+
+    let server_config = setup.join("sender/server.json");
+    let mut server_json: serde_json::Value = serde_json::from_slice(&std::fs::read(&server_config).unwrap()).unwrap();
+    server_json["generation"] = 2.into();
+    server_json["bind"] = "127.0.0.1:0".into();
+    std::fs::write(&server_config, server_json.to_string()).unwrap();
+    let mut server = Sender::open(&server_config, &root.join("server-state")).unwrap();
+    let listener = server.bind().unwrap();
+
+    let receiver_config = setup.join("receiver-1/direct.json");
+    let mut receiver_json: serde_json::Value = serde_json::from_slice(&std::fs::read(&receiver_config).unwrap()).unwrap();
+    receiver_json["generation"] = 2.into();
+    receiver_json["address"] = listener.local_addr().unwrap().to_string().into();
+    receiver_json["event_key"] = "../receiver-2/event-key.bin".into();
+    receiver_json.as_object_mut().unwrap().remove("fallback_peers");
+    std::fs::write(&receiver_config, receiver_json.to_string()).unwrap();
+    let destination = root.join("destination");
+    std::fs::create_dir(&destination).unwrap();
+    std::thread::scope(|threads| {
+        let serving = threads.spawn(|| {
+            let result = server.serve(listener.accept().unwrap().0);
+            assert!(matches!(
+                result,
+                Err(p2p_sync_core::host::HostError::Direct(direct::DirectError::Wire(
+                    p2p_sync_core::wire::WireError::Authentication(
+                        p2p_sync_core::auth::AuthError::InvalidFrame
+                    )
+                )))
+            ));
+            server.serve(listener.accept().unwrap().0).unwrap();
+        });
+        assert!(pull_from_config(&receiver_config, &root.join("receiver-state"), &destination).is_err());
+        receiver_json["event_key"] = "event-key.bin".into();
+        std::fs::write(&receiver_config, receiver_json.to_string()).unwrap();
+        let report = pull_from_config(&receiver_config, &root.join("receiver-state"), &destination).unwrap();
+        assert_eq!(report.events_added, 0);
+        serving.join().unwrap();
+    });
 }
 
 #[test]

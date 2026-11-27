@@ -152,9 +152,17 @@ impl Server {
 
     pub fn accept_registered(
         &self,
-        mut stream: impl Read + Write,
+        stream: impl Read + Write,
         peers: &[CertificatePin],
     ) -> Result<impl Read + Write, TlsError> {
+        self.accept_registered_with_pin(stream, peers).map(|(stream, _)| stream)
+    }
+
+    pub fn accept_registered_with_pin(
+        &self,
+        mut stream: impl Read + Write,
+        peers: &[CertificatePin],
+    ) -> Result<(impl Read + Write, CertificatePin), TlsError> {
         let mut connection = ServerConnection::new(self.config.clone())?;
         while connection.is_handshaking() {
             connection
@@ -167,7 +175,11 @@ impl Server {
             connection.peer_certificates(),
             peers,
         )?;
-        Ok(StreamOwned::new(connection, stream))
+        let leaf = connection.peer_certificates()
+            .and_then(|chain| chain.first())
+            .ok_or(TlsError::MissingPeerCertificate)?;
+        let pin = certificate_pin(leaf);
+        Ok((StreamOwned::new(connection, stream), pin))
     }
 }
 

@@ -135,6 +135,7 @@ struct SenderConfig {
     bind: SocketAddr,
     client_pin: Option<String>,
     client_pins: Option<Vec<String>>,
+    client_identities: Option<BTreeMap<String, String>>,
     ca_der: PathBuf,
     certificate_der: PathBuf,
     private_key_der: PathBuf,
@@ -153,6 +154,7 @@ struct RecoveryAnchorConfig {
 pub struct Sender {
     address: SocketAddr,
     client_pins: Vec<CertificatePin>,
+    client_identity_peers: BTreeMap<CertificatePin, PeerId>,
     server: Server,
     roster: Roster,
     signer: PeerSigningKey,
@@ -215,6 +217,28 @@ impl Sender {
             .contains_key(&signer.verifying_key().to_bytes())
         {
             return Err(HostError::Configuration);
+        }
+        let mut client_identity_peers = BTreeMap::new();
+        if config.generation > 1 || config.client_identities.is_some() {
+            let identities = config.client_identities.as_ref().ok_or(HostError::Configuration)?;
+            if identities.len() != client_pins.len() {
+                return Err(HostError::Configuration);
+            }
+            let mut mapped_pins = BTreeSet::new();
+            for (peer, pin) in identities {
+                let peer = hex::<32>(peer)?;
+                let pin = hex::<32>(pin)?;
+                if peer == signer.verifying_key().to_bytes()
+                    || !roster.membership().members.contains(&peer)
+                    || !mapped_pins.insert(pin)
+                    || client_identity_peers.insert(pin, peer).is_some()
+                {
+                    return Err(HostError::Configuration);
+                }
+            }
+            if mapped_pins != client_pins.iter().copied().collect() {
+                return Err(HostError::Configuration);
+            }
         }
         let share_root = state_root.join(config.share.to_ascii_lowercase());
         let generation_marker = share_root.join("active-generation");
@@ -281,6 +305,7 @@ impl Sender {
         let mut sender = Self {
             address: config.bind,
             client_pins,
+            client_identity_peers,
             server,
             roster,
             signer,
@@ -496,7 +521,7 @@ impl Sender {
             self.baseline_digest,
         ).map_err(HostError::Tls)?;
         let wire = direct::fetch_recovery_anchor(
-            &client, &peer, Duration::from_secs(15), &self.roster, trusted_peer,
+            &client, &peer, Duration::from_secs(15), &self.roster, trusted_peer, &self.signer,
         ).map_err(HostError::Direct)?;
         Ok(wire)
     }
@@ -949,6 +974,7 @@ impl Sender {
                 Duration::from_secs(15),
                 &mut self.store,
                 &self.roster,
+                &self.signer,
                 &chunks,
                 &self.completed,
                 cancelled,
@@ -1118,6 +1144,7 @@ impl Sender {
             &self.server,
             socket,
             &self.client_pins,
+            &self.client_identity_peers,
             Duration::from_secs(15),
             &mut self.store,
             &self.roster,

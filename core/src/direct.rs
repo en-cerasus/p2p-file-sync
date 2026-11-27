@@ -21,7 +21,7 @@ use crate::{
     tls::{CertificatePin, Client, Server, TlsError},
     wire::{
         exchange_confirmations, finish_session, pull_recovery_anchor, send_confirmation,
-        SessionProgress, ShareSession,
+        challenge_member, prove_member, SessionProgress, ShareSession,
         WireError,
     },
 };
@@ -82,7 +82,7 @@ pub(crate) fn pull_with_reader(
         return Err(DirectError::Cancelled);
     }
     let stream = connect(client, peer, timeout)?;
-    pull_authenticated_stream(stream, store, roster, destination, reader, peer.event_peer, cancelled)
+    pull_authenticated_stream(stream, store, roster, destination, reader, reader, peer.event_peer, cancelled)
 }
 
 fn pull_authenticated_stream(
@@ -91,6 +91,7 @@ fn pull_authenticated_stream(
     roster: &Roster,
     destination: Destination<'_>,
     reader: Option<&PeerSigningKey>,
+    identity: Option<&PeerSigningKey>,
     remote_author: Option<PeerId>,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<SyncReport, DirectError> {
@@ -102,6 +103,10 @@ fn pull_authenticated_stream(
             inner: stream,
             cancelled,
         };
+        if roster.membership().generation > 1 {
+            prove_member(&mut connection, roster, identity.ok_or(DirectError::Wire(WireError::InvalidFrame))?)
+                .map_err(DirectError::Wire)?;
+        }
         if let Some(peer) = remote_author {
             let wire = pull_recovery_anchor(&mut connection, roster, peer)
                 .map_err(DirectError::Wire)?;
@@ -137,7 +142,24 @@ pub fn pull_over_stream(
 ) -> Result<SyncReport, DirectError> {
     let authenticated = client.connect(stream, peer.server_name.clone(), peer.certificate)
         .map_err(DirectError::Tls)?;
-    pull_authenticated_stream(authenticated, store, roster, destination, None, peer.event_peer, &|| false)
+    pull_authenticated_stream(authenticated, store, roster, destination, None, None, peer.event_peer, &|| false)
+}
+
+/// Stream transport variant for a registered writer or reader identity.
+/// Generation two and later require this key even when no file confirmation
+/// is emitted by this call.
+pub fn pull_over_stream_with_identity(
+    client: &Client,
+    stream: impl io::Read + io::Write,
+    peer: &PeerEndpoint,
+    store: &mut Store,
+    roster: &Roster,
+    destination: Destination<'_>,
+    identity: &PeerSigningKey,
+) -> Result<SyncReport, DirectError> {
+    let authenticated = client.connect(stream, peer.server_name.clone(), peer.certificate)
+        .map_err(DirectError::Tls)?;
+    pull_authenticated_stream(authenticated, store, roster, destination, None, Some(identity), peer.event_peer, &|| false)
 }
 
 struct CancellableStream<'a, S> {
@@ -182,6 +204,7 @@ pub(crate) fn pull_serving_cache_cancellable(
     timeout: Duration,
     store: &mut Store,
     roster: &Roster,
+    signer: &PeerSigningKey,
     chunks: &BlobStore,
     completed: &BlobStore,
     cancelled: &dyn Fn() -> bool,
@@ -194,6 +217,9 @@ pub(crate) fn pull_serving_cache_cancellable(
             inner: connect(client, peer, timeout)?,
             cancelled,
         };
+        if roster.membership().generation > 1 {
+            prove_member(&mut connection, roster, signer).map_err(DirectError::Wire)?;
+        }
         if let Some(peer) = peer.event_peer {
             let wire = pull_recovery_anchor(&mut connection, roster, peer)
                 .map_err(DirectError::Wire)?;
@@ -233,8 +259,12 @@ pub fn fetch_recovery_anchor(
     timeout: Duration,
     roster: &Roster,
     trusted_peer: PeerId,
+    signer: &PeerSigningKey,
 ) -> Result<Vec<u8>, DirectError> {
     let mut connection = connect(client, peer, timeout)?;
+    if roster.membership().generation > 1 {
+        prove_member(&mut connection, roster, signer).map_err(DirectError::Wire)?;
+    }
     let anchor = pull_recovery_anchor(&mut connection, roster, trusted_peer)
         .map_err(DirectError::Wire)?;
     finish_session(&mut connection).map_err(DirectError::Wire)?;
@@ -407,6 +437,7 @@ pub fn serve_signed(
     server: &Server,
     socket: TcpStream,
     peers: &[CertificatePin],
+    identities: &BTreeMap<CertificatePin, PeerId>,
     timeout: Duration,
     store: &mut Store,
     roster: &Roster,
@@ -414,7 +445,7 @@ pub fn serve_signed(
     signer: &PeerSigningKey,
 ) -> Result<(), DirectError> {
     configure(&socket, timeout).map_err(DirectError::Socket)?;
-    serve_over_stream_signed(server, socket, peers, store, roster, completed, Some(signer))
+    serve_over_stream_signed(server, socket, peers, Some(identities), store, roster, completed, Some(signer))
 }
 
 /// Serve a supplied byte stream with the same TLS peer checks as TCP.
@@ -426,21 +457,27 @@ pub fn serve_over_stream(
     roster: &Roster,
     completed: &BlobStore,
 ) -> Result<(), DirectError> {
-    serve_over_stream_signed(server, stream, peers, store, roster, completed, None)
+    serve_over_stream_signed(server, stream, peers, None, store, roster, completed, None)
 }
 
 fn serve_over_stream_signed(
     server: &Server,
     stream: impl io::Read + io::Write,
     peers: &[CertificatePin],
+    identities: Option<&BTreeMap<CertificatePin, PeerId>>,
     store: &mut Store,
     roster: &Roster,
     completed: &BlobStore,
     signer: Option<&PeerSigningKey>,
 ) -> Result<(), DirectError> {
-    let mut connection = server
-        .accept_registered(stream, peers)
+    let (mut connection, pin) = server
+        .accept_registered_with_pin(stream, peers)
         .map_err(DirectError::Tls)?;
+    if roster.membership().generation > 1 {
+        let expected = identities.and_then(|members| members.get(&pin))
+            .ok_or(DirectError::Wire(WireError::InvalidFrame))?;
+        challenge_member(&mut connection, roster, expected).map_err(DirectError::Wire)?;
+    }
     let mut session = ShareSession::default();
     while session
         .serve_next_signed(&mut connection, store, completed, roster, signer)

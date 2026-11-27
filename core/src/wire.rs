@@ -1,13 +1,13 @@
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
 use crate::{
-    auth::Roster,
+    auth::{AuthError, PeerSigningKey, Roster},
     blob::{Blob, BlobStore},
     catchup::{
         outgoing_page, receive_page, CatchupError, ReceiveReport, MAX_PAGE_BYTES, MAX_PAGE_EVENTS,
     },
     chunks::{Manifest, CHUNK_BYTES, MAX_CHUNKS},
-    replica::{ContentHash, EntryKind, EventId, VersionVector},
+    replica::{ContentHash, EntryKind, EventId, PeerId, VersionVector},
     recovery::{self, RecoveryError},
     store::Store,
 };
@@ -28,6 +28,8 @@ const GET_CONFIRMATIONS: u8 = 12;
 const CONFIRMATIONS: u8 = 13;
 const GET_RECOVERY_ANCHOR: u8 = 14;
 const RECOVERY_ANCHOR: u8 = 15;
+const MEMBER_CHALLENGE: u8 = 16;
+const MEMBER_RESPONSE: u8 = 17;
 const MAX_RECOVERY_ANCHOR_FRAME: usize = 1024 * 1024 + 512;
 const MAX_CONFIRMATION_FRAME: usize = 320;
 const CONFIRMATION_PAGE: usize = 128;
@@ -42,6 +44,7 @@ pub enum WireError {
     Io(io::Error),
     Catchup(CatchupError),
     Recovery(RecoveryError),
+    Authentication(AuthError),
     Random(getrandom::Error),
     InvalidFrame,
     NoProgress,
@@ -58,6 +61,33 @@ impl From<CatchupError> for WireError {
     fn from(value: CatchupError) -> Self {
         Self::Catchup(value)
     }
+}
+
+/// Bind the current TLS certificate pin to its configured member identity.
+/// No file or event request is served until this fresh challenge is signed.
+pub(crate) fn challenge_member(
+    stream: &mut (impl Read + Write),
+    roster: &Roster,
+    expected: &PeerId,
+) -> Result<(), WireError> {
+    let mut challenge = [0; 32];
+    getrandom::fill(&mut challenge).map_err(WireError::Random)?;
+    write_frame(stream, MEMBER_CHALLENGE, &challenge)?;
+    let response = read_frame(stream, MEMBER_RESPONSE, 256)?;
+    roster.verify_member_response(&response, &challenge, expected)
+        .map_err(WireError::Authentication)
+}
+
+pub(crate) fn prove_member(
+    stream: &mut (impl Read + Write),
+    roster: &Roster,
+    signer: &PeerSigningKey,
+) -> Result<(), WireError> {
+    let challenge: [u8; 32] = read_frame(stream, MEMBER_CHALLENGE, 32)?
+        .try_into().map_err(|_| WireError::InvalidFrame)?;
+    let response = roster.sign_member_response(signer, &challenge)
+        .map_err(WireError::Authentication)?;
+    write_frame(stream, MEMBER_RESPONSE, &response)
 }
 
 /// Runs over an already authenticated and encrypted stream. Connections
