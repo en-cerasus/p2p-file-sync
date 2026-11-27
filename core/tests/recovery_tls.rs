@@ -1,4 +1,4 @@
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 
 use p2p_sync_core::{
     direct::DirectError,
@@ -420,6 +420,18 @@ fn sender_registers_first_anchor_only_after_catching_up() {
     });
     assert_ne!(std::fs::read(&anchor).unwrap(), old_anchor);
     assert!(Sender::open(&second_config, &second_state).is_ok());
+    let mut serving = Sender::open(&second_config, &second_state).unwrap();
+    let future = root.path().join("writer-future.tja");
+    std::fs::write(&future, b"not yet imported").unwrap();
+    first.publish(&future).unwrap();
+    let future_anchor = setup.join("future-anchor.bin");
+    first.export_recovery_anchor(&future_anchor).unwrap();
+    std::fs::copy(&future_anchor, &anchor).unwrap();
+    let listener = serving.bind().unwrap();
+    let _client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (socket, _) = listener.accept().unwrap();
+    assert!(matches!(serving.serve(socket),
+        Err(HostError::Recovery(RecoveryError::Behind(_)))));
 }
 
 #[test]

@@ -188,6 +188,7 @@ pub struct Sender {
     baseline_digest: Option<[u8; 32]>,
     generation_marker: PathBuf,
     recovery_review_marker: PathBuf,
+    recovery_anchor: Option<(PathBuf, PeerId)>,
 }
 
 impl Sender {
@@ -285,6 +286,7 @@ impl Sender {
             return Err(HostError::Configuration);
         }
         let mut recovery_behind = false;
+        let mut recovery_anchor = None;
         if let Some(anchor) = &config.recovery_anchor {
             let trusted_peer = hex::<32>(&anchor.peer)?;
             if trusted_peer == signer.verifying_key().to_bytes() {
@@ -300,6 +302,7 @@ impl Sender {
                 Ok(()) => {}
                 Err(error) => return Err(HostError::Recovery(error)),
             }
+            recovery_anchor = Some((path, trusted_peer));
         }
         let server = Server::with_baseline(
             roots,
@@ -339,6 +342,7 @@ impl Sender {
             baseline_digest,
             generation_marker,
             recovery_review_marker: root.join("recovery-review-required"),
+            recovery_anchor,
         };
         if recovery_only {
             if recovery_behind {
@@ -1255,6 +1259,11 @@ impl Sender {
         // Another handle may have published while this listener was idle.
         // Read those commits before calculating the peer's event frontier.
         self.store.refresh().map_err(HostError::Store)?;
+        if let Some((path, trusted_peer)) = &self.recovery_anchor {
+            let wire = read_bounded(path, MAX_RECOVERY_ANCHOR_BYTES)?;
+            recovery::verify_anchor(&self.roster, &mut self.store, &wire, *trusted_peer)
+                .map_err(HostError::Recovery)?;
+        }
         {
             let lock = self.open_state_lock()?;
             // A concurrent outbound pull may be waiting for this peer to serve.
