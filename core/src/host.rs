@@ -1733,6 +1733,90 @@ pub fn recover_receiver_from_anchor(
     recover_receiver_from_anchor_cancellable(configuration, state_root, destination, &|| false)
 }
 
+/// Register a receiver's first external anchor from its pinned primary peer.
+/// The receiver must already hold the signed history covered by that anchor.
+pub fn register_receiver_recovery_anchor(
+    configuration: &Path,
+    state_root: &Path,
+    destination: &Path,
+    output: &Path,
+) -> Result<(), HostError> {
+    let original = read_bounded(configuration, MAX_CONFIG_BYTES)?;
+    let config: Config = serde_json::from_slice(&original)
+        .map_err(|_| HostError::Configuration)?;
+    if config.recovery_anchor.is_some() {
+        return Err(HostError::Configuration);
+    }
+    let peer = config.endpoints()?.into_iter().next().ok_or(HostError::Configuration)?;
+    let trusted_peer = peer.event_peer.ok_or(HostError::Configuration)?;
+    let roster = build_roster(&config.share, config.generation, config.members)?;
+    let directory = configuration.parent().ok_or(HostError::Configuration)?;
+    let event_key = config.event_key.as_ref().ok_or(HostError::Configuration)?;
+    let seed: [u8; 32] = read_bounded(&directory.join(event_key), 32)?
+        .try_into().map_err(|_| HostError::Configuration)?;
+    let reader = PeerSigningKey::from_bytes(&seed);
+    if !roster.is_reader(reader.verifying_key().as_bytes())
+        || reader.verifying_key().to_bytes() == trusted_peer
+    {
+        return Err(HostError::Configuration);
+    }
+    let destination = destination.canonicalize().map_err(HostError::Io)?;
+    if !destination.is_dir() {
+        return Err(HostError::Configuration);
+    }
+    let output_parent = output.parent().ok_or(HostError::Configuration)?
+        .canonicalize().map_err(HostError::Io)?;
+    let output_name = output.file_name().and_then(|name| name.to_str())
+        .ok_or(HostError::Configuration)?;
+    fs::create_dir_all(state_root).map_err(HostError::Io)?;
+    if output_parent.starts_with(state_root.canonicalize().map_err(HostError::Io)?)
+        || output_parent.starts_with(&destination)
+    {
+        return Err(HostError::Configuration);
+    }
+    let destination_id: String = crate::sha256(destination.as_os_str().as_encoded_bytes())
+        .iter().map(|byte| format!("{byte:02x}")).collect();
+    let share_root = state_root.join(config.share.to_ascii_lowercase());
+    let root = share_root.join(config.generation.to_string()).join(&destination_id);
+    let witness = share_root.join("witness").join(config.generation.to_string()).join(&destination_id);
+    fs::create_dir_all(&root).map_err(HostError::Io)?;
+    let completed = BlobStore::open(root.join("files")).map_err(HostError::Io)?;
+    let (mut store, baseline_digest) = open_host_store(
+        &root, &completed, &roster, directory, config.migration.as_ref(),
+    )?;
+    check_generation(&share_root.join("active-generation"), config.generation, baseline_digest, false)?;
+    store.enable_event_witness(witness).map_err(HostError::Store)?;
+    let (roots, credentials) = read_credentials(
+        configuration, &config.ca_der, &config.certificate_der, &config.private_key_der,
+    )?;
+    let client = Client::with_baseline(
+        roots, credentials, roster.membership().share,
+        roster.membership().generation, baseline_digest,
+    ).map_err(HostError::Tls)?;
+    let wire = direct::fetch_recovery_anchor(
+        &client, &peer, Duration::from_secs(15), &roster, trusted_peer, &reader,
+    ).map_err(HostError::Direct)?;
+    recovery::verify_anchor(&roster, &mut store, &wire, trusted_peer)
+        .map_err(HostError::Recovery)?;
+    if read_bounded(configuration, MAX_CONFIG_BYTES)? != original {
+        return Err(HostError::Configuration);
+    }
+    let output_path = output_parent.join(output_name);
+    let mut updated: serde_json::Value = serde_json::from_slice(&original)
+        .map_err(|_| HostError::Configuration)?;
+    updated.as_object_mut().ok_or(HostError::Configuration)?.insert(
+        "recovery_anchor".into(),
+        serde_json::json!({"file": output_path.to_str().ok_or(HostError::Configuration)?,
+                           "peer": trusted_peer.iter().map(|byte| format!("{byte:02x}")).collect::<String>()}),
+    );
+    let updated = serde_json::to_vec_pretty(&updated).map_err(|_| HostError::Configuration)?;
+    if updated.len() as u64 > MAX_CONFIG_BYTES {
+        return Err(HostError::Configuration);
+    }
+    write_bundle_file(&output_parent, output_name, &wire)?;
+    replace_bundle_file(configuration, &updated)
+}
+
 pub fn recover_receiver_from_anchor_cancellable(
     configuration: &Path,
     state_root: &Path,

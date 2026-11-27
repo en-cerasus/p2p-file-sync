@@ -393,6 +393,67 @@ fn sender_registers_first_anchor_only_after_catching_up() {
 }
 
 #[test]
+fn receiver_registers_pinned_anchor_only_after_catching_up() {
+    let root = tempfile::tempdir().unwrap();
+    let setup = root.path().join("setup");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
+        .arg("setup").arg(&setup)
+        .args(["127.0.0.1:8787", "127.0.0.1:8787", "1", "1"])
+        .output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let sender_config = setup.join("sender/server.json");
+    let receiver_config = setup.join("receiver/direct.json");
+    let mut sender_json: serde_json::Value = serde_json::from_slice(&std::fs::read(&sender_config).unwrap()).unwrap();
+    sender_json["bind"] = "127.0.0.1:0".into();
+    std::fs::write(&sender_config, sender_json.to_string()).unwrap();
+    let state = root.path().join("receiver-state");
+    let destination = root.path().join("destination");
+    std::fs::create_dir(&destination).unwrap();
+    let source = root.path().join("song.tja");
+    std::fs::write(&source, b"verified receiver content").unwrap();
+    let mut sender = Sender::open(&sender_config, &root.path().join("sender-state")).unwrap();
+    sender.publish(&source).unwrap();
+    let listener = sender.bind().unwrap();
+    let mut direct: serde_json::Value = serde_json::from_slice(&std::fs::read(&receiver_config).unwrap()).unwrap();
+    direct["address"] = listener.local_addr().unwrap().to_string().into();
+    std::fs::write(&receiver_config, direct.to_string()).unwrap();
+    let anchor = setup.join("receiver-registered-anchor.bin");
+    assert!(matches!(p2p_sync_core::host::register_receiver_recovery_anchor(
+        &receiver_config, &state, &destination, &destination.join("bad-anchor.bin")),
+        Err(HostError::Configuration)));
+    let original = std::fs::read(&receiver_config).unwrap();
+    std::thread::scope(|threads| {
+        let server = threads.spawn(|| {
+            for _ in 0..4 {
+                let (socket, _) = listener.accept().unwrap();
+                sender.serve(socket).unwrap();
+            }
+        });
+        let register = || std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
+            .arg("register-receiver-recovery-anchor")
+            .arg(&receiver_config).arg(&state).arg(&destination).arg(&anchor)
+            .output().unwrap();
+        let rejected = register();
+        assert!(!rejected.status.success());
+        assert_eq!(std::fs::read(&receiver_config).unwrap(), original);
+        assert!(!anchor.exists());
+        pull_from_config(&receiver_config, &state, &destination).unwrap();
+        assert_eq!(std::fs::read(destination.join("song.tja")).unwrap(), b"verified receiver content");
+        let registered = register();
+        assert!(registered.status.success(), "{}", String::from_utf8_lossy(&registered.stderr));
+        assert_eq!(std::fs::read(destination.join("song.tja")).unwrap(), b"verified receiver content");
+        pull_from_config(&receiver_config, &state, &destination).unwrap();
+        server.join().unwrap();
+    });
+    assert!(anchor.is_file());
+    let updated: serde_json::Value = serde_json::from_slice(&std::fs::read(&receiver_config).unwrap()).unwrap();
+    assert_eq!(updated["recovery_anchor"]["file"].as_str().unwrap(), anchor.canonicalize().unwrap().to_str().unwrap());
+    assert!(matches!(p2p_sync_core::host::register_receiver_recovery_anchor(
+        &receiver_config, &state, &destination, &setup.join("another-anchor.bin")),
+        Err(HostError::Configuration)));
+}
+
+#[test]
 fn receiver_rejects_a_peer_whose_own_signed_history_was_rolled_back() {
     let root = tempfile::tempdir().unwrap();
     let setup = root.path().join("setup");
