@@ -393,6 +393,43 @@ pub unsafe extern "C" fn p2p_sync_recover_receiver_v1(
     }
 }
 
+/// Refresh a pinned receiver anchor before iOS resumes pending file changes.
+/// This call never changes files in the destination directory.
+///
+/// # Safety
+/// Paths must be readable UTF-8 for the duration of the call. The cancellation
+/// callback must not unwind, and `context` must remain valid during the call.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_receiver_anchor_preflight_v1(
+    config: *const u8, config_len: usize,
+    state: *const u8, state_len: usize,
+    destination: *const u8, destination_len: usize,
+    cancellation: Option<CancellationCallback>,
+    context: *mut std::ffi::c_void,
+) -> i32 {
+    let paths = [
+        (config, config_len), (state, state_len), (destination, destination_len),
+    ];
+    let Some(paths) = paths.map(|(path, len)| unsafe { borrowed_text(path, len, 32_768) })
+        .into_iter().collect::<Option<Vec<_>>>() else {
+        return INVALID_ARGUMENT;
+    };
+    let stopped = || cancellation.is_some_and(|callback| callback(context) != 0);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        host::preflight_receiver_anchor_cancellable(
+            std::path::Path::new(paths[0]),
+            std::path::Path::new(paths[1]),
+            std::path::Path::new(paths[2]),
+            &stopped,
+        ).map_err(host_error_code)
+    }));
+    match result {
+        Ok(Ok(())) => OK,
+        Ok(Err(code)) => code,
+        Err(_) => 6,
+    }
+}
+
 /// Read a writer's current archive choices as a JSON array. Copy callback
 /// bytes before returning; this call must run off the UI thread.
 ///

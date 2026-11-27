@@ -107,6 +107,13 @@ int32_t p2p_sync_recover_receiver_v1(const uint8_t *config, size_t config_len,
                                       uint64_t *events_added,
                                       p2p_sync_cancel_callback cancellation, void *context);
 
+/* Check and advance a pinned receiver recovery anchor before iOS resumes
+   pending file operations. Does not change destination files. */
+int32_t p2p_sync_receiver_anchor_preflight_v1(const uint8_t *config, size_t config_len,
+                                               const uint8_t *state, size_t state_len,
+                                               const uint8_t *destination, size_t destination_len,
+                                               p2p_sync_cancel_callback cancellation, void *context);
+
 /* iOS receiver: list staged changes to existing files as JSON. Each item has
    object, kind (update/delete/move), source components, and optional
    destination components. All paths are relative to the selected destination.

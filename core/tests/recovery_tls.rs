@@ -532,6 +532,39 @@ fn receiver_registers_pinned_anchor_only_after_catching_up() {
     });
     assert_ne!(std::fs::read(&anchor).unwrap(), old_anchor);
     assert_eq!(std::fs::read(destination.join("automatic.tja")).unwrap(), b"automatic anchor update");
+    let pending = root.path().join("before-pending.tja");
+    std::fs::write(&pending, b"preflight keeps destination unchanged").unwrap();
+    sender.publish(&pending).unwrap();
+    let old_anchor = std::fs::read(&anchor).unwrap();
+    extern "C" fn keep_running(_: *mut std::ffi::c_void) -> u8 { 0 }
+    let [config, storage, target] = [&receiver_config, &state, &destination]
+        .map(|path| path.to_str().unwrap().as_bytes());
+    std::thread::scope(|threads| {
+        let server = threads.spawn(|| {
+            for _ in 0..2 {
+                let (socket, _) = listener.accept().unwrap();
+                sender.serve(socket).unwrap();
+            }
+        });
+        assert_eq!(unsafe { p2p_sync_core::p2p_sync_receiver_anchor_preflight_v1(
+            config.as_ptr(), config.len(), storage.as_ptr(), storage.len(),
+            target.as_ptr(), target.len(), Some(keep_running), std::ptr::null_mut(),
+        ) }, 0);
+        server.join().unwrap();
+    });
+    assert_ne!(std::fs::read(&anchor).unwrap(), old_anchor);
+    assert!(!destination.join("before-pending.tja").exists());
+    let future = root.path().join("after-preflight.tja");
+    std::fs::write(&future, b"newer trusted history").unwrap();
+    sender.publish(&future).unwrap();
+    let future_anchor = setup.join("receiver-future-anchor.bin");
+    sender.export_recovery_anchor(&future_anchor).unwrap();
+    std::fs::copy(&future_anchor, &anchor).unwrap();
+    assert_eq!(unsafe { p2p_sync_core::p2p_sync_receiver_anchor_preflight_v1(
+        config.as_ptr(), config.len(), storage.as_ptr(), storage.len(),
+        target.as_ptr(), target.len(), Some(keep_running), std::ptr::null_mut(),
+    ) }, 8);
+    assert!(!destination.join("before-pending.tja").exists());
 }
 
 #[test]

@@ -2040,20 +2040,20 @@ pub fn pull_detailed(
         .map(|(summary, _)| summary)
 }
 
-pub(crate) fn pull_with_originals(
+/// Refresh a pinned external recovery point before resuming local iOS file
+/// operations. A failed or stale signature stops those operations early.
+pub fn preflight_receiver_anchor_cancellable(
     configuration: &Path,
     state_root: &Path,
     destination: &Path,
     cancelled: &dyn Fn() -> bool,
-) -> Result<(PullSummaryV3, crate::archive::SyncDetails), HostError> {
+) -> Result<(), HostError> {
     if cancelled() {
         return Err(HostError::Direct(DirectError::Cancelled));
     }
     let config: Config = serde_json::from_slice(&read_bounded(configuration, MAX_CONFIG_BYTES)?)
         .map_err(|_| HostError::Configuration)?;
     let peers = config.endpoints()?;
-    // Refresh a pinned recovery point before a normal pull can change files.
-    // A cache-only import verifies both anchors against the same signed history.
     if let Some(anchor) = config.recovery_anchor.as_ref() {
         let trusted = hex::<32>(&anchor.peer)?;
         if config.event_key.is_some() && peers[0].event_peer == Some(trusted) {
@@ -2068,6 +2068,22 @@ pub(crate) fn pull_with_originals(
             }
         }
     }
+    Ok(())
+}
+
+pub(crate) fn pull_with_originals(
+    configuration: &Path,
+    state_root: &Path,
+    destination: &Path,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(PullSummaryV3, crate::archive::SyncDetails), HostError> {
+    if cancelled() {
+        return Err(HostError::Direct(DirectError::Cancelled));
+    }
+    let config: Config = serde_json::from_slice(&read_bounded(configuration, MAX_CONFIG_BYTES)?)
+        .map_err(|_| HostError::Configuration)?;
+    let peers = config.endpoints()?;
+    preflight_receiver_anchor_cancellable(configuration, state_root, destination, cancelled)?;
     let roster = build_roster(&config.share, config.generation, config.members)?;
     let reader = config
         .event_key

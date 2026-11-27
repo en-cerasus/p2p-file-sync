@@ -734,10 +734,38 @@ enum SyncCore {
         guard status == 7 else { throw CoreError.writerFailed(status) }
     }
 
+    private static func preflightReceiverAnchor(configuration: URL, state: URL, destination: URL,
+                                                 cancellation: Cancellation) throws {
+        let config = Array(configuration.path.utf8)
+        let storage = Array(state.path.utf8)
+        let output = Array(destination.path.utf8)
+        var callbacks = PullContext(cancellation: cancellation, json: nil)
+        let status = withUnsafeMutablePointer(to: &callbacks) { context in
+            config.withUnsafeBufferPointer { configBytes in
+                storage.withUnsafeBufferPointer { storageBytes in
+                    output.withUnsafeBufferPointer { outputBytes in
+                        p2p_sync_receiver_anchor_preflight_v1(
+                            configBytes.baseAddress, configBytes.count,
+                            storageBytes.baseAddress, storageBytes.count,
+                            outputBytes.baseAddress, outputBytes.count,
+                            { context in
+                                guard let context else { return 0 }
+                                return context.assumingMemoryBound(to: PullContext.self)
+                                    .pointee.cancellation.isCancelled() ? 1 : 0
+                            }, UnsafeMutableRawPointer(context)
+                        )
+                    }
+                }
+            }
+        }
+        guard status == P2P_SYNC_OK else { throw CoreError.pullFailed(status) }
+    }
+
     static func pull(configuration: URL, state: URL, destination: URL,
                      cancellation: Cancellation = Cancellation()) throws -> PullSummary {
-        // Finish previously verified local operations before attempting a
-        // connection, so a temporarily offline peer does not block recovery.
+        // Check the latest pinned anchor before resuming local file changes.
+        try preflightReceiverAnchor(configuration: configuration, state: state,
+                                    destination: destination, cancellation: cancellation)
         let resumed: PendingCounts
         do {
             resumed = try recoverPending(configuration: configuration, state: state,
