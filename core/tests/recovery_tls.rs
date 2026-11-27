@@ -181,10 +181,15 @@ fn receiver_anchor_rejects_restored_old_database_before_touching_destination() {
     std::fs::write(&receiver_config, receiver.to_string()).unwrap();
 
     let pull_once = |sender: &mut Sender| {
+        let config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&receiver_config).unwrap()).unwrap();
+        let connections = if config.get("recovery_anchor").is_some() { 3 } else { 1 };
         std::thread::scope(|threads| {
             let server = threads.spawn(|| {
-                let (socket, _) = listener.accept().unwrap();
-                sender.serve(socket).unwrap();
+                for _ in 0..connections {
+                    let (socket, _) = listener.accept().unwrap();
+                    sender.serve(socket).unwrap();
+                }
             });
             let result = pull_from_config(&receiver_config, &state, &destination);
             server.join().unwrap();
@@ -424,7 +429,7 @@ fn receiver_registers_pinned_anchor_only_after_catching_up() {
     let original = std::fs::read(&receiver_config).unwrap();
     std::thread::scope(|threads| {
         let server = threads.spawn(|| {
-            for _ in 0..4 {
+            for _ in 0..6 {
                 let (socket, _) = listener.accept().unwrap();
                 sender.serve(socket).unwrap();
             }
@@ -457,7 +462,7 @@ fn receiver_registers_pinned_anchor_only_after_catching_up() {
     let old_anchor = std::fs::read(&anchor).unwrap();
     std::thread::scope(|threads| {
         let server = threads.spawn(|| {
-            for _ in 0..3 {
+            for _ in 0..5 {
                 let (socket, _) = listener.accept().unwrap();
                 sender.serve(socket).unwrap();
             }
@@ -474,6 +479,22 @@ fn receiver_registers_pinned_anchor_only_after_catching_up() {
         server.join().unwrap();
     });
     assert_eq!(std::fs::read(destination.join("later.tja")).unwrap(), b"later receiver content");
+    let automatic = root.path().join("automatic.tja");
+    std::fs::write(&automatic, b"automatic anchor update").unwrap();
+    sender.publish(&automatic).unwrap();
+    let old_anchor = std::fs::read(&anchor).unwrap();
+    std::thread::scope(|threads| {
+        let server = threads.spawn(|| {
+            for _ in 0..3 {
+                let (socket, _) = listener.accept().unwrap();
+                sender.serve(socket).unwrap();
+            }
+        });
+        pull_from_config(&receiver_config, &state, &destination).unwrap();
+        server.join().unwrap();
+    });
+    assert_ne!(std::fs::read(&anchor).unwrap(), old_anchor);
+    assert_eq!(std::fs::read(destination.join("automatic.tja")).unwrap(), b"automatic anchor update");
 }
 
 #[test]

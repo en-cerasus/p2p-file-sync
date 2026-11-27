@@ -1824,6 +1824,18 @@ pub fn refresh_receiver_recovery_anchor(
     state_root: &Path,
     destination: &Path,
 ) -> Result<usize, HostError> {
+    refresh_receiver_recovery_anchor_cancellable(configuration, state_root, destination, &|| false)
+}
+
+fn refresh_receiver_recovery_anchor_cancellable(
+    configuration: &Path,
+    state_root: &Path,
+    destination: &Path,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<usize, HostError> {
+    if cancelled() {
+        return Err(HostError::Direct(DirectError::Cancelled));
+    }
     let config: Config = serde_json::from_slice(&read_bounded(configuration, MAX_CONFIG_BYTES)?)
         .map_err(|_| HostError::Configuration)?;
     let anchor = config.recovery_anchor.as_ref().ok_or(HostError::Configuration)?;
@@ -1882,8 +1894,11 @@ pub fn refresh_receiver_recovery_anchor(
     ).map_err(HostError::Direct)?;
     let added = direct::pull_serving_cache_cancellable(
         &client, &peer, Duration::from_secs(15), &mut store, &roster,
-        &reader, &chunks, &completed, &|| false,
+        &reader, &chunks, &completed, cancelled,
     ).map_err(HostError::Direct)?;
+    if cancelled() {
+        return Err(HostError::Direct(DirectError::Cancelled));
+    }
     recovery::verify_anchor_advance(&roster, &mut store, &previous, &candidate, trusted_peer)
         .map_err(HostError::Recovery)?;
     replace_bundle_file(&path, &candidate)?;
@@ -1988,6 +2003,22 @@ pub(crate) fn pull_with_originals(
     let config: Config = serde_json::from_slice(&read_bounded(configuration, MAX_CONFIG_BYTES)?)
         .map_err(|_| HostError::Configuration)?;
     let peers = config.endpoints()?;
+    // Refresh a pinned recovery point before a normal pull can change files.
+    // A cache-only import verifies both anchors against the same signed history.
+    if let Some(anchor) = config.recovery_anchor.as_ref() {
+        let trusted = hex::<32>(&anchor.peer)?;
+        if config.event_key.is_some() && peers[0].event_peer == Some(trusted) {
+            match refresh_receiver_recovery_anchor_cancellable(
+                configuration, state_root, destination, cancelled,
+            ) {
+                Ok(_) => {}
+                Err(HostError::Direct(DirectError::Cancelled)) =>
+                    return Err(HostError::Direct(DirectError::Cancelled)),
+                Err(HostError::Direct(_)) if peers.len() > 1 => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
     let roster = build_roster(&config.share, config.generation, config.members)?;
     let reader = config
         .event_key
