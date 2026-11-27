@@ -451,6 +451,29 @@ fn receiver_registers_pinned_anchor_only_after_catching_up() {
     assert!(matches!(p2p_sync_core::host::register_receiver_recovery_anchor(
         &receiver_config, &state, &destination, &setup.join("another-anchor.bin")),
         Err(HostError::Configuration)));
+    let later = root.path().join("later.tja");
+    std::fs::write(&later, b"later receiver content").unwrap();
+    sender.publish(&later).unwrap();
+    let old_anchor = std::fs::read(&anchor).unwrap();
+    std::thread::scope(|threads| {
+        let server = threads.spawn(|| {
+            for _ in 0..3 {
+                let (socket, _) = listener.accept().unwrap();
+                sender.serve(socket).unwrap();
+            }
+        });
+        let refresh = std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
+            .arg("refresh-receiver-recovery-anchor")
+            .arg(&receiver_config).arg(&state).arg(&destination)
+            .output().unwrap();
+        assert!(refresh.status.success(), "{}", String::from_utf8_lossy(&refresh.stderr));
+        assert!(String::from_utf8_lossy(&refresh.stdout).contains("Imported 1 event(s)"));
+        assert!(!destination.join("later.tja").exists());
+        assert_ne!(std::fs::read(&anchor).unwrap(), old_anchor);
+        pull_from_config(&receiver_config, &state, &destination).unwrap();
+        server.join().unwrap();
+    });
+    assert_eq!(std::fs::read(destination.join("later.tja")).unwrap(), b"later receiver content");
 }
 
 #[test]
