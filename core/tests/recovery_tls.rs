@@ -293,6 +293,27 @@ fn receiver_anchor_rejects_restored_old_database_before_touching_destination() {
         8
     );
     assert!(!destination.join("song.tja").exists());
+
+    std::fs::write(destination.join("song.tja"), b"deleted after first pull").unwrap();
+    std::thread::scope(|threads| {
+        let server = threads.spawn(|| {
+            let (socket, _) = listener.accept().unwrap();
+            sender.serve(socket).unwrap();
+        });
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
+            .arg("recover-receiver-from-anchor")
+            .arg(&receiver_config)
+            .arg(&state)
+            .arg(&destination)
+            .output()
+            .unwrap();
+        server.join().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Recovered 1 signed event(s)"));
+    });
+    assert_eq!(std::fs::read(destination.join("song.tja")).unwrap(), b"deleted after first pull");
+    pull_once(&mut sender);
+    assert!(!destination.join("song.tja").exists());
 }
 
 #[test]

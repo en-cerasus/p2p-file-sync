@@ -1670,6 +1670,82 @@ pub fn pull_from_config(
     pull_detailed(configuration, state_root, destination).map(Into::into)
 }
 
+/// Recover a receiver that is behind its configured external anchor. Fetch
+/// signed events and verified blobs into private state without publishing,
+/// updating, or removing any destination file. A normal pull may materialize
+/// the caught-up state after the anchor has been verified.
+pub fn recover_receiver_from_anchor(
+    configuration: &Path,
+    state_root: &Path,
+    destination: &Path,
+) -> Result<usize, HostError> {
+    let config: Config = serde_json::from_slice(&read_bounded(configuration, MAX_CONFIG_BYTES)?)
+        .map_err(|_| HostError::Configuration)?;
+    let anchor = config.recovery_anchor.as_ref().ok_or(HostError::Configuration)?;
+    let peers = config.endpoints()?;
+    let roster = build_roster(&config.share, config.generation, config.members)?;
+    let directory = configuration.parent().ok_or(HostError::Configuration)?;
+    let event_key = config.event_key.as_ref().ok_or(HostError::Configuration)?;
+    let seed: [u8; 32] = read_bounded(&directory.join(event_key), 32)?
+        .try_into().map_err(|_| HostError::Configuration)?;
+    let reader = PeerSigningKey::from_bytes(&seed);
+    if !roster.is_reader(reader.verifying_key().as_bytes()) {
+        return Err(HostError::Configuration);
+    }
+    let (roots, credentials) = read_credentials(
+        configuration, &config.ca_der, &config.certificate_der, &config.private_key_der,
+    )?;
+    let destination = destination.canonicalize().map_err(HostError::Io)?;
+    if !destination.is_dir() {
+        return Err(HostError::Configuration);
+    }
+    let destination_id: String = crate::sha256(destination.as_os_str().as_encoded_bytes())
+        .iter().map(|byte| format!("{byte:02x}")).collect();
+    let share_root = state_root.join(config.share.to_ascii_lowercase());
+    let root = share_root.join(config.generation.to_string()).join(&destination_id);
+    let witness = share_root.join("witness").join(config.generation.to_string()).join(&destination_id);
+    fs::create_dir_all(&root).map_err(HostError::Io)?;
+    let chunks = BlobStore::open(root.join("chunks")).map_err(HostError::Io)?;
+    let completed = BlobStore::open(root.join("files")).map_err(HostError::Io)?;
+    let (mut store, baseline_digest) = open_host_store(
+        &root, &completed, &roster, directory, config.migration.as_ref(),
+    )?;
+    check_generation(&share_root.join("active-generation"), config.generation, baseline_digest, false)?;
+    store.enable_event_witness(witness).map_err(HostError::Store)?;
+    match verify_receiver_anchor(configuration, state_root, &roster, &mut store,
+        Some(anchor), Some(reader.verifying_key().to_bytes())) {
+        Ok(()) => return Ok(0),
+        Err(HostError::Recovery(RecoveryError::Behind(_))) => {}
+        Err(error) => return Err(error),
+    }
+    let client = Client::with_baseline(
+        roots, credentials, roster.membership().share,
+        roster.membership().generation, baseline_digest,
+    ).map_err(HostError::Tls)?;
+    let mut added = 0;
+    let mut first_error = None;
+    let mut succeeded = false;
+    for peer in &peers {
+        match direct::pull_serving_cache_cancellable(
+            &client, peer, Duration::from_secs(15), &mut store, &roster,
+            &reader, &chunks, &completed, &|| false,
+        ) {
+            Ok(count) => {
+                succeeded = true;
+                added += count;
+            }
+            Err(error) => { first_error.get_or_insert(error); }
+        }
+    }
+    if !succeeded {
+        return Err(HostError::Direct(first_error.expect("at least one configured peer")));
+    }
+    verify_receiver_anchor(configuration, state_root, &roster, &mut store,
+        Some(anchor), Some(reader.verifying_key().to_bytes()))?;
+    activate_generation(&share_root.join("active-generation"), config.generation, baseline_digest)?;
+    Ok(added)
+}
+
 pub fn pull_detailed(
     configuration: &Path,
     state_root: &Path,
