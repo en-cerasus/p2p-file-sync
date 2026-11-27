@@ -32,6 +32,7 @@ use crate::{
         relocate_file_with_content, resolve_file_conflict, restore_archived_file, revise_file,
         store_file, PublishError, TreeSummary,
     },
+    recovery::{self, RecoveryError},
     replica::{EntryKind, Event, EventId, PeerId},
     store::{Store, StoreError},
     sync::{Destination, FileResult},
@@ -42,6 +43,7 @@ const MAX_CONFIG_BYTES: u64 = 256 * 1024;
 const MAX_CREDENTIAL_BYTES: u64 = 64 * 1024;
 const MAX_MEMBERS: usize = 1024;
 const MAX_CHECKPOINT_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_RECOVERY_ANCHOR_BYTES: u64 = 1024 * 1024 + 256;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -133,6 +135,14 @@ struct SenderConfig {
     private_key_der: PathBuf,
     event_key: PathBuf,
     migration: Option<MigrationConfig>,
+    recovery_anchor: Option<RecoveryAnchorConfig>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryAnchorConfig {
+    file: PathBuf,
+    peer: String,
 }
 
 pub struct Sender {
@@ -210,6 +220,19 @@ impl Sender {
                 share_root.join("witness").join(config.generation.to_string()).join("sender"),
             )
             .map_err(HostError::Store)?;
+        if let Some(anchor) = &config.recovery_anchor {
+            let trusted_peer = hex::<32>(&anchor.peer)?;
+            if trusted_peer == signer.verifying_key().to_bytes() {
+                return Err(HostError::Configuration);
+            }
+            let path = fs::canonicalize(config_directory.join(&anchor.file)).map_err(HostError::Io)?;
+            if path.starts_with(fs::canonicalize(state_root).map_err(HostError::Io)?) {
+                return Err(HostError::Configuration);
+            }
+            let wire = read_bounded(&path, MAX_RECOVERY_ANCHOR_BYTES)?;
+            recovery::verify_anchor(&roster, &mut store, &wire, trusted_peer)
+                .map_err(HostError::Recovery)?;
+        }
         let server = Server::with_baseline(
             roots,
             credentials,
@@ -287,6 +310,18 @@ impl Sender {
         self.store
             .sweep_sender_archives(&self.completed, std::time::SystemTime::now())
             .map_err(HostError::Store)
+    }
+
+    /// Export a signed history frontier for a different trusted peer to hold.
+    /// Existing output is never replaced. The caller must transfer it outside
+    /// this device's restorable state before treating it as rollback evidence.
+    pub fn export_recovery_anchor(&mut self, output: &Path) -> Result<(), HostError> {
+        let _lock = self.lock_state()?;
+        let wire = recovery::sign_anchor(&self.roster, &mut self.store, &self.signer)
+            .map_err(HostError::Recovery)?;
+        let parent = output.parent().ok_or(HostError::Configuration)?;
+        let name = output.file_name().and_then(|name| name.to_str()).ok_or(HostError::Configuration)?;
+        write_bundle_file(parent, name, &wire)
     }
 
     pub fn publish(&mut self, source: &Path) -> Result<EventId, HostError> {
@@ -922,6 +957,7 @@ pub enum HostError {
     Authentication(AuthError),
     Io(std::io::Error),
     Store(StoreError),
+    Recovery(RecoveryError),
     Tls(TlsError),
     Direct(DirectError),
     Publish(PublishError),

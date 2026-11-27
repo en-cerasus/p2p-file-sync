@@ -102,6 +102,8 @@ cargo run --locked --release -p p2p-sync-core --bin p2p-send -- serve .\trial-se
 
 同一世代の古いDBが復元された場合、世代別DBの外に残る署名済み変更イベントの証跡と照合します。削除や更新イベントがDBから消えていれば操作を止め、画面に状態復旧が必要と表示します。証跡だけが先行した途中終了も停止します。証跡はイベントごとに増えます。DBと証跡をまとめて古い状態へ戻す場合に備え、別の信頼済みピアが保持する署名付き履歴基準点と照合するRustコアのPoCを追加しました。ただし基準点の交換、同期開始前の強制照合、古い基底からの再初期同期、証跡の集約は未実装です。
 
+配信側では、`p2p-send export-recovery-anchor <server.json> <state-dir> <new-output-file>`で署名付き履歴基準点を新規ファイルへ書き出せます。別の信頼済みピアが保持した基準点を使う場合、`server.json`に`"recovery_anchor":{"file":"../peer-anchor.bin","peer":"<署名したピアの公開鍵64桁>"}`を指定します。パスは設定ファイルのフォルダー基準です。自分自身の署名や状態フォルダー内のファイルは基準点として拒否します。起動時に履歴が基準点より古い、または分岐していれば配信側は開きません。この手動設定は復元対象と独立した場所から新しい基準点を受け取る必要があります。基準点の自動交換、受信側の起動ゲート、再初期同期は引き続き未実装です。
+
 `p2p-send prepare-generation <server.json> <state-dir> <next-server.json> <administrator-seed-file> <new-dir>` で移行用データを作成できます。次の設定には同じ共有IDと1つ進んだ世代、新しいピア一覧を指定します。管理鍵には、同期ピアの署名鍵と別の32バイトのEd25519シードを使います。出力には署名済みの `transition.bin`、`checkpoint.bin`、検証済みの `files` が含まれます。出力フォルダーには共有ファイル本体が含まれるため、共有先と同様に管理してください。作成だけでは世代は切り替わりません。
 
 `p2p-send verify-generation <previous-server.json> <next-server.json> <administrator-public-key> <bundle-dir>` は、信頼済みの管理公開鍵（Ed25519の生32バイト）を使って、署名、世代、ピア一覧、履歴、ファイル本体を検証します。検証は読み取り専用です。現段階のチェックポイント上限は128 MiBで、ファイル本体はこの上限に含みません。
