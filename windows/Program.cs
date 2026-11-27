@@ -67,6 +67,9 @@ internal sealed class SyncWindow : Window
     private readonly TextBlock serverRtcRouteStatus = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 4, 0, 0) };
     private readonly TextBlock writerStatus = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
     private readonly TextBlock historyStatus = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
+    private readonly Button inspectIsolatedButton = new() { Content = "旧世代の退避データを確認", Margin = new Thickness(0, 12, 0, 0) };
+    private readonly ListBox isolatedList = new() { MaxHeight = 240 };
+    private readonly TextBlock isolatedStatus = new() { TextWrapping = TextWrapping.Wrap };
     private readonly TextBlock conflictStatus = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
     private readonly CheckBox autoSync = new()
     {
@@ -102,7 +105,7 @@ internal sealed class SyncWindow : Window
             catchUpWriterButton, cancelCatchUpButton,
             startServerButton, stopServerButton,
             loadWriterHistoryButton, restoreHistoryButton, deleteHistoryButton,
-            deleteAllHistoryButton, loadWriterConflictsButton, resolveConflictButton })
+            deleteAllHistoryButton, inspectIsolatedButton, loadWriterConflictsButton, resolveConflictButton })
         {
             action.HorizontalAlignment = HorizontalAlignment.Left;
         }
@@ -150,6 +153,10 @@ internal sealed class SyncWindow : Window
         panel.Children.Add(deleteHistoryButton);
         panel.Children.Add(deleteAllHistoryButton);
         panel.Children.Add(historyStatus);
+        panel.Children.Add(new TextBlock { Text = "旧世代の退避編集", FontSize = 18, Margin = new Thickness(0, 20, 0, 0) });
+        panel.Children.Add(inspectIsolatedButton);
+        panel.Children.Add(isolatedStatus);
+        panel.Children.Add(isolatedList);
         panel.Children.Add(new TextBlock { Text = "競合の解決", FontSize = 18, Margin = new Thickness(0, 20, 0, 0) });
         panel.Children.Add(loadWriterConflictsButton);
         panel.Children.Add(writerConflictList);
@@ -257,6 +264,7 @@ internal sealed class SyncWindow : Window
             UpdateControls();
         };
         loadWriterHistoryButton.Click += async (_, _) => await LoadWriterHistory();
+        inspectIsolatedButton.Click += async (_, _) => await InspectIsolatedArchive();
         writerHistoryList.SelectionChanged += (_, _) => UpdateControls();
         restoreHistoryButton.Click += async (_, _) => await RestoreWriterHistory();
         deleteHistoryButton.Click += async (_, _) => await DeleteWriterHistory(false);
@@ -438,6 +446,7 @@ internal sealed class SyncWindow : Window
         trayStartServer.Enabled = startServerButton.IsEnabled;
         trayStopServer.Enabled = stopServerButton.IsEnabled;
         loadWriterHistoryButton.IsEnabled = !syncing && !writerServing && writerConfiguration is not null && writerState is not null;
+        inspectIsolatedButton.IsEnabled = !syncing && writerConfiguration is not null;
         loadWriterConflictsButton.IsEnabled = loadWriterHistoryButton.IsEnabled;
         restoreHistoryButton.IsEnabled = loadWriterHistoryButton.IsEnabled
             && writerHistoryList.SelectedItem is SyncCore.WriterHistoryEntry { CurrentHeads.Length: 1 };
@@ -906,6 +915,43 @@ internal sealed class SyncWindow : Window
         }
     }
 
+    private async Task InspectIsolatedArchive()
+    {
+        if (closing || syncing || writerConfiguration is not string config) return;
+        var picker = new OpenFolderDialog { Title = "旧世代の退避フォルダー" };
+        if (picker.ShowDialog(this) != true) return;
+        syncing = true;
+        isolatedList.ItemsSource = null;
+        isolatedStatus.Text = "退避データを検証しています…";
+        UpdateControls();
+        try
+        {
+            var loaded = await Task.Run(() => SyncCore.VerifyIsolatedArchive(config, picker.FolderName));
+            if (loaded.Status == 0 && loaded.Report is { } report)
+            {
+                isolatedList.ItemsSource = report.Events.Select(entry =>
+                    entry.ContentSha256 is string hash && report.MissingBlobs.Contains(hash)
+                        ? $"{entry}\n本体が欠けています"
+                        : entry.ToString()).ToArray();
+                isolatedStatus.Text = $"旧世代の編集 {report.Events.Length} 件、確認できた本体 {report.CopiedBlobs} 件、欠落 {report.MissingBlobs.Length} 件。\n" +
+                    "表示のみです。新世代への採用は自動で行いません。";
+            }
+            else
+            {
+                isolatedStatus.Text = SyncCore.ErrorMessage(loaded.Status);
+            }
+        }
+        catch (Exception error) when (error is JsonException or DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
+        {
+            isolatedStatus.Text = "退避データを確認できませんでした。設定とファイルを確認してください。";
+        }
+        finally
+        {
+            syncing = false;
+            UpdateControls();
+        }
+    }
+
     private async Task RestoreWriterHistory()
     {
         if (closing || syncing || writerServing || writerConfiguration is not string config || writerState is not string state
@@ -1142,6 +1188,27 @@ internal static class SyncCore
             (CurrentHeads.Length == 1 ? "" : " · 現在の版が競合中");
     }
 
+    internal sealed record IsolatedEvent(
+        [property: JsonPropertyName("peer")] string Peer,
+        [property: JsonPropertyName("sequence")] ulong Sequence,
+        [property: JsonPropertyName("object")] string Object,
+        [property: JsonPropertyName("path_hint")] string? PathHint,
+        [property: JsonPropertyName("change")] string Change,
+        [property: JsonPropertyName("operation")] string Operation,
+        [property: JsonPropertyName("content_sha256")] string? ContentSha256)
+    {
+        public override string ToString() =>
+            $"{PathHint ?? "名前不明"} · {Operation} / {Change}\n{Peer[..Math.Min(Peer.Length, 12)]}:{Sequence}";
+    }
+
+    internal sealed record IsolatedArchiveReport(
+        [property: JsonPropertyName("share")] string Share,
+        [property: JsonPropertyName("previous_generation")] ulong PreviousGeneration,
+        [property: JsonPropertyName("next_generation")] ulong NextGeneration,
+        [property: JsonPropertyName("events")] IsolatedEvent[] Events,
+        [property: JsonPropertyName("copied_blobs")] ulong CopiedBlobs,
+        [property: JsonPropertyName("missing_blobs")] string[] MissingBlobs);
+
     internal sealed record WriterConflictVersion(
         [property: JsonPropertyName("id")] string Id,
         [property: JsonPropertyName("name")] string? Name,
@@ -1219,6 +1286,22 @@ internal static class SyncCore
             }, IntPtr.Zero);
         return status != 0 || json is null ? (status == 0 ? 6 : status, []) :
             (0, JsonSerializer.Deserialize<WriterHistoryEntry[]>(json) ?? []);
+    }
+
+    internal static (int Status, IsolatedArchiveReport? Report) VerifyIsolatedArchive(string config, string archive)
+    {
+        var configBytes = Encoding.UTF8.GetBytes(config);
+        var archiveBytes = Encoding.UTF8.GetBytes(archive);
+        byte[]? json = null;
+        var status = VerifyIsolatedArchiveNative(configBytes, (nuint)configBytes.Length,
+            archiveBytes, (nuint)archiveBytes.Length, (_, data, length) =>
+            {
+                if (length > int.MaxValue) return;
+                json = new byte[(int)length];
+                Marshal.Copy(data, json, 0, json.Length);
+            }, IntPtr.Zero);
+        return status != 0 || json is null ? (status == 0 ? 6 : status, null) :
+            (0, JsonSerializer.Deserialize<IsolatedArchiveReport>(json));
     }
 
     internal static (int Status, WriterProtectedReport? Report) WriterProtectedOriginals(string config, string state)
@@ -1441,6 +1524,11 @@ internal static class SyncCore
     [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_writer_history", CallingConvention = CallingConvention.Cdecl)]
     private static extern int WriterHistoryNative(
         byte[] config, nuint configLength, byte[] state, nuint stateLength,
+        OriginalsCallback callback, IntPtr context);
+
+    [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_verify_isolated_archive_v1", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int VerifyIsolatedArchiveNative(
+        byte[] config, nuint configLength, byte[] archive, nuint archiveLength,
         OriginalsCallback callback, IntPtr context);
 
     [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_writer_protected_originals", CallingConvention = CallingConvention.Cdecl)]

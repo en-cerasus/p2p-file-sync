@@ -350,6 +350,26 @@ enum SyncCore {
         let archived_at: Int64
     }
 
+    struct IsolatedArchiveReport: Decodable, Sendable {
+        let share: String
+        let previous_generation: UInt64
+        let next_generation: UInt64
+        let events: [IsolatedEvent]
+        let copied_blobs: UInt64
+        let missing_blobs: [String]
+    }
+
+    struct IsolatedEvent: Decodable, Identifiable, Sendable {
+        let peer: String
+        let sequence: UInt64
+        let object: String
+        let path_hint: String?
+        let change: String
+        let operation: String
+        let content_sha256: String?
+        var id: String { "\(peer):\(sequence)" }
+    }
+
     private struct WriterArchiveSelection: Encodable {
         let id: Int64
         let archive: String
@@ -377,6 +397,29 @@ enum SyncCore {
 
     private struct WriterReportContext {
         var json: Data?
+    }
+
+    static func verifyIsolatedArchive(configuration: URL, archive: URL) throws -> IsolatedArchiveReport {
+        let config = Array(configuration.path.utf8)
+        let folder = Array(archive.path.utf8)
+        var report = WriterReportContext(json: nil)
+        let status = withUnsafeMutablePointer(to: &report) { context in
+            config.withUnsafeBufferPointer { configBytes in
+                folder.withUnsafeBufferPointer { folderBytes in
+                    p2p_sync_verify_isolated_archive_v1(
+                        configBytes.baseAddress, configBytes.count,
+                        folderBytes.baseAddress, folderBytes.count,
+                        { context, data, length in
+                            guard let context, let data else { return }
+                            context.assumingMemoryBound(to: WriterReportContext.self).pointee.json =
+                                Data(bytes: data, count: length)
+                        }, UnsafeMutableRawPointer(context))
+                }
+            }
+        }
+        guard status == P2P_SYNC_OK else { throw CoreError.writerFailed(status) }
+        guard let json = report.json else { throw CoreError.missingWriterReport }
+        return try JSONDecoder().decode(IsolatedArchiveReport.self, from: json)
     }
 
     static func writerProtectedOriginals(configuration: URL, state: URL) throws -> WriterProtectedReport {

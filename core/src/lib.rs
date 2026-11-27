@@ -384,6 +384,42 @@ pub unsafe extern "C" fn p2p_sync_writer_history(
     }
 }
 
+/// Verify a saved old-generation archive using the current configuration's
+/// migration references, then return its event list as JSON. No sync state or
+/// archive file is changed.
+///
+/// # Safety
+/// Paths must be readable UTF-8 for the duration of the call. The callback
+/// must copy the JSON bytes before returning and must not unwind.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_verify_isolated_archive_v1(
+    config: *const u8,
+    config_len: usize,
+    archive: *const u8,
+    archive_len: usize,
+    callback: Option<OriginalsCallback>,
+    context: *mut std::ffi::c_void,
+) -> i32 {
+    let Some(callback) = callback else { return INVALID_ARGUMENT };
+    let Some(config) = (unsafe { borrowed_text(config, config_len, 32_768) }) else {
+        return INVALID_ARGUMENT;
+    };
+    let Some(archive) = (unsafe { borrowed_text(archive, archive_len, 32_768) }) else {
+        return INVALID_ARGUMENT;
+    };
+    let result = std::panic::catch_unwind(|| {
+        let report = host::verify_isolated_archive_from_config(
+            std::path::Path::new(config), std::path::Path::new(archive),
+        ).map_err(host_error_code)?;
+        serde_json::to_vec(&report).map_err(|_| 6)
+    });
+    match result {
+        Ok(Ok(bytes)) => { callback(context, bytes.as_ptr(), bytes.len()); OK }
+        Ok(Err(code)) => code,
+        Err(_) => 6,
+    }
+}
+
 /// Read protected common originals from a writer's serving state.
 ///
 /// # Safety

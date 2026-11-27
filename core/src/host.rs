@@ -1475,6 +1475,26 @@ pub fn verify_generation_bundle(
         .map(|(_, _, count)| count)
 }
 
+/// Review an isolated archive using only the verified migration references in
+/// the current sender configuration. The sender state need not be opened.
+pub fn verify_isolated_archive_from_config(
+    configuration: &Path,
+    archive: &Path,
+) -> Result<crate::isolation::IsolatedArchiveReport, HostError> {
+    let config: SenderConfig =
+        serde_json::from_slice(&read_bounded(configuration, MAX_CONFIG_BYTES)?)
+            .map_err(|_| HostError::Configuration)?;
+    let migration = config.migration.ok_or(HostError::Configuration)?;
+    let directory = configuration.parent().ok_or(HostError::Configuration)?;
+    crate::isolation::verify_isolated_archive(
+        &directory.join(migration.previous_server),
+        configuration,
+        &directory.join(migration.administrator_public_key),
+        &directory.join(migration.bundle),
+        archive,
+    )
+}
+
 pub(crate) fn load_verified_generation_bundle(
     previous_configuration: &Path,
     next_configuration: &Path,

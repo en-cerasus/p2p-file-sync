@@ -9,28 +9,30 @@ use std::{
 };
 
 use rusqlite::{Connection, OpenFlags};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
+    auth::Roster,
     blob::{Blob, BlobStore},
+    generation::GenerationCheckpoint,
     host::{load_verified_generation_bundle, HostError},
     projection::Projection,
     replica::{Change, ContentHash, EntryKind, EventId},
     store::{Store, StoreError},
 };
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct IsolatedEventSummary {
     pub peer: String,
     pub sequence: u64,
     pub object: String,
     pub path_hint: Option<String>,
-    pub change: &'static str,
-    pub operation: &'static str,
+    pub change: String,
+    pub operation: String,
     pub content_sha256: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct IsolatedArchiveReport {
     pub share: String,
     pub previous_generation: u64,
@@ -38,6 +40,12 @@ pub struct IsolatedArchiveReport {
     pub events: Vec<IsolatedEventSummary>,
     pub copied_blobs: usize,
     pub missing_blobs: Vec<String>,
+}
+
+struct SnapshotInspection {
+    events: Vec<IsolatedEventSummary>,
+    signed: Vec<Vec<u8>>,
+    hashes: BTreeSet<ContentHash>,
 }
 
 /// Snapshot the old database, verify its signed history against the trusted
@@ -121,6 +129,62 @@ pub fn archive_isolated_generation(
     store
         .enable_event_witness(&inspection_witness)
         .map_err(HostError::Store)?;
+    let inspected = inspect_snapshot(&store, &checkpoint, &roster)?;
+    let source_blobs = BlobStore::open_existing(old_state.join("files")).map_err(HostError::Io)?;
+    let destination_blobs = BlobStore::open(destination.join("files")).map_err(HostError::Io)?;
+    let mut copied_blobs = 0;
+    let mut missing_blobs = Vec::new();
+    for hash in inspected.hashes {
+        let file = match source_blobs.open_candidate(hash) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                missing_blobs.push(hex(&hash));
+                continue;
+            }
+            Err(error) => return Err(HostError::Io(error)),
+        };
+        let metadata = file.metadata().map_err(HostError::Io)?;
+        if !metadata.is_file() {
+            return Err(HostError::Configuration);
+        }
+        let blob = Blob {
+            hash,
+            length: metadata.len(),
+        };
+        drop(file);
+        let verified = source_blobs.open_verified(blob).map_err(HostError::Io)?;
+        destination_blobs
+            .put(blob, verified)
+            .map_err(HostError::Io)?;
+        copied_blobs += 1;
+    }
+    let report = IsolatedArchiveReport {
+        share,
+        previous_generation: generation,
+        next_generation: generation + 1,
+        events: inspected.events,
+        copied_blobs,
+        missing_blobs,
+    };
+    let event_bytes = postcard::to_allocvec(&inspected.signed)
+        .map_err(|error| HostError::Store(StoreError::Decode(error)))?;
+    if event_bytes.len() > 128 * 1024 * 1024 {
+        return Err(HostError::Configuration);
+    }
+    write_new(&destination.join("events.bin"), &event_bytes)?;
+    let report_bytes = serde_json::to_vec_pretty(&report).map_err(|_| HostError::Configuration)?;
+    if report_bytes.len() > 8 * 1024 * 1024 {
+        return Err(HostError::Configuration);
+    }
+    write_new(&destination.join("report.json"), &report_bytes)?;
+    Ok(report)
+}
+
+fn inspect_snapshot(
+    store: &Store,
+    checkpoint: &GenerationCheckpoint,
+    roster: &Roster,
+) -> Result<SnapshotInspection, HostError> {
     let checkpoint_events: BTreeMap<_, _> = checkpoint
         .events
         .iter()
@@ -148,7 +212,6 @@ pub fn archive_isolated_generation(
             signed.push(wire.to_vec());
         }
     }
-
     let projection = Projection::new(store.replica());
     let mut events = Vec::new();
     let mut hashes = BTreeSet::<ContentHash>::new();
@@ -187,26 +250,74 @@ pub fn archive_isolated_generation(
                 Change::Create(_) => "create",
                 Change::Revise { .. } => "revise",
                 Change::Resolve { .. } => "resolve",
-            },
+            }
+            .into(),
             operation: if entry.is_none() {
                 "delete"
             } else if content.is_some() {
                 "file"
             } else {
                 "directory"
-            },
+            }
+            .into(),
             content_sha256: content.map(|hash| hex(&hash)),
         });
     }
-    let source_blobs = BlobStore::open_existing(old_state.join("files")).map_err(HostError::Io)?;
-    let destination_blobs = BlobStore::open(destination.join("files")).map_err(HostError::Io)?;
-    let mut copied_blobs = 0;
-    let mut missing_blobs = Vec::new();
-    for hash in hashes {
-        let file = match source_blobs.open_candidate(hash) {
+    Ok(SnapshotInspection {
+        events,
+        signed,
+        hashes,
+    })
+}
+
+/// Recheck a saved archive without writing to it or either generation.
+/// This catches corruption and mismatched files. The archive is not an
+/// independent anti-rollback witness if every file is replaced together.
+pub fn verify_isolated_archive(
+    previous_configuration: &Path,
+    next_configuration: &Path,
+    administrator_public_key: &Path,
+    bundle: &Path,
+    archive: &Path,
+) -> Result<IsolatedArchiveReport, HostError> {
+    let (checkpoint, roster, _) = load_verified_generation_bundle(
+        previous_configuration,
+        next_configuration,
+        administrator_public_key,
+        bundle,
+    )?;
+    let report_bytes = read_bounded(&archive.join("report.json"), 8 * 1024 * 1024)?;
+    let report: IsolatedArchiveReport =
+        serde_json::from_slice(&report_bytes).map_err(|_| HostError::Configuration)?;
+    let events_bytes = read_bounded(&archive.join("events.bin"), 128 * 1024 * 1024)?;
+    let signed: Vec<Vec<u8>> =
+        postcard::from_bytes(&events_bytes).map_err(|_| HostError::Configuration)?;
+    if postcard::to_allocvec(&signed).ok().as_deref() != Some(events_bytes.as_slice()) {
+        return Err(HostError::Configuration);
+    }
+
+    let inspection = tempfile::tempdir().map_err(HostError::Io)?;
+    let database = inspection.path().join("sync.db");
+    fs::copy(archive.join("old-sync.db"), &database).map_err(HostError::Io)?;
+    let store = Store::open(&database, roster.membership().clone()).map_err(HostError::Store)?;
+    let inspected = inspect_snapshot(&store, &checkpoint, &roster)?;
+    if signed != inspected.signed
+        || report.share != hex(&roster.membership().share)
+        || report.previous_generation != roster.membership().generation
+        || report.next_generation != roster.membership().generation + 1
+        || report.events != inspected.events
+    {
+        return Err(HostError::Configuration);
+    }
+
+    let blobs = BlobStore::open_existing(archive.join("files")).map_err(HostError::Io)?;
+    let mut present = 0;
+    let mut missing = Vec::new();
+    for hash in inspected.hashes {
+        let file = match blobs.open_candidate(hash) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                missing_blobs.push(hex(&hash));
+                missing.push(hex(&hash));
                 continue;
             }
             Err(error) => return Err(HostError::Io(error)),
@@ -215,31 +326,33 @@ pub fn archive_isolated_generation(
         if !metadata.is_file() {
             return Err(HostError::Configuration);
         }
-        let blob = Blob {
-            hash,
-            length: metadata.len(),
-        };
         drop(file);
-        let verified = source_blobs.open_verified(blob).map_err(HostError::Io)?;
-        destination_blobs
-            .put(blob, verified)
+        blobs
+            .open_verified(Blob {
+                hash,
+                length: metadata.len(),
+            })
             .map_err(HostError::Io)?;
-        copied_blobs += 1;
+        present += 1;
     }
-    let report = IsolatedArchiveReport {
-        share,
-        previous_generation: generation,
-        next_generation: generation + 1,
-        events,
-        copied_blobs,
-        missing_blobs,
-    };
-    let event_bytes = postcard::to_allocvec(&signed)
-        .map_err(|error| HostError::Store(StoreError::Decode(error)))?;
-    write_new(&destination.join("events.bin"), &event_bytes)?;
-    let report_bytes = serde_json::to_vec_pretty(&report).map_err(|_| HostError::Configuration)?;
-    write_new(&destination.join("report.json"), &report_bytes)?;
+    if report.copied_blobs != present || report.missing_blobs != missing {
+        return Err(HostError::Configuration);
+    }
     Ok(report)
+}
+
+fn read_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>, HostError> {
+    let file = fs::File::open(path).map_err(HostError::Io)?;
+    if file.metadata().map_err(HostError::Io)?.len() > max_bytes {
+        return Err(HostError::Configuration);
+    }
+    let mut limited = io::Read::take(file, max_bytes + 1);
+    let mut data = Vec::new();
+    io::Read::read_to_end(&mut limited, &mut data).map_err(HostError::Io)?;
+    if data.len() as u64 > max_bytes {
+        return Err(HostError::Configuration);
+    }
+    Ok(data)
 }
 
 fn write_new(path: &Path, bytes: &[u8]) -> Result<(), HostError> {

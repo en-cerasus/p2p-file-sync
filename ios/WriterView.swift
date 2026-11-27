@@ -10,6 +10,8 @@ struct WriterView: View {
     @AppStorage("writerConfigBookmark") private var configBookmark = Data()
     @State private var configFolder: URL?
     @State private var pickingFolder = false
+    @State private var pickingIsolatedArchive = false
+    @State private var isolatedArchiveReport: SyncCore.IsolatedArchiveReport?
     @State private var refreshing = false
     @State private var catchingUp = false
     @State private var catchUpStopping = false
@@ -117,6 +119,28 @@ struct WriterView: View {
                     }
                 }
             }
+            Section("旧世代の退避データ") {
+                Button("退避フォルダーを選んで確認") { pickingIsolatedArchive = true }
+                    .disabled(configFolder == nil || serving || refreshing || catchingUp || inspecting)
+                if let archive = isolatedArchiveReport {
+                    Text("旧世代 \(archive.previous_generation) → 新世代 \(archive.next_generation) · 編集 \(archive.events.count) 件")
+                    Text("保全済み本体 \(archive.copied_blobs) 件 · 欠落 \(archive.missing_blobs.count) 件")
+                        .font(.caption).foregroundStyle(.secondary)
+                    ForEach(archive.events) { event in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(event.path_hint ?? "名前不明")
+                            Text("\(event.operation) / \(event.change) · \(String(event.peer.prefix(12))):\(event.sequence)")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    if !archive.missing_blobs.isEmpty {
+                        Text("欠落本体: \(archive.missing_blobs.joined(separator: ", "))")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Text("保存済みデータと署名を再検証した結果です。新世代への採用は行いません。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
             Section("履歴") {
                 Button("復元できる履歴を確認") { Task { await loadHistory() } }
                     .disabled(configFolder == nil || serving || refreshing || catchingUp || inspecting)
@@ -190,6 +214,12 @@ struct WriterView: View {
             switch selection {
             case .success(let url): selectConfigFolder(url)
             case .failure: result = "配信設定フォルダーを開けませんでした。"
+            }
+        }
+        .fileImporter(isPresented: $pickingIsolatedArchive, allowedContentTypes: [.folder]) { selection in
+            switch selection {
+            case .success(let url): Task { await loadIsolatedArchive(url) }
+            case .failure: result = "退避フォルダーを開けませんでした。"
             }
         }
         .fileImporter(isPresented: $pickingMoveDestination, allowedContentTypes: [.item]) { selection in
@@ -304,6 +334,26 @@ struct WriterView: View {
         conflictEntries = []
         historyLoaded = false
         conflictsLoaded = false
+        isolatedArchiveReport = nil
+    }
+
+    private func loadIsolatedArchive(_ archive: URL) async {
+        guard !serving, !refreshing, !catchingUp, !inspecting, configFolder != nil else { return }
+        inspecting = true
+        isolatedArchiveReport = nil
+        defer { inspecting = false }
+        do {
+            isolatedArchiveReport = try await runWriter { config, _ in
+                guard archive.startAccessingSecurityScopedResource() else {
+                    throw WriterFailure.permissionUnavailable
+                }
+                defer { archive.stopAccessingSecurityScopedResource() }
+                return try SyncCore.verifyIsolatedArchive(configuration: config, archive: archive)
+            }
+            result = "退避データの検証が完了しました。"
+        } catch {
+            result = writerError(error)
+        }
     }
 
     private func loadMissingFiles() async {

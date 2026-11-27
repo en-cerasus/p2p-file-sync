@@ -119,7 +119,7 @@ cargo run --locked --release -p p2p-sync-core --bin p2p-send -- serve .\trial-se
 
 ピアを登録解除する場合は、新世代の `members` から署名公開鍵を外し、各配信設定の `client_pin` または `client_pins` と `client_identities` から同ピアの証明書・対応付けも外します。現段階では手動で更新します。第2世代以降は証明書ピンの確認後、接続相手に毎回異なる値への署名を求め、対応表にある端末IDと一致するまで同期データを提供しません。読み取り専用端末の `direct.json` には `event_key` が必要です。旧世代の資格を持つ端末同士の通信や取得済みデータは取り消せません。
 
-旧世代でオフライン中に行った編集は、アプリを閉じてから `p2p-send archive-isolated-generation <old-server.json> <old-state-dir> <next-server.json> <administrator-public-key> <bundle-dir> <new-output-dir>` で退避できます。退避先には旧DBの一貫した複製、チェックポイント後の署名済みイベント、検証済みのファイル本体、`report.json` を作成します。本体が既に欠けていればレポートに記録します。旧DBと共有元ファイルは変更しません。退避先には共有内容が含まれるため、公開フォルダーやGitに追加しないでください。編集の採用と新世代での再発行は自動化していません。
+旧世代でオフライン中に行った編集は、アプリを閉じてから `p2p-send archive-isolated-generation <old-server.json> <old-state-dir> <next-server.json> <administrator-public-key> <bundle-dir> <new-output-dir>` で退避できます。退避先には旧DBの一貫した複製、チェックポイント後の署名済みイベント、検証済みのファイル本体、`report.json` を作成します。本体が既に欠けていればレポートに記録します。旧DBと共有元ファイルは変更しません。後から `p2p-send verify-isolated-archive <old-server.json> <next-server.json> <administrator-public-key> <bundle-dir> <archive-dir>` で署名・DB・本体・レポートを読み取り専用で再検証できます。新世代の `server.json` に `migration` が設定されていれば、WindowsとiOSの共有画面で退避フォルダーを選び、検証済みの編集一覧と欠落本体を表示できます。退避先には共有内容が含まれるため、公開フォルダーやGitに追加しないでください。編集の採用と新世代での再発行は自動化していません。
 
 `p2p-send catch-up <server.json> <state-dir> <direct.json>` は、同じ共有・世代で登録された別の配信先から、署名付きイベントと取得可能なファイル本体を配信用キャッシュへ取り込みます。取り込んだデータは `serve` で再配信でき、作業フォルダーには書き込みません。接続には `direct.json` の主接続先と追加の接続先を設定順に使います。
 
