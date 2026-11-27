@@ -1,6 +1,6 @@
 use p2p_sync_core::{
     auth::{PeerSigningKey, Role, Roster},
-    recovery::{sign_anchor, verify_anchor, RecoveryError},
+    recovery::{sign_anchor, verify_anchor, verify_remote_author, RecoveryError},
     replica::{Change, Entry, EntryKind, Event, EventId, VersionVector},
     store::Store,
 };
@@ -149,4 +149,28 @@ fn anchor_rejects_different_signed_history_at_same_frontier() {
     assert!(
         matches!(verify_anchor(&roster, &mut divergent, &anchor, author), Err(RecoveryError::Diverged(id)) if id == first.id)
     );
+}
+
+#[test]
+fn remote_author_cannot_claim_less_history_than_a_receiver_already_has() {
+    let dir = tempfile::tempdir().unwrap();
+    let writer = PeerSigningKey::from_bytes(&[26; 32]);
+    let peer = writer.verifying_key().to_bytes();
+    let roster = Roster::new([4; 16], 1, [(peer, Role::Writer)].into());
+    let first = roster.sign_event(&writer, &event(peer, 1, false)).unwrap();
+    let deletion = roster.sign_event(&writer, &event(peer, 2, true)).unwrap();
+    let mut old = Store::open(dir.path().join("old.db"), roster.membership().clone()).unwrap();
+    let mut current =
+        Store::open(dir.path().join("current.db"), roster.membership().clone()).unwrap();
+    roster.receive(&mut old, &first).unwrap();
+    roster.receive(&mut current, &first).unwrap();
+    let old_anchor = sign_anchor(&roster, &mut old, &writer).unwrap();
+    verify_remote_author(&roster, &mut current, &old_anchor, peer).unwrap();
+    roster.receive(&mut current, &deletion).unwrap();
+    assert!(matches!(
+        verify_remote_author(&roster, &mut current, &old_anchor, peer),
+        Err(RecoveryError::RemoteBehind(id)) if id == EventId { peer, sequence: 2 }
+    ));
+    let current_anchor = sign_anchor(&roster, &mut current, &writer).unwrap();
+    verify_remote_author(&roster, &mut old, &current_anchor, peer).unwrap();
 }

@@ -54,6 +54,7 @@ struct Config {
     address: SocketAddr,
     server_name: String,
     server_pin: String,
+    event_peer: Option<String>,
     #[serde(default)]
     fallback_peers: Vec<EndpointConfig>,
     ca_der: PathBuf,
@@ -69,6 +70,7 @@ struct EndpointConfig {
     address: SocketAddr,
     server_name: String,
     server_pin: String,
+    event_peer: Option<String>,
     connect_timeout_ms: Option<u64>,
 }
 
@@ -89,6 +91,7 @@ impl Config {
             self.address,
             self.server_name.as_str(),
             self.server_pin.as_str(),
+            self.event_peer.as_deref(),
             None,
         );
         std::iter::once(primary)
@@ -97,10 +100,11 @@ impl Config {
                     peer.address,
                     peer.server_name.as_str(),
                     peer.server_pin.as_str(),
+                    peer.event_peer.as_deref(),
                     peer.connect_timeout_ms,
                 )
             }))
-            .map(|(address, server_name, certificate, connect_timeout_ms)| {
+            .map(|(address, server_name, certificate, event_peer, connect_timeout_ms)| {
                 let connect_timeout = connect_timeout_ms
                     .map(|value| {
                         (100..=15_000)
@@ -114,6 +118,7 @@ impl Config {
                     server_name: ServerName::try_from(server_name.to_owned())
                         .map_err(|_| HostError::Configuration)?,
                     certificate: hex(certificate)?,
+                    event_peer: event_peer.map(hex::<32>).transpose()?,
                     connect_timeout,
                 })
             })

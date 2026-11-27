@@ -14,6 +14,7 @@ use crate::{
     materialize::FileTarget,
     projection::Projection,
     replica::{Change, EntryKind, EventId, ObjectId, PeerId, Replica},
+    recovery::{self, RecoveryError},
     retention::{Confirmation, PeerState},
     store::Store,
     sync::{sync_cancellable, sync_serving_cache, Destination, FileResult, SyncError, SyncReport},
@@ -32,6 +33,7 @@ pub enum DirectError {
     Sync(SyncError),
     Wire(WireError),
     Confirmation(AuthError),
+    Recovery(RecoveryError),
     Cancelled,
 }
 
@@ -41,6 +43,7 @@ pub struct PeerEndpoint {
     pub address: SocketAddr,
     pub server_name: ServerName<'static>,
     pub certificate: CertificatePin,
+    pub event_peer: Option<PeerId>,
     pub connect_timeout: Option<Duration>,
 }
 
@@ -79,7 +82,7 @@ pub(crate) fn pull_with_reader(
         return Err(DirectError::Cancelled);
     }
     let stream = connect(client, peer, timeout)?;
-    pull_authenticated_stream(stream, store, roster, destination, reader, cancelled)
+    pull_authenticated_stream(stream, store, roster, destination, reader, peer.event_peer, cancelled)
 }
 
 fn pull_authenticated_stream(
@@ -88,6 +91,7 @@ fn pull_authenticated_stream(
     roster: &Roster,
     destination: Destination<'_>,
     reader: Option<&PeerSigningKey>,
+    remote_author: Option<PeerId>,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<SyncReport, DirectError> {
     if cancelled() {
@@ -98,6 +102,12 @@ fn pull_authenticated_stream(
             inner: stream,
             cancelled,
         };
+        if let Some(peer) = remote_author {
+            let wire = pull_recovery_anchor(&mut connection, roster, peer)
+                .map_err(DirectError::Wire)?;
+            recovery::verify_remote_author(roster, store, &wire, peer)
+                .map_err(DirectError::Recovery)?;
+        }
         let root = destination.root;
         let report = sync_cancellable(&mut connection, store, roster, destination, cancelled)
             .map_err(DirectError::Sync)?;
@@ -127,7 +137,7 @@ pub fn pull_over_stream(
 ) -> Result<SyncReport, DirectError> {
     let authenticated = client.connect(stream, peer.server_name.clone(), peer.certificate)
         .map_err(DirectError::Tls)?;
-    pull_authenticated_stream(authenticated, store, roster, destination, None, &|| false)
+    pull_authenticated_stream(authenticated, store, roster, destination, None, peer.event_peer, &|| false)
 }
 
 struct CancellableStream<'a, S> {
@@ -184,6 +194,12 @@ pub(crate) fn pull_serving_cache_cancellable(
             inner: connect(client, peer, timeout)?,
             cancelled,
         };
+        if let Some(peer) = peer.event_peer {
+            let wire = pull_recovery_anchor(&mut connection, roster, peer)
+                .map_err(DirectError::Wire)?;
+            recovery::verify_remote_author(roster, store, &wire, peer)
+                .map_err(DirectError::Recovery)?;
+        }
         let added = sync_serving_cache(&mut connection, store, roster, chunks, completed)
             .map_err(DirectError::Sync)?;
         exchange_confirmations(&mut connection, store, roster).map_err(DirectError::Wire)?;

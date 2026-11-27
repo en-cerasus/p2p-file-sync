@@ -36,6 +36,7 @@ pub enum RecoveryError {
     InvalidAnchor,
     MissingSignedEvent(EventId),
     Behind(EventId),
+    RemoteBehind(EventId),
     Diverged(EventId),
 }
 
@@ -120,6 +121,35 @@ pub fn authenticate_anchor(
     trusted_peer: PeerId,
 ) -> Result<(), RecoveryError> {
     parse_signed_anchor(roster, wire, trusted_peer).map(|_| ())
+}
+
+/// A peer must retain every event it authored. Compare its signed current
+/// frontier with the history already held locally before accepting a pull.
+/// Other authors may legitimately be ahead or behind on either device.
+pub fn verify_remote_author(
+    roster: &Roster,
+    store: &mut Store,
+    wire: &[u8],
+    trusted_peer: PeerId,
+) -> Result<(), RecoveryError> {
+    if store.membership() != roster.membership() {
+        return Err(RecoveryError::WrongScope);
+    }
+    let anchor = parse_signed_anchor(roster, wire, trusted_peer)?;
+    store.refresh()?;
+    let local = store.replica().clock().get(&trusted_peer).copied().unwrap_or(0);
+    let remote = anchor.prefixes.iter().find(|prefix| prefix.peer == trusted_peer);
+    let remote_sequence = remote.map_or(0, |prefix| prefix.sequence);
+    let id = EventId { peer: trusted_peer, sequence: local };
+    if remote_sequence < local {
+        return Err(RecoveryError::RemoteBehind(id));
+    }
+    if local != 0 && remote_sequence == local
+        && prefix_digest(store, roster, trusted_peer, local)? != remote.unwrap().digest
+    {
+        return Err(RecoveryError::Diverged(id));
+    }
+    Ok(())
 }
 
 fn parse_signed_anchor(

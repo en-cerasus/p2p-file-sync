@@ -1,6 +1,7 @@
 use std::net::TcpListener;
 
 use p2p_sync_core::{
+    direct::DirectError,
     host::{HostError, Sender},
     recovery::RecoveryError,
 };
@@ -39,6 +40,11 @@ fn pinned_tls_peer_supplies_anchor_then_catchup_satisfies_startup_gate() {
     let mut direct: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&direct_config).unwrap()).unwrap();
     direct["address"] = listener.local_addr().unwrap().to_string().into();
+    direct["event_peer"] = trusted_peer
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+        .into();
     direct.as_object_mut().unwrap().remove("fallback_peers");
     std::fs::write(&direct_config, direct.to_string()).unwrap();
 
@@ -75,4 +81,107 @@ fn pinned_tls_peer_supplies_anchor_then_catchup_satisfies_startup_gate() {
         server.join().unwrap();
         Sender::open(&second_config, &second_state).unwrap();
     });
+}
+
+#[test]
+fn receiver_rejects_a_peer_whose_own_signed_history_was_rolled_back() {
+    let root = tempfile::tempdir().unwrap();
+    let setup = root.path().join("setup");
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
+        .arg("setup")
+        .arg(&setup)
+        .args(["127.0.0.1:8782", "127.0.0.1:8782", "1", "2"])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let first_config = setup.join("sender/server.json");
+    let second_config = setup.join("writer-2/server.json");
+    let direct_config = setup.join("writer-2/direct.json");
+    for config in [&first_config, &second_config] {
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(config).unwrap()).unwrap();
+        json["bind"] = "127.0.0.1:0".into();
+        std::fs::write(config, json.to_string()).unwrap();
+    }
+    let first_state = root.path().join("first-state");
+    let second_state = root.path().join("second-state");
+    let source = root.path().join("song.tja");
+    std::fs::write(&source, b"original is still here").unwrap();
+    let peer = Sender::open(&first_config, &first_state)
+        .unwrap()
+        .publish(&source)
+        .unwrap()
+        .peer;
+    let settings: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&first_config).unwrap()).unwrap();
+    let share = settings["share"].as_str().unwrap();
+    let database = first_state.join(share).join("1/sync.db");
+    let witness = first_state.join(share).join("witness/1/sender");
+    let old_database = root.path().join("old.db");
+    let old_witness = root.path().join("old-witness");
+    std::fs::copy(&database, &old_database).unwrap();
+    std::fs::create_dir(&old_witness).unwrap();
+    for entry in std::fs::read_dir(&witness).unwrap() {
+        let entry = entry.unwrap();
+        if entry
+            .path()
+            .extension()
+            .is_some_and(|extension| extension == "witness")
+        {
+            std::fs::copy(entry.path(), old_witness.join(entry.file_name())).unwrap();
+        }
+    }
+    Sender::open(&first_config, &first_state)
+        .unwrap()
+        .revise("song.tja", None)
+        .unwrap();
+    let mut direct: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&direct_config).unwrap()).unwrap();
+    direct["event_peer"] = peer
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+        .into();
+    direct.as_object_mut().unwrap().remove("fallback_peers");
+
+    let mut first = Sender::open(&first_config, &first_state).unwrap();
+    let listener = first.bind().unwrap();
+    direct["address"] = listener.local_addr().unwrap().to_string().into();
+    std::fs::write(&direct_config, direct.to_string()).unwrap();
+    let mut second = Sender::open(&second_config, &second_state).unwrap();
+    std::thread::scope(|threads| {
+        let server = threads.spawn(|| {
+            let (socket, _) = listener.accept().unwrap();
+            first.serve(socket).unwrap();
+        });
+        assert_eq!(second.catch_up(&direct_config).unwrap(), 2);
+        server.join().unwrap();
+    });
+    drop(first);
+
+    std::fs::copy(&old_database, &database).unwrap();
+    std::fs::remove_dir_all(&witness).unwrap();
+    std::fs::rename(&old_witness, &witness).unwrap();
+    let mut rolled_back = Sender::open(&first_config, &first_state).unwrap();
+    let listener = rolled_back.bind().unwrap();
+    direct["address"] = listener.local_addr().unwrap().to_string().into();
+    std::fs::write(&direct_config, direct.to_string()).unwrap();
+    std::thread::scope(|threads| {
+        let server = threads.spawn(|| {
+            let (socket, _) = listener.accept().unwrap();
+            let _ = rolled_back.serve(socket);
+        });
+        assert!(matches!(
+            second.catch_up(&direct_config),
+            Err(HostError::Direct(DirectError::Recovery(
+                RecoveryError::RemoteBehind(_)
+            )))
+        ));
+        server.join().unwrap();
+    });
+    assert_eq!(std::fs::read(&source).unwrap(), b"original is still here");
 }

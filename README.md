@@ -106,6 +106,8 @@ cargo run --locked --release -p p2p-sync-core --bin p2p-send -- serve .\trial-se
 
 基準点より履歴が古くなって起動を拒否された場合、`p2p-send recover-from-anchor <server.json> <state-dir> <direct.json>`で署名済みイベントと検証済み本体を再取得できます。この専用コマンドは遅れた状態で共有元のスキャン・公開・配信や履歴整理を行わず、取り込み後に基準点を再照合します。履歴が分岐している場合は自動で上書きしません。未送信のローカル変更を再初期同期へ移す機能はまだありません。
 
+`direct.json`の主接続先に`"event_peer":"<接続先の署名公開鍵64桁>"`を指定すると、同期開始時に相手から署名付き基準点を取得します。相手が自分で発行したイベントの履歴をこちらより古い状態へ戻していた場合、ファイルやイベントの取得前に接続を拒否します。`fallback_peers`の各接続先でも、それぞれの`event_peer`を指定できます。未指定の接続先では従来どおり同期します。このチェックだけで、両端末を同じ古い状態へ戻す場合は検出できません。
+
 `p2p-send prepare-generation <server.json> <state-dir> <next-server.json> <administrator-seed-file> <new-dir>` で移行用データを作成できます。次の設定には同じ共有IDと1つ進んだ世代、新しいピア一覧を指定します。管理鍵には、同期ピアの署名鍵と別の32バイトのEd25519シードを使います。出力には署名済みの `transition.bin`、`checkpoint.bin`、検証済みの `files` が含まれます。出力フォルダーには共有ファイル本体が含まれるため、共有先と同様に管理してください。作成だけでは世代は切り替わりません。
 
 `p2p-send verify-generation <previous-server.json> <next-server.json> <administrator-public-key> <bundle-dir>` は、信頼済みの管理公開鍵（Ed25519の生32バイト）を使って、署名、世代、ピア一覧、履歴、ファイル本体を検証します。検証は読み取り専用です。現段階のチェックポイント上限は128 MiBで、ファイル本体はこの上限に含みません。
