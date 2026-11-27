@@ -77,6 +77,7 @@ fn run() -> Result<(), String> {
                 | "export-recovery-anchor"
                 | "fetch-recovery-anchor"
                 | "recover-from-anchor"
+                | "refresh-recovery-anchor"
         )
     ) || (mode == Some("publish") && args.len() < 4)
         || (matches!(mode, Some("publish-tree" | "refresh-tree")) && args.len() != 4)
@@ -90,6 +91,7 @@ fn run() -> Result<(), String> {
         || (mode == Some("export-recovery-anchor") && args.len() != 4)
         || (mode == Some("fetch-recovery-anchor") && args.len() != 6)
         || (mode == Some("recover-from-anchor") && args.len() != 4)
+        || (mode == Some("refresh-recovery-anchor") && args.len() != 4)
         || (mode == Some("conflicts") && args.len() != 3)
         || (mode == Some("resolve") && args.len() < 5)
         || (mode == Some("history") && args.len() != 3)
@@ -100,7 +102,7 @@ fn run() -> Result<(), String> {
         || (mode == Some("verify-generation") && args.len() != 5)
     {
         return Err(
-            "Usage: p2p-send setup <new-dir> <bind-ip:port> <peer-ip:port> [receivers] [writers]\n       p2p-send publish <server.json> <state-dir> <file> [file ...]\n       p2p-send publish-tree <server.json> <state-dir> <folder>\n       p2p-send refresh-tree <server.json> <state-dir> <folder>\n       p2p-send update <server.json> <state-dir> <shared/path> <source>\n       p2p-send delete <server.json> <state-dir> <shared/path>\n       p2p-send move <server.json> <state-dir> <old/path> <new/path>\n       p2p-send conflicts <server.json> <state-dir>\n       p2p-send history <server.json> <state-dir>\n       p2p-send restore <server.json> <state-dir> <archive-id> <reviewed-current-id>\n       p2p-send catch-up <server.json> <state-dir> <direct.json>\n       p2p-send pull <direct.json> <receiver-state-dir> <destination>\n       p2p-send rtc-bridge <rtc.json>\n       p2p-send export-recovery-anchor <server.json> <state-dir> <new-output-file>\n       p2p-send fetch-recovery-anchor <server.json> <state-dir> <direct.json> <trusted-peer-id> <new-output-file>\n       p2p-send recover-from-anchor <server.json> <state-dir> <direct.json>\n       p2p-send import-confirmations <server.json> <server-state-dir> <direct.json> <receiver-state-dir> <destination>\n       p2p-send prepare-generation <server.json> <state-dir> <next-server.json> <administrator-seed-file> <new-dir>\n       p2p-send verify-generation <previous-server.json> <next-server.json> <administrator-public-key> <bundle-dir>\n       p2p-send resolve <server.json> <state-dir> <chosen-id> <other-id> [other-id ...]\n       p2p-send serve <server.json> <state-dir>\n       p2p-send serve-peer <server.json> <state-dir> <direct.json> <interval-seconds> [receiver-state-dir destination]\n       p2p-send serve-tree <server.json> <state-dir> <folder> <interval-seconds>"
+            "Usage: p2p-send setup <new-dir> <bind-ip:port> <peer-ip:port> [receivers] [writers]\n       p2p-send publish <server.json> <state-dir> <file> [file ...]\n       p2p-send publish-tree <server.json> <state-dir> <folder>\n       p2p-send refresh-tree <server.json> <state-dir> <folder>\n       p2p-send update <server.json> <state-dir> <shared/path> <source>\n       p2p-send delete <server.json> <state-dir> <shared/path>\n       p2p-send move <server.json> <state-dir> <old/path> <new/path>\n       p2p-send conflicts <server.json> <state-dir>\n       p2p-send history <server.json> <state-dir>\n       p2p-send restore <server.json> <state-dir> <archive-id> <reviewed-current-id>\n       p2p-send catch-up <server.json> <state-dir> <direct.json>\n       p2p-send pull <direct.json> <receiver-state-dir> <destination>\n       p2p-send rtc-bridge <rtc.json>\n       p2p-send export-recovery-anchor <server.json> <state-dir> <new-output-file>\n       p2p-send fetch-recovery-anchor <server.json> <state-dir> <direct.json> <trusted-peer-id> <new-output-file>\n       p2p-send recover-from-anchor <server.json> <state-dir> <direct.json>\n       p2p-send refresh-recovery-anchor <server.json> <state-dir> <direct.json>\n       p2p-send import-confirmations <server.json> <server-state-dir> <direct.json> <receiver-state-dir> <destination>\n       p2p-send prepare-generation <server.json> <state-dir> <next-server.json> <administrator-seed-file> <new-dir>\n       p2p-send verify-generation <previous-server.json> <next-server.json> <administrator-public-key> <bundle-dir>\n       p2p-send resolve <server.json> <state-dir> <chosen-id> <other-id> [other-id ...]\n       p2p-send serve <server.json> <state-dir>\n       p2p-send serve-peer <server.json> <state-dir> <direct.json> <interval-seconds> [receiver-state-dir destination]\n       p2p-send serve-tree <server.json> <state-dir> <folder> <interval-seconds>"
                 .to_string(),
         );
     }
@@ -153,6 +155,13 @@ fn run() -> Result<(), String> {
             )
             .map_err(|error| format!("Could not fetch recovery anchor: {error:?}"))?;
         println!("Fetched signed recovery anchor.");
+        return Ok(());
+    }
+    if mode == Some("refresh-recovery-anchor") {
+        let added = sender
+            .refresh_recovery_anchor(Path::new(&args[1]), Path::new(&args[3]))
+            .map_err(|error| format!("Could not refresh recovery anchor: {error:?}"))?;
+        println!("Imported {added} event(s) and advanced the trusted recovery anchor.");
         return Ok(());
     }
     if mode == Some("history") {

@@ -1,6 +1,6 @@
 use p2p_sync_core::{
     auth::{PeerSigningKey, Role, Roster},
-    recovery::{sign_anchor, verify_anchor, verify_remote_author, RecoveryError},
+    recovery::{sign_anchor, verify_anchor, verify_anchor_advance, verify_remote_author, RecoveryError},
     replica::{Change, Entry, EntryKind, Event, EventId, VersionVector},
     store::Store,
 };
@@ -173,4 +173,9 @@ fn remote_author_cannot_claim_less_history_than_a_receiver_already_has() {
     ));
     let current_anchor = sign_anchor(&roster, &mut current, &writer).unwrap();
     verify_remote_author(&roster, &mut old, &current_anchor, peer).unwrap();
+    verify_anchor_advance(&roster, &mut current, &old_anchor, &current_anchor, peer).unwrap();
+    assert!(matches!(
+        verify_anchor_advance(&roster, &mut current, &current_anchor, &old_anchor, peer),
+        Err(RecoveryError::StaleAnchor(id)) if id == EventId { peer, sequence: 2 }
+    ));
 }

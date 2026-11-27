@@ -33,6 +33,7 @@ fn pinned_tls_peer_supplies_anchor_then_catchup_satisfies_startup_gate() {
     let first_state = root.path().join("first-state");
     let second_state = root.path().join("second-state");
     let source = root.path().join("song.tja");
+    let next_source = root.path().join("next.tja");
     std::fs::write(&source, b"anchor exchange").unwrap();
     let mut first = Sender::open(&first_config, &first_state).unwrap();
     let trusted_peer = first.publish(&source).unwrap().peer;
@@ -50,6 +51,12 @@ fn pinned_tls_peer_supplies_anchor_then_catchup_satisfies_startup_gate() {
 
     std::thread::scope(|threads| {
         let server = threads.spawn(|| {
+            for _ in 0..2 {
+                let (socket, _) = listener.accept().unwrap();
+                first.serve(socket).unwrap();
+            }
+            std::fs::write(&next_source, b"later event").unwrap();
+            first.publish(&next_source).unwrap();
             for _ in 0..2 {
                 let (socket, _) = listener.accept().unwrap();
                 first.serve(socket).unwrap();
@@ -78,6 +85,16 @@ fn pinned_tls_peer_supplies_anchor_then_catchup_satisfies_startup_gate() {
             Sender::recover_from_anchor(&second_config, &second_state, &direct_config).unwrap(),
             1
         );
+        let old_anchor = std::fs::read(&anchor).unwrap();
+        let refresh = std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
+            .arg("refresh-recovery-anchor")
+            .arg(&second_config)
+            .arg(&second_state)
+            .arg(&direct_config)
+            .output().unwrap();
+        assert!(refresh.status.success(), "{}", String::from_utf8_lossy(&refresh.stderr));
+        assert!(String::from_utf8_lossy(&refresh.stdout).contains("Imported 1 event(s)"));
+        assert_ne!(std::fs::read(&anchor).unwrap(), old_anchor);
         server.join().unwrap();
         Sender::open(&second_config, &second_state).unwrap();
     });

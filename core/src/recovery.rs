@@ -37,6 +37,7 @@ pub enum RecoveryError {
     MissingSignedEvent(EventId),
     Behind(EventId),
     RemoteBehind(EventId),
+    StaleAnchor(EventId),
     Diverged(EventId),
 }
 
@@ -148,6 +149,32 @@ pub fn verify_remote_author(
         && prefix_digest(store, roster, trusted_peer, local)? != remote.unwrap().digest
     {
         return Err(RecoveryError::Diverged(id));
+    }
+    Ok(())
+}
+
+/// Both anchors must match the same durable local history before a peer-held
+/// high-water mark can advance. This proves continuity even though each anchor
+/// contains only one digest per author's final sequence.
+pub fn verify_anchor_advance(
+    roster: &Roster,
+    store: &mut Store,
+    previous: &[u8],
+    candidate: &[u8],
+    trusted_peer: PeerId,
+) -> Result<(), RecoveryError> {
+    verify_anchor(roster, store, previous, trusted_peer)?;
+    verify_anchor(roster, store, candidate, trusted_peer)?;
+    let old = parse_signed_anchor(roster, previous, trusted_peer)?;
+    let new = parse_signed_anchor(roster, candidate, trusted_peer)?;
+    for prefix in old.prefixes {
+        let next = new.prefixes.iter().find(|next| next.peer == prefix.peer);
+        if next.is_none_or(|next| next.sequence < prefix.sequence) {
+            return Err(RecoveryError::StaleAnchor(EventId {
+                peer: prefix.peer,
+                sequence: prefix.sequence,
+            }));
+        }
     }
     Ok(())
 }

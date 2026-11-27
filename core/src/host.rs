@@ -369,6 +369,57 @@ impl Sender {
         trusted_peer: PeerId,
         output: &Path,
     ) -> Result<(), HostError> {
+        let parent = output.parent().ok_or(HostError::Configuration)?;
+        let parent = fs::canonicalize(parent).map_err(HostError::Io)?;
+        let state_root = self.generation_marker.parent()
+            .and_then(Path::parent).ok_or(HostError::Configuration)?;
+        let state_root = fs::canonicalize(state_root).map_err(HostError::Io)?;
+        if parent.starts_with(state_root) {
+            return Err(HostError::Configuration);
+        }
+        let name = output.file_name().and_then(|name| name.to_str()).ok_or(HostError::Configuration)?;
+        let wire = self.request_recovery_anchor(configuration, trusted_peer)?;
+        write_bundle_file(&parent, name, &wire)
+    }
+
+    /// Advance the configured external anchor only after its old and new
+    /// signatures agree with the same fully caught-up local history.
+    pub fn refresh_recovery_anchor(
+        &mut self,
+        configuration: &Path,
+        peers: &Path,
+    ) -> Result<usize, HostError> {
+        let config: SenderConfig = serde_json::from_slice(&read_bounded(configuration, MAX_CONFIG_BYTES)?)
+            .map_err(|_| HostError::Configuration)?;
+        let roster = build_roster(&config.share, config.generation, config.members)?;
+        if roster.membership() != self.roster.membership() {
+            return Err(HostError::Configuration);
+        }
+        let anchor = config.recovery_anchor.ok_or(HostError::Configuration)?;
+        let trusted_peer = hex::<32>(&anchor.peer)?;
+        let path = configuration.parent().ok_or(HostError::Configuration)?.join(anchor.file);
+        let path = fs::canonicalize(path).map_err(HostError::Io)?;
+        let state_root = self.generation_marker.parent()
+            .and_then(Path::parent).ok_or(HostError::Configuration)?;
+        if path.starts_with(fs::canonicalize(state_root).map_err(HostError::Io)?) {
+            return Err(HostError::Configuration);
+        }
+        let candidate = self.request_recovery_anchor(peers, trusted_peer)?;
+        let added = self.catch_up(peers)?;
+        let _lock = self.lock_state()?;
+        let previous = read_bounded(&path, MAX_RECOVERY_ANCHOR_BYTES)?;
+        recovery::verify_anchor_advance(
+            &self.roster, &mut self.store, &previous, &candidate, trusted_peer,
+        ).map_err(HostError::Recovery)?;
+        replace_bundle_file(&path, &candidate)?;
+        Ok(added)
+    }
+
+    fn request_recovery_anchor(
+        &self,
+        configuration: &Path,
+        trusted_peer: PeerId,
+    ) -> Result<Vec<u8>, HostError> {
         self.check_generation()?;
         if trusted_peer == self.signer.verifying_key().to_bytes()
             || !self.roster.membership().members.contains(&trusted_peer)
@@ -395,19 +446,10 @@ impl Sender {
             roster.membership().generation,
             self.baseline_digest,
         ).map_err(HostError::Tls)?;
-        let parent = output.parent().ok_or(HostError::Configuration)?;
-        let parent = fs::canonicalize(parent).map_err(HostError::Io)?;
-        let state_root = self.generation_marker.parent()
-            .and_then(Path::parent).ok_or(HostError::Configuration)?;
-        let state_root = fs::canonicalize(state_root).map_err(HostError::Io)?;
-        if parent.starts_with(state_root) {
-            return Err(HostError::Configuration);
-        }
-        let name = output.file_name().and_then(|name| name.to_str()).ok_or(HostError::Configuration)?;
         let wire = direct::fetch_recovery_anchor(
             &client, &peer, Duration::from_secs(15), &self.roster, trusted_peer,
         ).map_err(HostError::Direct)?;
-        write_bundle_file(&parent, name, &wire)
+        Ok(wire)
     }
 
     pub fn publish(&mut self, source: &Path) -> Result<EventId, HostError> {
@@ -1392,6 +1434,15 @@ fn write_bundle_file(output: &Path, name: &str, bytes: &[u8]) -> Result<(), Host
     temporary
         .persist_noclobber(output.join(name))
         .map_err(|error| HostError::Io(error.error))?;
+    Ok(())
+}
+
+fn replace_bundle_file(path: &Path, bytes: &[u8]) -> Result<(), HostError> {
+    let parent = path.parent().ok_or(HostError::Configuration)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(HostError::Io)?;
+    temporary.write_all(bytes).map_err(HostError::Io)?;
+    temporary.as_file().sync_all().map_err(HostError::Io)?;
+    temporary.persist(path).map_err(|error| HostError::Io(error.error))?;
     Ok(())
 }
 
