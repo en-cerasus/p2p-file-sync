@@ -117,6 +117,18 @@ fn pinned_tls_peer_supplies_anchor_then_catchup_satisfies_startup_gate() {
             Err(HostError::RecoveryReviewRequired)
         ));
         assert!(matches!(
+            recovered.publish(&recovered_source.join("song.tja")),
+            Err(HostError::RecoveryReviewRequired)
+        ));
+        assert!(matches!(
+            recovered.revise("song.tja", Some(&recovered_source.join("song.tja"))),
+            Err(HostError::RecoveryReviewRequired)
+        ));
+        assert!(matches!(
+            recovered.relocate("song.tja", "restored.tja"),
+            Err(HostError::RecoveryReviewRequired)
+        ));
+        assert!(matches!(
             recovered.resume_tree_refresh(&recovered_source),
             Err(HostError::RecoveryReviewRequired)
         ));

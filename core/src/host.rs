@@ -388,6 +388,13 @@ impl Sender {
         }
     }
 
+    fn ensure_source_review_complete(&self) -> Result<(), HostError> {
+        if self.recovery_review_marker.try_exists().map_err(HostError::Io)? {
+            return Err(HostError::RecoveryReviewRequired);
+        }
+        Ok(())
+    }
+
     pub fn recovery_review_candidates(
         &mut self,
         root: &Path,
@@ -528,6 +535,7 @@ impl Sender {
 
     pub fn publish(&mut self, source: &Path) -> Result<EventId, HostError> {
         let _lock = self.lock_state()?;
+        self.ensure_source_review_complete()?;
         let name = source
             .file_name()
             .and_then(|name| name.to_str())
@@ -546,9 +554,7 @@ impl Sender {
 
     pub fn publish_tree(&mut self, root: &Path) -> Result<TreeSummary, HostError> {
         let _lock = self.lock_state()?;
-        if self.recovery_review_marker.try_exists().map_err(HostError::Io)? {
-            return Err(HostError::RecoveryReviewRequired);
-        }
+        self.ensure_source_review_complete()?;
         publish_tree(
             root,
             &mut self.store,
@@ -575,9 +581,7 @@ impl Sender {
 
     pub fn refresh_tree(&mut self, root: &Path) -> Result<TreeSummary, HostError> {
         let _lock = self.lock_state()?;
-        if self.recovery_review_marker.try_exists().map_err(HostError::Io)? {
-            return Err(HostError::RecoveryReviewRequired);
-        }
+        self.ensure_source_review_complete()?;
         self.sweep_archives()?;
         refresh_tree(
             root,
@@ -637,6 +641,7 @@ impl Sender {
         reviewed: EventId,
     ) -> Result<EventId, HostError> {
         let _lock = self.lock_state()?;
+        self.ensure_source_review_complete()?;
         let root = self.validate_source_root(root)?;
         let current = self.shared_head(shared_path, false)?;
         if current != reviewed || current.peer != self.signer.verifying_key().to_bytes() {
@@ -666,6 +671,7 @@ impl Sender {
         destination: &Path,
     ) -> Result<EventId, HostError> {
         let _lock = self.lock_state()?;
+        self.ensure_source_review_complete()?;
         let root = self.validate_source_root(root)?;
         let current = self.shared_head(shared_path, false)?;
         if current != reviewed || current.peer != self.signer.verifying_key().to_bytes() {
@@ -736,6 +742,7 @@ impl Sender {
         source: Option<&Path>,
     ) -> Result<EventId, HostError> {
         let _lock = self.lock_state()?;
+        self.ensure_source_review_complete()?;
         let base = self.shared_head(shared_path, false)?;
         revise_file(
             source,
@@ -750,6 +757,7 @@ impl Sender {
 
     pub fn relocate(&mut self, shared_path: &str, destination: &str) -> Result<EventId, HostError> {
         let _lock = self.lock_state()?;
+        self.ensure_source_review_complete()?;
         let base = self.shared_head(shared_path, false)?;
         let (parent, name) = match destination.rsplit_once('/') {
             Some((parent, name)) => {
@@ -850,6 +858,7 @@ impl Sender {
         reviewed: EventId,
     ) -> Result<EventId, HostError> {
         let _lock = self.lock_state()?;
+        self.ensure_source_review_complete()?;
         restore_archived_file(
             &mut self.store,
             &self.roster,
@@ -867,6 +876,7 @@ impl Sender {
         reviewed: BTreeSet<EventId>,
     ) -> Result<EventId, HostError> {
         let _lock = self.lock_state()?;
+        self.ensure_source_review_complete()?;
         resolve_file_conflict(
             &mut self.store,
             &self.roster,
