@@ -1030,6 +1030,7 @@ fn command_line_publish_can_be_served_to_two_registered_receive_hosts() {
             serde_json::from_slice(&std::fs::read(&relay_direct).unwrap()).unwrap();
         settings["address"] = listener.local_addr().unwrap().to_string().into();
         settings["server_pin"] = second_direct["fallback_peers"][0]["server_pin"].clone();
+        settings["event_peer"] = second_direct["fallback_peers"][0]["event_peer"].clone();
         settings.as_object_mut().unwrap().remove("fallback_peers");
         std::fs::write(&relay_direct, settings.to_string()).unwrap();
         let serving = threads.spawn(move || {
@@ -1533,6 +1534,7 @@ fn generated_writers_use_distinct_credentials_and_share_their_changes() {
         serde_json::from_slice(&std::fs::read(&receiver).unwrap()).unwrap();
     let endpoint = json["fallback_peers"][0].clone();
     json["server_pin"] = endpoint["server_pin"].clone();
+    json["event_peer"] = endpoint["event_peer"].clone();
     json.as_object_mut().unwrap().remove("fallback_peers");
     std::fs::write(&receiver, json.to_string()).unwrap();
     update_address(&receiver, &second_listener);

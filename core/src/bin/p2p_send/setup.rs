@@ -93,17 +93,18 @@ pub fn create(
         .map_err(write_error)?;
         write_new(&directory.join("private-key.der"), &key.serialize_der()).map_err(write_error)?;
         let pin = hex(&sha256(certificate.der().as_ref()));
+        let event_peer = write_event_key(&directory, "writer", &mut members, write_error)?;
         let mut address = endpoint;
         address.set_port(endpoint.port() + index);
         endpoints.push(json!({
             "address": address.to_string(), "server_name": host, "server_pin": pin,
+            "event_peer": event_peer,
             "connect_timeout_ms": 1500,
         }));
         let mut listen = bind;
         listen.set_port(bind.port() + index);
         servers.push((directory.clone(), listen, pin.clone()));
         client_pins.push(pin);
-        write_event_key(&directory, "writer", &mut members, write_error)?;
     }
 
     let mut clients = Vec::with_capacity(receivers);
@@ -136,13 +137,14 @@ pub fn create(
         .map_err(write_error)?;
         let pin = hex(&sha256(client_cert.der().as_ref()));
         client_pins.push(pin.clone());
-        write_event_key(&receiver, "reader", &mut members, write_error)?;
+        let event_peer = write_event_key(&receiver, "reader", &mut members, write_error)?;
         let mut listen = bind;
         listen.set_port(bind.port() + writers + index as u16 - 1);
         let mut address = endpoint;
         address.set_port(endpoint.port() + writers + index as u16 - 1);
         reader_endpoints.push(json!({
             "address": address.to_string(), "server_name": host, "server_pin": pin,
+            "event_peer": event_peer,
             "connect_timeout_ms": 1500,
         }));
         clients.push((receiver, listen, pin));
@@ -153,6 +155,7 @@ pub fn create(
             "share": share, "generation": 1, "members": members,
             "address": first["address"], "server_name": first["server_name"],
             "server_pin": first["server_pin"],
+            "event_peer": first["event_peer"],
             "ca_der": "ca.der", "certificate_der": "certificate.der", "private_key_der": "private-key.der",
         });
         if reader {
@@ -227,12 +230,14 @@ fn write_event_key(
     role: &str,
     members: &mut serde_json::Map<String, serde_json::Value>,
     write_error: impl Fn(io::Error) -> String,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let mut seed = [0; 32];
     getrandom::fill(&mut seed).map_err(|error| error.to_string())?;
     let key = PeerSigningKey::from_bytes(&seed);
-    members.insert(hex(key.verifying_key().as_bytes()), role.into());
-    write_new(&directory.join("event-key.bin"), &seed).map_err(write_error)
+    let event_peer = hex(key.verifying_key().as_bytes());
+    members.insert(event_peer.clone(), role.into());
+    write_new(&directory.join("event-key.bin"), &seed).map_err(write_error)?;
+    Ok(event_peer)
 }
 
 fn write_new(path: &Path, data: &[u8]) -> io::Result<()> {
