@@ -20,7 +20,7 @@ use crate::{
     blob::{Blob, BlobStore},
     direct::{self, DirectError, PeerEndpoint},
     generation::{
-        BaselineError, CheckpointDataError, GenerationBaseline, GenerationTransition,
+        BaselineError, CheckpointDataError, GenerationBaseline, GenerationCheckpoint, GenerationTransition,
         TransitionError, MAX_TRANSITION_BYTES,
     },
     local_target::{open_root, NewFileTarget},
@@ -1471,6 +1471,16 @@ pub fn verify_generation_bundle(
     administrator_public_key: &Path,
     bundle: &Path,
 ) -> Result<usize, HostError> {
+    load_verified_generation_bundle(previous_configuration, next_configuration, administrator_public_key, bundle)
+        .map(|(_, _, count)| count)
+}
+
+pub(crate) fn load_verified_generation_bundle(
+    previous_configuration: &Path,
+    next_configuration: &Path,
+    administrator_public_key: &Path,
+    bundle: &Path,
+) -> Result<(GenerationCheckpoint, Roster, usize), HostError> {
     let previous = read_sender_roster(previous_configuration)?;
     let next = read_sender_roster(next_configuration)?;
     let material = read_bounded(administrator_public_key, 32)?;
@@ -1498,9 +1508,10 @@ pub fn verify_generation_bundle(
         .verify_checkpoint(&bytes, &previous)
         .map_err(HostError::Transition)?;
     let blobs = BlobStore::open_existing(bundle.join("files")).map_err(HostError::Io)?;
-    checkpoint
+    let count = checkpoint
         .verify_contents(&blobs)
-        .map_err(HostError::CheckpointData)
+        .map_err(HostError::CheckpointData)?;
+    Ok((checkpoint, previous, count))
 }
 
 fn read_sender_roster(configuration: &Path) -> Result<Roster, HostError> {
