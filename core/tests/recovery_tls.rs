@@ -34,6 +34,9 @@ fn pinned_tls_peer_supplies_anchor_then_catchup_satisfies_startup_gate() {
     let second_state = root.path().join("second-state");
     let source = root.path().join("song.tja");
     let next_source = root.path().join("next.tja");
+    let recovered_source = root.path().join("recovered-source");
+    std::fs::create_dir(&recovered_source).unwrap();
+    std::fs::write(recovered_source.join("song.tja"), b"anchor exchange").unwrap();
     std::fs::write(&source, b"anchor exchange").unwrap();
     let mut first = Sender::open(&first_config, &first_state).unwrap();
     let trusted_peer = first.publish(&source).unwrap().peer;
@@ -57,6 +60,7 @@ fn pinned_tls_peer_supplies_anchor_then_catchup_satisfies_startup_gate() {
             }
             std::fs::write(&next_source, b"later event").unwrap();
             first.publish(&next_source).unwrap();
+            first.revise("song.tja", None).unwrap();
             for _ in 0..2 {
                 let (socket, _) = listener.accept().unwrap();
                 first.serve(socket).unwrap();
@@ -91,12 +95,42 @@ fn pinned_tls_peer_supplies_anchor_then_catchup_satisfies_startup_gate() {
             .arg(&second_config)
             .arg(&second_state)
             .arg(&direct_config)
-            .output().unwrap();
-        assert!(refresh.status.success(), "{}", String::from_utf8_lossy(&refresh.stderr));
-        assert!(String::from_utf8_lossy(&refresh.stdout).contains("Imported 1 event(s)"));
+            .output()
+            .unwrap();
+        assert!(
+            refresh.status.success(),
+            "{}",
+            String::from_utf8_lossy(&refresh.stderr)
+        );
+        assert!(String::from_utf8_lossy(&refresh.stdout).contains("Imported 2 event(s)"));
         assert_ne!(std::fs::read(&anchor).unwrap(), old_anchor);
         server.join().unwrap();
-        Sender::open(&second_config, &second_state).unwrap();
+        let mut recovered = Sender::open(&second_config, &second_state).unwrap();
+        assert_eq!(
+            recovered
+                .recovery_review_candidates(&recovered_source)
+                .unwrap(),
+            vec![vec!["song.tja".to_owned()]]
+        );
+        assert!(matches!(
+            recovered.refresh_tree(&recovered_source),
+            Err(HostError::RecoveryReviewRequired)
+        ));
+        assert!(matches!(
+            recovered.resume_tree_refresh(&recovered_source),
+            Err(HostError::RecoveryReviewRequired)
+        ));
+        std::fs::rename(
+            recovered_source.join("song.tja"),
+            root.path().join("saved-song.tja"),
+        )
+        .unwrap();
+        recovered.resume_tree_refresh(&recovered_source).unwrap();
+        recovered.refresh_tree(&recovered_source).unwrap();
+        assert_eq!(
+            std::fs::read(root.path().join("saved-song.tja")).unwrap(),
+            b"anchor exchange"
+        );
     });
 }
 

@@ -18,6 +18,7 @@ pub mod replica;
 pub mod retention;
 pub mod rtc;
 pub mod store;
+mod source_review;
 pub mod sync;
 pub mod tls;
 pub mod wire;
@@ -1137,6 +1138,7 @@ fn host_error_code(error: host::HostError) -> i32 {
     match error {
         host::HostError::Configuration | host::HostError::InactiveGeneration => 2,
         host::HostError::Store(store::StoreError::RollbackDetected) => 8,
+        host::HostError::RecoveryReviewRequired => 9,
         #[cfg(target_os = "ios")]
         host::HostError::Materialize(materialize::MaterializeError::Store(
             store::StoreError::RollbackDetected,

@@ -104,7 +104,7 @@ cargo run --locked --release -p p2p-sync-core --bin p2p-send -- serve .\trial-se
 
 配信側では、`p2p-send export-recovery-anchor <server.json> <state-dir> <new-output-file>`で署名付き履歴基準点を新規ファイルへ書き出せます。`p2p-send fetch-recovery-anchor <server.json> <state-dir> <direct.json> <trusted-peer-id> <new-output-file>`では、手動設定した主接続先から相互TLS経由で取得し、指定ピアの署名を検証して保存します。取得済みのファイルは上書きしません。別の信頼済みピアが保持した基準点を使う場合、`server.json`に`"recovery_anchor":{"file":"../peer-anchor.bin","peer":"<署名したピアの公開鍵64桁>"}`を指定します。パスは設定ファイルのフォルダー基準です。自分自身の署名や状態フォルダー内のファイルは基準点として拒否します。起動時に履歴が基準点より古い、または分岐していれば配信側は開きません。基準点は復元対象と独立した信頼済みピアから新しいものを受け取る必要があります。通信応答には毎回異なる乱数を署名して、以前の応答をそのまま再送する試みを拒否します。ただし署名元ピア自体が古い履歴へ戻った場合の検出、初回取得後に設定へ登録する処理の自動化、受信側の起動ゲート、再初期同期は未実装です。
 
-基準点より履歴が古くなって起動を拒否された場合、`p2p-send recover-from-anchor <server.json> <state-dir> <direct.json>`で署名済みイベントと検証済み本体を再取得できます。この専用コマンドは遅れた状態で共有元のスキャン・公開・配信や履歴整理を行わず、取り込み後に基準点を再照合します。履歴が分岐している場合は自動で上書きしません。未送信のローカル変更を再初期同期へ移す機能はまだありません。
+基準点より履歴が古くなって起動を拒否された場合、`p2p-send recover-from-anchor <server.json> <state-dir> <direct.json>`で署名済みイベントと検証済み本体を再取得できます。この専用コマンドは遅れた状態で共有元のスキャン・公開・配信や履歴整理を行わず、取り込み後に基準点を再照合します。履歴が分岐している場合は自動で上書きしません。復旧後は共有元の自動登録を停止し、`p2p-send review-recovered-source <server.json> <state-dir> <folder>`で復旧履歴と実ファイルの差分を読み取り専用で一覧できます。削除済みファイルや未送信の変更を別の場所へ保全するか、明示的に登録した後、差分がなくなれば`p2p-send resume-tree-refresh <server.json> <state-dir> <folder>`で自動登録を再開できます。再開時は正しい共有元フォルダを指定してください。未送信変更を自動的に競合として取り込む機能はまだありません。
 
 基準点を設定済みの配信側では、`p2p-send refresh-recovery-anchor <server.json> <state-dir> <direct.json>`で相手から新しい基準点を取得し、イベントと本体を取り込んでから外部の基準点ファイルを更新できます。新旧双方の署名と履歴を照合し、候補が古い場合は元のファイルを残します。初回取得後に`server.json`へ基準点を登録する作業は手動です。
 

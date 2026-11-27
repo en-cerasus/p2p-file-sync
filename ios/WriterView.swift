@@ -614,6 +614,7 @@ struct WriterView: View {
             case .writerFailed(let code) where code == 5: return "表示後に状態が変わったか、本体が不足しています。再読み込みしてください。"
             case .writerFailed(let code) where code == 7: return "取得を中断しました。次回は保存済みのデータを再利用します。"
             case .writerFailed(let code) where code == 8: return "古い同期状態が復元された可能性があります。共有元を変更せず、状態の復旧が必要です。"
+            case .writerFailed(let code) where code == 9: return "復旧後の共有元に履歴と異なるファイルがあります。自動登録を停止しました。差分を確認してください。"
             default: return "配信処理に失敗しました。"
             }
         }

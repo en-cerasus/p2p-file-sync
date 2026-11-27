@@ -162,6 +162,7 @@ pub struct Sender {
     private_paths: Vec<PathBuf>,
     baseline_digest: Option<[u8; 32]>,
     generation_marker: PathBuf,
+    recovery_review_marker: PathBuf,
 }
 
 impl Sender {
@@ -236,6 +237,7 @@ impl Sender {
         if recovery_only && config.recovery_anchor.is_none() {
             return Err(HostError::Configuration);
         }
+        let mut recovery_behind = false;
         if let Some(anchor) = &config.recovery_anchor {
             let trusted_peer = hex::<32>(&anchor.peer)?;
             if trusted_peer == signer.verifying_key().to_bytes() {
@@ -247,7 +249,7 @@ impl Sender {
             }
             let wire = read_bounded(&path, MAX_RECOVERY_ANCHOR_BYTES)?;
             match recovery::verify_anchor(&roster, &mut store, &wire, trusted_peer) {
-                Ok(()) | Err(RecoveryError::Behind(_)) if recovery_only => {}
+                Err(RecoveryError::Behind(_)) if recovery_only => recovery_behind = true,
                 Ok(()) => {}
                 Err(error) => return Err(HostError::Recovery(error)),
             }
@@ -288,8 +290,12 @@ impl Sender {
             private_paths,
             baseline_digest,
             generation_marker,
+            recovery_review_marker: root.join("recovery-review-required"),
         };
         if recovery_only {
+            if recovery_behind {
+                sender.mark_recovery_review_required()?;
+            }
             return Ok(sender);
         }
         activate_generation(
@@ -341,6 +347,49 @@ impl Sender {
             .truncate(false)
             .open(&self.write_lock)
             .map_err(HostError::Io)
+    }
+
+    fn mark_recovery_review_required(&self) -> Result<(), HostError> {
+        let lock = self.open_state_lock()?;
+        lock.lock().map_err(HostError::Io)?;
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&self.recovery_review_marker)
+        {
+            Ok(file) => file.sync_all().map_err(HostError::Io),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(error) => Err(HostError::Io(error)),
+        }
+    }
+
+    pub fn recovery_review_candidates(
+        &mut self,
+        root: &Path,
+    ) -> Result<Vec<Vec<String>>, HostError> {
+        let _lock = self.lock_state()?;
+        let root = self.validate_source_root(root)?;
+        self.store.refresh().map_err(HostError::Store)?;
+        crate::source_review::candidates(&root, self.store.replica()).map_err(HostError::Io)
+    }
+
+    /// Resume automatic source scanning only when the selected source folder
+    /// contains no files or directories that differ from recovered history.
+    pub fn resume_tree_refresh(&mut self, root: &Path) -> Result<(), HostError> {
+        let _lock = self.lock_state()?;
+        let root = self.validate_source_root(root)?;
+        self.store.refresh().map_err(HostError::Store)?;
+        if !crate::source_review::candidates(&root, self.store.replica())
+            .map_err(HostError::Io)?
+            .is_empty()
+        {
+            return Err(HostError::RecoveryReviewRequired);
+        }
+        match fs::remove_file(&self.recovery_review_marker) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(HostError::Io(error)),
+        }
     }
 
     fn sweep_archives(&mut self) -> Result<(), HostError> {
@@ -472,6 +521,9 @@ impl Sender {
 
     pub fn publish_tree(&mut self, root: &Path) -> Result<TreeSummary, HostError> {
         let _lock = self.lock_state()?;
+        if self.recovery_review_marker.try_exists().map_err(HostError::Io)? {
+            return Err(HostError::RecoveryReviewRequired);
+        }
         publish_tree(
             root,
             &mut self.store,
@@ -498,6 +550,9 @@ impl Sender {
 
     pub fn refresh_tree(&mut self, root: &Path) -> Result<TreeSummary, HostError> {
         let _lock = self.lock_state()?;
+        if self.recovery_review_marker.try_exists().map_err(HostError::Io)? {
+            return Err(HostError::RecoveryReviewRequired);
+        }
         self.sweep_archives()?;
         refresh_tree(
             root,
@@ -1095,6 +1150,7 @@ pub enum HostError {
     CheckpointTooLarge,
     Baseline(BaselineError),
     InactiveGeneration,
+    RecoveryReviewRequired,
     #[cfg(target_os = "ios")]
     Materialize(crate::materialize::MaterializeError),
 }
