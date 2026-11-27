@@ -150,6 +150,55 @@ private actor SyncRunner {
             cancellation.cancel()
         }
     }
+
+    func runRecovery(folder: URL, cancellation: SyncCore.Cancellation,
+                     onRoute: @escaping @Sendable (String) -> Void = { _ in }) async throws -> UInt64 {
+        guard !running else { throw Failure.busy }
+        try Task.checkCancellation()
+        running = true
+        defer { running = false }
+        return try await withTaskCancellationHandler {
+            try await Task.detached(priority: .utility) {
+                guard folder.startAccessingSecurityScopedResource() else {
+                    throw Failure.permissionUnavailable
+                }
+                defer { folder.stopAccessingSecurityScopedResource() }
+                let manager = FileManager.default
+                let state = try manager.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                            appropriateFor: nil, create: true)
+                    .appendingPathComponent("P2PSync", isDirectory: true)
+                let destination = try manager.url(for: .documentDirectory, in: .userDomainMask,
+                                                  appropriateFor: nil, create: true)
+                    .appendingPathComponent("P2PSync", isDirectory: true)
+                try manager.createDirectory(at: destination, withIntermediateDirectories: true)
+                let rtc = folder.appendingPathComponent("rtc.json")
+                let bridgeStop = SyncCore.Cancellation()
+                defer { bridgeStop.cancel() }
+                if manager.fileExists(atPath: rtc.path) {
+                    let ready = BridgeReady()
+                    Task.detached(priority: .utility) {
+                        try? SyncCore.runRTCBridge(configuration: rtc, cancellation: bridgeStop) { status in
+                            if status == "ready" { ready.finish(connected: true) }
+                            if status == "failed" { ready.finish(connected: false) }
+                            if status.hasPrefix("route:") || status == "relay-limit" { onRoute(status) }
+                        }
+                        ready.finish(connected: false)
+                    }
+                    for _ in 0..<80 where !cancellation.isCancelled() {
+                        if ready.signal.wait(timeout: .now() + 0.25) == .success { break }
+                    }
+                    guard ready.isConnected && !cancellation.isCancelled() else {
+                        throw SyncCore.CoreError.rtcFailed(5)
+                    }
+                }
+                return try SyncCore.recoverReceiver(
+                    configuration: folder.appendingPathComponent("direct.json"),
+                    state: state, destination: destination, cancellation: cancellation)
+            }.value
+        } onCancel: {
+            cancellation.cancel()
+        }
+    }
 }
 
 @MainActor
@@ -200,6 +249,8 @@ struct DirectSyncView: View {
                         .foregroundStyle(.secondary)
                 }
                 Button("同期を開始") { Task { await sync() } }
+                    .disabled(configFolder == nil)
+                Button("履歴だけを復旧") { Task { await recoverHistory() } }
                     .disabled(configFolder == nil)
             }
             .disabled(syncing)
@@ -407,6 +458,40 @@ struct DirectSyncView: View {
             result = "保護原本の一覧を読み込めませんでした。"
         } catch {
             result = "同期先を開けませんでした。"
+        }
+    }
+
+    private func recoverHistory() async {
+        guard let configFolder, !syncing, phase == .active, !pickingFolder else { return }
+        automaticSync = false
+        syncing = true
+        stopping = false
+        result = "履歴を復旧中…"
+        rtcRouteStatus = ""
+        let cancellation = SyncCore.Cancellation()
+        syncCancellation = cancellation
+        let executionTime = SyncExecutionTime(cancellation: cancellation)
+        defer {
+            executionTime.end()
+            syncing = false
+            syncCancellation = nil
+            stopping = false
+        }
+        do {
+            let added = try await SyncRunner.shared.runRecovery(folder: configFolder,
+                                                                 cancellation: cancellation) { route in
+                Task { @MainActor in rtcRouteStatus = rtcStatusText(route) }
+            }
+            result = "署名済み履歴 \(added) 件を復旧しました。共有先ファイルは変更していません。続けて通常の同期を実行できます。"
+        } catch SyncRunner.Failure.busy {
+            result = "別の同期が進行中です。"
+        } catch SyncRunner.Failure.permissionUnavailable {
+            self.configFolder = nil
+            result = "接続設定フォルダーを開けませんでした。もう一度選択してください。"
+        } catch SyncCore.CoreError.pullFailed(let status) {
+            result = pullFailureMessage(status)
+        } catch {
+            result = "履歴を復旧できませんでした。接続先と設定を確認してください。"
         }
     }
 

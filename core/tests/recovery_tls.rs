@@ -312,6 +312,24 @@ fn receiver_anchor_rejects_restored_old_database_before_touching_destination() {
         assert!(String::from_utf8_lossy(&output.stdout).contains("Recovered 1 signed event(s)"));
     });
     assert_eq!(std::fs::read(destination.join("song.tja")).unwrap(), b"deleted after first pull");
+    let [config_bytes, state_bytes, destination_bytes] =
+        [&receiver_config, &state, &destination].map(|path| path.to_str().unwrap().as_bytes());
+    let mut added = u64::MAX;
+    assert_eq!(unsafe { p2p_sync_core::p2p_sync_recover_receiver_v1(
+        config_bytes.as_ptr(), config_bytes.len(),
+        state_bytes.as_ptr(), state_bytes.len(),
+        destination_bytes.as_ptr(), destination_bytes.len(),
+        &mut added, None, std::ptr::null_mut(),
+    ) }, 0);
+    assert_eq!(added, 0);
+    extern "C" fn stop_now(_: *mut std::ffi::c_void) -> u8 { 1 }
+    assert_eq!(unsafe { p2p_sync_core::p2p_sync_recover_receiver_v1(
+        config_bytes.as_ptr(), config_bytes.len(),
+        state_bytes.as_ptr(), state_bytes.len(),
+        destination_bytes.as_ptr(), destination_bytes.len(),
+        &mut added, Some(stop_now), std::ptr::null_mut(),
+    ) }, 7);
+    assert_eq!(added, 0);
     pull_once(&mut sender);
     assert!(!destination.join("song.tja").exists());
 }

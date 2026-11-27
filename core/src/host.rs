@@ -1679,6 +1679,18 @@ pub fn recover_receiver_from_anchor(
     state_root: &Path,
     destination: &Path,
 ) -> Result<usize, HostError> {
+    recover_receiver_from_anchor_cancellable(configuration, state_root, destination, &|| false)
+}
+
+pub fn recover_receiver_from_anchor_cancellable(
+    configuration: &Path,
+    state_root: &Path,
+    destination: &Path,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<usize, HostError> {
+    if cancelled() {
+        return Err(HostError::Direct(DirectError::Cancelled));
+    }
     let config: Config = serde_json::from_slice(&read_bounded(configuration, MAX_CONFIG_BYTES)?)
         .map_err(|_| HostError::Configuration)?;
     let anchor = config.recovery_anchor.as_ref().ok_or(HostError::Configuration)?;
@@ -1722,18 +1734,19 @@ pub fn recover_receiver_from_anchor(
         roots, credentials, roster.membership().share,
         roster.membership().generation, baseline_digest,
     ).map_err(HostError::Tls)?;
-    let mut added = 0;
+    let mut added: usize = 0;
     let mut first_error = None;
     let mut succeeded = false;
     for peer in &peers {
         match direct::pull_serving_cache_cancellable(
             &client, peer, Duration::from_secs(15), &mut store, &roster,
-            &reader, &chunks, &completed, &|| false,
+            &reader, &chunks, &completed, cancelled,
         ) {
             Ok(count) => {
                 succeeded = true;
-                added += count;
+                added = added.saturating_add(count);
             }
+            Err(DirectError::Cancelled) => return Err(HostError::Direct(DirectError::Cancelled)),
             Err(error) => { first_error.get_or_insert(error); }
         }
     }

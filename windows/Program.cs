@@ -27,6 +27,7 @@ internal sealed class SyncWindow : Window
     private readonly Button configButton = new() { Content = "設定ファイルを選択" };
     private readonly Button destinationButton = new() { Content = "保存先を選択" };
     private readonly Button syncButton = new() { Content = "同期を開始", IsEnabled = false };
+    private readonly Button recoverReceiverButton = new() { Content = "履歴だけを復旧", IsEnabled = false, Margin = new Thickness(0, 8, 0, 0) };
     private readonly Button cancelButton = new() { Content = "同期を中断", IsEnabled = false, Margin = new Thickness(0, 8, 0, 0), HorizontalAlignment = HorizontalAlignment.Left };
     private CancellationTokenSource? cancellation;
     private readonly ListBox originalList = new() { MaxHeight = 240 };
@@ -115,6 +116,8 @@ internal sealed class SyncWindow : Window
         syncButton.Margin = new Thickness(0, 16, 0, 0);
         syncButton.HorizontalAlignment = HorizontalAlignment.Left;
         panel.Children.Add(syncButton);
+        recoverReceiverButton.HorizontalAlignment = HorizontalAlignment.Left;
+        panel.Children.Add(recoverReceiverButton);
         panel.Children.Add(cancelButton);
         panel.Children.Add(autoSync);
         panel.Children.Add(result);
@@ -280,6 +283,7 @@ internal sealed class SyncWindow : Window
         startServerButton.Click += async (_, _) => await StartServer();
         stopServerButton.Click += (_, _) => StopServer();
         syncButton.Click += async (_, _) => await RunSync();
+        recoverReceiverButton.Click += async (_, _) => await RunSync(recovery: true);
         cancelButton.Click += (_, _) =>
         {
             autoSync.IsChecked = false;
@@ -427,6 +431,7 @@ internal sealed class SyncWindow : Window
             return;
         }
         bool ready = configuration is not null && destination is not null;
+        recoverReceiverButton.IsEnabled = ready && !syncing;
         configButton.IsEnabled = destinationButton.IsEnabled = !syncing;
         writerConfigButton.IsEnabled = writerStateButton.IsEnabled = !syncing && !writerServing;
         writerSourceButton.IsEnabled = !syncing && !writerServing;
@@ -805,7 +810,7 @@ internal sealed class SyncWindow : Window
         }
     }
 
-    private async Task RunSync()
+    private async Task RunSync(bool recovery = false)
     {
         if (closing || syncing || configuration is not string config || destination is not string root)
         {
@@ -815,7 +820,7 @@ internal sealed class SyncWindow : Window
         using var operation = new CancellationTokenSource();
         cancellation = operation;
         UpdateControls();
-        result.Text = "同期中…";
+        result.Text = recovery ? "履歴を復旧中…" : "同期中…";
         rtcRouteStatus.Text = "";
         var state = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "P2PSync");
         using var bridgeStop = CancellationTokenSource.CreateLinkedTokenSource(operation.Token);
@@ -839,6 +844,15 @@ internal sealed class SyncWindow : Window
                 var completed = await Task.WhenAny(ready.Task, Task.Delay(TimeSpan.FromSeconds(20), operation.Token));
                 if (completed != ready.Task) throw new IOException("WebRTC 接続がタイムアウトしました。");
                 await ready.Task;
+            }
+            if (recovery)
+            {
+                var restored = await Task.Run(() => SyncCore.RecoverReceiver(config, state, root, operation.Token));
+                bridgeStop.Cancel();
+                result.Text = restored.Status == 0
+                    ? $"履歴 {restored.EventsAdded} 件を復旧しました。保存先のファイルは変更していません。続けて通常の同期を実行できます。"
+                    : SyncCore.ErrorMessage(restored.Status);
+                return;
             }
             var pull = await Task.Run(() => SyncCore.Pull(config, state, root, operation.Token));
             bridgeStop.Cancel();
@@ -1111,6 +1125,22 @@ internal sealed class SyncWindow : Window
 
 internal static class SyncCore
 {
+    internal static (int Status, ulong EventsAdded) RecoverReceiver(
+        string config, string state, string destination, CancellationToken cancellation)
+    {
+        byte[] configBytes = Encoding.UTF8.GetBytes(config);
+        byte[] stateBytes = Encoding.UTF8.GetBytes(state);
+        byte[] destinationBytes = Encoding.UTF8.GetBytes(destination);
+        int status = RecoverReceiverNative(
+            configBytes, (nuint)configBytes.Length,
+            stateBytes, (nuint)stateBytes.Length,
+            destinationBytes, (nuint)destinationBytes.Length,
+            out ulong added,
+            _ => cancellation.IsCancellationRequested ? (byte)1 : (byte)0,
+            IntPtr.Zero);
+        return (status, added);
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     internal struct PullSummary
     {
@@ -1520,6 +1550,12 @@ internal static class SyncCore
         byte[] config, nuint configLength, byte[] state, nuint stateLength,
         byte[] destination, nuint destinationLength, out PullSummary summary,
         OriginalsCallback originals, IntPtr context, CancellationCallback cancellation);
+
+    [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_recover_receiver_v1", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int RecoverReceiverNative(
+        byte[] config, nuint configLength, byte[] state, nuint stateLength,
+        byte[] destination, nuint destinationLength, out ulong eventsAdded,
+        CancellationCallback cancellation, IntPtr context);
 
     [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_writer_history", CallingConvention = CallingConvention.Cdecl)]
     private static extern int WriterHistoryNative(

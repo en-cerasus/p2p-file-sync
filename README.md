@@ -107,7 +107,7 @@ cargo run --locked --release -p p2p-sync-core --bin p2p-send -- serve .\trial-se
 
 配信側で基準点より履歴が古くなって起動を拒否された場合、`p2p-send recover-from-anchor <server.json> <state-dir> <direct.json>`で署名済みイベントと検証済み本体を再取得できます。この専用コマンドは遅れた状態で共有元のスキャン・公開・配信や履歴整理を行わず、取り込み後に基準点を再照合します。履歴が分岐している場合は自動で上書きしません。復旧後は署名付き変更の発行を停止し、`p2p-send review-recovered-source <server.json> <state-dir> <folder>`で復旧履歴と実ファイルの差分を読み取り専用で一覧できます。削除済みファイルや未送信の変更を別の場所へ保全するなどして共有元の差分を解消した後、`p2p-send resume-tree-refresh <server.json> <state-dir> <folder>`で変更操作を再開できます。再開時は正しい共有元フォルダーを指定してください。未送信変更を自動的に競合として取り込む機能はまだありません。
 
-受信側が基準点より古い場合は、共有先フォルダーを変更する前にアプリを閉じ、`p2p-send recover-receiver-from-anchor <direct.json> <receiver-state-dir> <destination>`で署名済みイベントと検証済み本体を受信側の非公開キャッシュへ再取得できます。設定済みの外部基準点に追いつくまで通常同期は拒否されます。復旧コマンドは共有先を作成・更新・削除せず、基準点を再照合してから終了します。その後に通常の同期を実行してファイルへ反映します。受信側の設定には`event_key`が必要です。履歴が分岐している場合は復旧を拒否します。GUIからの復旧操作と、基準点の自動取得は未実装です。
+受信側が基準点より古い場合は、`p2p-send recover-receiver-from-anchor <direct.json> <receiver-state-dir> <destination>`で署名済みイベントと検証済み本体を受信側の非公開キャッシュへ再取得できます。Windows・iOSアプリにも「履歴だけを復旧」ボタンがあります。設定済みの外部基準点に追いつくまで通常同期は拒否されます。復旧処理は共有先のファイルを作成・更新・削除せず、基準点を再照合してから終了します。その後に通常の同期を実行してファイルへ反映します。受信側の設定には`event_key`が必要です。履歴が分岐している場合は復旧を拒否します。GUIの実機動作と基準点の自動取得は未検証・未実装です。
 
 基準点を設定済みの配信側では、`p2p-send refresh-recovery-anchor <server.json> <state-dir> <direct.json>`で相手から新しい基準点を取得し、イベントと本体を取り込んでから外部の基準点ファイルを更新できます。新旧双方の署名と履歴を照合し、候補が古い場合は元のファイルを残します。初回取得後に`server.json`へ基準点を登録する作業は手動です。
 

@@ -348,6 +348,51 @@ pub unsafe extern "C" fn p2p_sync_pull_v6(
     }
 }
 
+/// Rebuild a receiver's private signed history up to its configured external
+/// anchor without touching files in the destination folder.
+///
+/// # Safety
+/// Paths must be readable UTF-8 for the duration of the call. `events_added`
+/// must be writable. The cancellation callback must not unwind.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_recover_receiver_v1(
+    config: *const u8, config_len: usize,
+    state: *const u8, state_len: usize,
+    destination: *const u8, destination_len: usize,
+    events_added: *mut u64,
+    cancellation: Option<CancellationCallback>,
+    context: *mut std::ffi::c_void,
+) -> i32 {
+    if events_added.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    unsafe { events_added.write(0) };
+    let paths = [
+        (config, config_len), (state, state_len), (destination, destination_len),
+    ];
+    let Some(paths) = paths.map(|(path, len)| unsafe { borrowed_text(path, len, 32_768) })
+        .into_iter().collect::<Option<Vec<_>>>() else {
+        return INVALID_ARGUMENT;
+    };
+    let stopped = || cancellation.is_some_and(|callback| callback(context) != 0);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        host::recover_receiver_from_anchor_cancellable(
+            std::path::Path::new(paths[0]),
+            std::path::Path::new(paths[1]),
+            std::path::Path::new(paths[2]),
+            &stopped,
+        ).map_err(host_error_code)
+    }));
+    match result {
+        Ok(Ok(count)) => {
+            unsafe { events_added.write(count as u64) };
+            OK
+        }
+        Ok(Err(code)) => code,
+        Err(_) => 6,
+    }
+}
+
 /// Read a writer's current archive choices as a JSON array. Copy callback
 /// bytes before returning; this call must run off the UI thread.
 ///
