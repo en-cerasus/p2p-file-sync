@@ -28,7 +28,7 @@ const GET_CONFIRMATIONS: u8 = 12;
 const CONFIRMATIONS: u8 = 13;
 const GET_RECOVERY_ANCHOR: u8 = 14;
 const RECOVERY_ANCHOR: u8 = 15;
-const MAX_RECOVERY_ANCHOR_FRAME: usize = 1024 * 1024 + 256;
+const MAX_RECOVERY_ANCHOR_FRAME: usize = 1024 * 1024 + 512;
 const MAX_CONFIRMATION_FRAME: usize = 320;
 const CONFIRMATION_PAGE: usize = 128;
 const MAX_CONFIRMATIONS_FRAME: usize = 8 + CONFIRMATION_PAGE * (4 + MAX_CONFIRMATION_FRAME);
@@ -42,6 +42,7 @@ pub enum WireError {
     Io(io::Error),
     Catchup(CatchupError),
     Recovery(RecoveryError),
+    Random(getrandom::Error),
     InvalidFrame,
     NoProgress,
     UnavailableContent,
@@ -114,10 +115,15 @@ pub fn pull_recovery_anchor(
     roster: &Roster,
     trusted_peer: crate::replica::PeerId,
 ) -> Result<Vec<u8>, WireError> {
-    write_frame(stream, GET_RECOVERY_ANCHOR, &[])?;
-    let wire = read_frame(stream, RECOVERY_ANCHOR, MAX_RECOVERY_ANCHOR_FRAME)?;
-    recovery::authenticate_anchor(roster, &wire, trusted_peer).map_err(WireError::Recovery)?;
-    Ok(wire)
+    let mut challenge = [0; 32];
+    getrandom::fill(&mut challenge).map_err(WireError::Random)?;
+    write_frame(stream, GET_RECOVERY_ANCHOR, &challenge)?;
+    let response = read_frame(stream, RECOVERY_ANCHOR, MAX_RECOVERY_ANCHOR_FRAME)?;
+    let wire = roster
+        .verify_recovery_response(&response, &challenge, &trusted_peer)
+        .map_err(|error| WireError::Recovery(RecoveryError::Auth(error)))?;
+    recovery::authenticate_anchor(roster, wire, trusted_peer).map_err(WireError::Recovery)?;
+    Ok(wire.to_vec())
 }
 
 /// Serve metadata for a version that the caller has authorized for this
@@ -271,14 +277,18 @@ impl ShareSession {
         }
         let (kind, length) = read_header(stream)?;
         match kind {
-            GET_RECOVERY_ANCHOR if length == 0 => {
+            GET_RECOVERY_ANCHOR if length == 32 => {
+                let challenge: [u8; 32] = read_body(stream, length, 32)?
+                    .try_into().map_err(|_| WireError::InvalidFrame)?;
                 let signer = signer.ok_or(WireError::InvalidFrame)?;
                 let wire = recovery::sign_anchor(roster, store, signer)
                     .map_err(WireError::Recovery)?;
-                if wire.len() > MAX_RECOVERY_ANCHOR_FRAME {
+                let response = roster.sign_recovery_response(signer, &challenge, &wire)
+                    .map_err(|error| WireError::Recovery(RecoveryError::Auth(error)))?;
+                if response.len() > MAX_RECOVERY_ANCHOR_FRAME {
                     return Err(WireError::InvalidFrame);
                 }
-                write_frame(stream, RECOVERY_ANCHOR, &wire)?;
+                write_frame(stream, RECOVERY_ANCHOR, &response)?;
             }
             PULL => {
                 let body = read_body(stream, length, MAX_FRONTIER_PEERS * FRONTIER_ENTRY_BYTES)?;

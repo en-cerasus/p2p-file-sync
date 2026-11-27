@@ -11,6 +11,7 @@ use crate::{
 const DOMAIN: &[u8] = b"p2p-file-sync/event/v1\0";
 const CONFIRMATION_DOMAIN: &[u8] = b"p2p-file-sync/confirmation/v1\0";
 const RECOVERY_DOMAIN: &[u8] = b"p2p-file-sync/recovery-anchor/v1\0";
+const RECOVERY_RESPONSE_DOMAIN: &[u8] = b"p2p-file-sync/recovery-response/v1\0";
 const HEADER_BYTES: usize = 16 + 8 + 32;
 const SIGNATURE_BYTES: usize = 64;
 const MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
@@ -158,6 +159,40 @@ impl Roster {
         self.verify_payload(RECOVERY_DOMAIN, wire, MAX_PAYLOAD_BYTES)
     }
 
+    pub(crate) fn sign_recovery_response(
+        &self,
+        key: &SigningKey,
+        challenge: &[u8; 32],
+        anchor: &[u8],
+    ) -> Result<Vec<u8>, AuthError> {
+        let author = key.verifying_key().to_bytes();
+        self.check_member(&author)?;
+        if anchor.is_empty() || anchor.len() > MAX_PAYLOAD_BYTES + 256 {
+            return Err(AuthError::InvalidFrame);
+        }
+        let mut payload = Vec::with_capacity(32 + anchor.len());
+        payload.extend_from_slice(challenge);
+        payload.extend_from_slice(anchor);
+        Ok(self.sign_payload(RECOVERY_RESPONSE_DOMAIN, key, &author, &payload))
+    }
+
+    pub(crate) fn verify_recovery_response<'a>(
+        &self,
+        wire: &'a [u8],
+        challenge: &[u8; 32],
+        expected: &PeerId,
+    ) -> Result<&'a [u8], AuthError> {
+        let (author, payload) = self.verify_payload(
+            RECOVERY_RESPONSE_DOMAIN,
+            wire,
+            MAX_PAYLOAD_BYTES + 288,
+        )?;
+        if author != expected || payload.len() <= 32 || payload[..32] != challenge[..] {
+            return Err(AuthError::InvalidFrame);
+        }
+        Ok(&payload[32..])
+    }
+
     pub(crate) fn check_writer(&self, author: &PeerId) -> Result<(), AuthError> {
         match self.roles.get(author) {
             Some(Role::Writer) => Ok(()),
@@ -222,3 +257,21 @@ impl Roster {
 }
 
 pub use ed25519_dalek::SigningKey as PeerSigningKey;
+
+#[cfg(test)]
+mod recovery_response_tests {
+    use super::*;
+
+    #[test]
+    fn signed_response_is_bound_to_this_request_challenge() {
+        let key = SigningKey::from_bytes(&[31; 32]);
+        let peer = key.verifying_key().to_bytes();
+        let roster = Roster::new([4; 16], 1, [(peer, Role::Writer)].into());
+        let response = roster.sign_recovery_response(&key, &[1; 32], b"signed anchor").unwrap();
+        assert_eq!(roster.verify_recovery_response(&response, &[1; 32], &peer).unwrap(), b"signed anchor");
+        assert!(matches!(roster.verify_recovery_response(&response, &[2; 32], &peer), Err(AuthError::InvalidFrame)));
+        let mut tampered = response;
+        *tampered.last_mut().unwrap() ^= 1;
+        assert!(matches!(roster.verify_recovery_response(&tampered, &[1; 32], &peer), Err(AuthError::BadSignature)));
+    }
+}
