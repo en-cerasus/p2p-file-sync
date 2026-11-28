@@ -240,6 +240,17 @@ fn pinned_tls_peer_supplies_anchor_then_catchup_satisfies_startup_gate() {
         assert!(cli.status.success(), "{}", String::from_utf8_lossy(&cli.stderr));
         assert_eq!(std::fs::read(cli_archive.join("source/unsent/nested/draft.tja")).unwrap(),
             b"local draft not sent");
+        let verify = || std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
+            .arg("verify-recovered-source-archive").arg(&cli_archive)
+            .output().unwrap();
+        assert!(verify().status.success());
+        std::fs::write(cli_archive.join("source/unsent/nested/draft.tja"), b"changed").unwrap();
+        assert!(!verify().status.success());
+        let mut forged: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(archive.join("manifest.json")).unwrap()).unwrap();
+        forged["files"][0]["path"] = serde_json::json!(["..", "outside"]);
+        std::fs::write(archive.join("manifest.json"), forged.to_string()).unwrap();
+        assert!(p2p_sync_core::source_review::verify_archive(&archive).is_err());
         assert_eq!(std::fs::read(recovered_source.join("song.tja")).unwrap(), b"anchor exchange");
         std::fs::remove_dir_all(recovered_source.join("unsent")).unwrap();
         extern "C" fn capture_paths(context: *mut std::ffi::c_void, data: *const u8, len: usize) {

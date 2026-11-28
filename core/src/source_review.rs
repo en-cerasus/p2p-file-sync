@@ -57,6 +57,60 @@ pub(crate) fn archive(root: &Path, replica: &Replica, output: &Path)
     Ok(report)
 }
 
+/// Recheck every copied file against the manifest without trusting a path
+/// from the manifest to escape the archive's `source` directory.
+pub fn verify_archive(output: &Path) -> io::Result<SourceArchiveReport> {
+    let manifest = output.join("manifest.json");
+    if fs::metadata(&manifest)?.len() > 8 * 1024 * 1024 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "archive manifest too large"));
+    }
+    let report: SourceArchiveReport = serde_json::from_slice(&fs::read(manifest)?)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid archive manifest"))?;
+    let root = open_root(&output.join("source"))?;
+    let mut seen = BTreeSet::new();
+    for entry in &report.files {
+        validate_archive_path(&entry.path)?;
+        if !seen.insert(entry.path.clone()) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "duplicate archive file"));
+        }
+        let (name, parents) = entry.path.split_last().expect("validated nonempty path");
+        let mut directory = root.try_clone()?;
+        for parent in parents {
+            directory = directory.open_dir_nofollow(parent)?;
+        }
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        let mut file = directory.open_with(name, &options)?;
+        let length = file.metadata()?.len();
+        if length != entry.bytes {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "archive file size changed"));
+        }
+        let hash = Manifest::build(&mut file, length)?.file().hash;
+        let expected: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
+        if expected != entry.sha256 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "archive file hash changed"));
+        }
+    }
+    for path in &report.directories {
+        validate_archive_path(path)?;
+        let mut directory = root.try_clone()?;
+        for name in path {
+            directory = directory.open_dir_nofollow(name)?;
+        }
+    }
+    for path in report.candidates.iter().chain(&report.missing) {
+        validate_archive_path(path)?;
+    }
+    Ok(report)
+}
+
+fn validate_archive_path(path: &[String]) -> io::Result<()> {
+    if path.is_empty() || path.len() > 128 || path.iter().any(|name| collision_key(name).is_err()) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid archive path"));
+    }
+    Ok(())
+}
+
 /// Returns true when a directory covers all nested candidates.
 fn copy_candidate(root: &Dir, output: &Path, path: &[String],
                   report: &mut SourceArchiveReport) -> io::Result<bool> {

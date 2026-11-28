@@ -84,6 +84,7 @@ fn run() -> Result<(), String> {
                 | "refresh-recovery-anchor"
                 | "review-recovered-source"
                 | "archive-recovered-source"
+                | "verify-recovered-source-archive"
                 | "resume-tree-refresh"
                 | "archive-isolated-generation"
                 | "verify-isolated-archive"
@@ -107,6 +108,7 @@ fn run() -> Result<(), String> {
         || (mode == Some("refresh-recovery-anchor") && args.len() != 4)
         || (matches!(mode, Some("review-recovered-source" | "resume-tree-refresh")) && args.len() != 4)
         || (mode == Some("archive-recovered-source") && args.len() != 5)
+        || (mode == Some("verify-recovered-source-archive") && args.len() != 2)
         || (mode == Some("archive-isolated-generation") && args.len() != 7)
         || (mode == Some("verify-isolated-archive") && args.len() != 6)
         || (mode == Some("conflicts") && args.len() != 3)
@@ -119,7 +121,7 @@ fn run() -> Result<(), String> {
         || (mode == Some("verify-generation") && args.len() != 5)
     {
         return Err(
-            "Usage: p2p-send setup <new-dir> <bind-ip:port> <peer-ip:port> [receivers] [writers]\n       p2p-send publish <server.json> <state-dir> <file> [file ...]\n       p2p-send publish-tree <server.json> <state-dir> <folder>\n       p2p-send refresh-tree <server.json> <state-dir> <folder>\n       p2p-send review-recovered-source <server.json> <state-dir> <folder>\n       p2p-send archive-recovered-source <server.json> <state-dir> <folder> <new-output-dir>\n       p2p-send resume-tree-refresh <server.json> <state-dir> <folder>\n       p2p-send update <server.json> <state-dir> <shared/path> <source>\n       p2p-send delete <server.json> <state-dir> <shared/path>\n       p2p-send move <server.json> <state-dir> <old/path> <new/path>\n       p2p-send conflicts <server.json> <state-dir>\n       p2p-send history <server.json> <state-dir>\n       p2p-send restore <server.json> <state-dir> <archive-id> <reviewed-current-id>\n       p2p-send catch-up <server.json> <state-dir> <direct.json>\n       p2p-send pull <direct.json> <receiver-state-dir> <destination>\n       p2p-send recover-receiver-from-anchor <direct.json> <receiver-state-dir> <destination>\n       p2p-send register-receiver-recovery-anchor <direct.json> <receiver-state-dir> <destination> <new-output-file>\n       p2p-send refresh-receiver-recovery-anchor <direct.json> <receiver-state-dir> <destination>\n       p2p-send rtc-bridge <rtc.json>\n       p2p-send export-recovery-anchor <server.json> <state-dir> <new-output-file>\n       p2p-send fetch-recovery-anchor <server.json> <state-dir> <direct.json> <trusted-peer-id> <new-output-file>\n       p2p-send register-recovery-anchor <server.json> <state-dir> <direct.json> <trusted-peer-id> <new-output-file>\n       p2p-send recover-from-anchor <server.json> <state-dir> <direct.json>\n       p2p-send refresh-recovery-anchor <server.json> <state-dir> <direct.json>\n       p2p-send archive-isolated-generation <old-server.json> <old-state-dir> <next-server.json> <administrator-public-key> <bundle-dir> <new-output-dir>\n       p2p-send verify-isolated-archive <old-server.json> <next-server.json> <administrator-public-key> <bundle-dir> <archive-dir>\n       p2p-send import-confirmations <server.json> <server-state-dir> <direct.json> <receiver-state-dir> <destination>\n       p2p-send prepare-generation <server.json> <state-dir> <next-server.json> <administrator-seed-file> <new-dir>\n       p2p-send verify-generation <previous-server.json> <next-server.json> <administrator-public-key> <bundle-dir>\n       p2p-send resolve <server.json> <state-dir> <chosen-id> <other-id> [other-id ...]\n       p2p-send serve <server.json> <state-dir>\n       p2p-send serve-peer <server.json> <state-dir> <direct.json> <interval-seconds> [receiver-state-dir destination]\n       p2p-send serve-tree <server.json> <state-dir> <folder> <interval-seconds>"
+            "Usage: p2p-send setup <new-dir> <bind-ip:port> <peer-ip:port> [receivers] [writers]\n       p2p-send publish <server.json> <state-dir> <file> [file ...]\n       p2p-send publish-tree <server.json> <state-dir> <folder>\n       p2p-send refresh-tree <server.json> <state-dir> <folder>\n       p2p-send review-recovered-source <server.json> <state-dir> <folder>\n       p2p-send archive-recovered-source <server.json> <state-dir> <folder> <new-output-dir>\n       p2p-send verify-recovered-source-archive <archive-dir>\n       p2p-send resume-tree-refresh <server.json> <state-dir> <folder>\n       p2p-send update <server.json> <state-dir> <shared/path> <source>\n       p2p-send delete <server.json> <state-dir> <shared/path>\n       p2p-send move <server.json> <state-dir> <old/path> <new/path>\n       p2p-send conflicts <server.json> <state-dir>\n       p2p-send history <server.json> <state-dir>\n       p2p-send restore <server.json> <state-dir> <archive-id> <reviewed-current-id>\n       p2p-send catch-up <server.json> <state-dir> <direct.json>\n       p2p-send pull <direct.json> <receiver-state-dir> <destination>\n       p2p-send recover-receiver-from-anchor <direct.json> <receiver-state-dir> <destination>\n       p2p-send register-receiver-recovery-anchor <direct.json> <receiver-state-dir> <destination> <new-output-file>\n       p2p-send refresh-receiver-recovery-anchor <direct.json> <receiver-state-dir> <destination>\n       p2p-send rtc-bridge <rtc.json>\n       p2p-send export-recovery-anchor <server.json> <state-dir> <new-output-file>\n       p2p-send fetch-recovery-anchor <server.json> <state-dir> <direct.json> <trusted-peer-id> <new-output-file>\n       p2p-send register-recovery-anchor <server.json> <state-dir> <direct.json> <trusted-peer-id> <new-output-file>\n       p2p-send recover-from-anchor <server.json> <state-dir> <direct.json>\n       p2p-send refresh-recovery-anchor <server.json> <state-dir> <direct.json>\n       p2p-send archive-isolated-generation <old-server.json> <old-state-dir> <next-server.json> <administrator-public-key> <bundle-dir> <new-output-dir>\n       p2p-send verify-isolated-archive <old-server.json> <next-server.json> <administrator-public-key> <bundle-dir> <archive-dir>\n       p2p-send import-confirmations <server.json> <server-state-dir> <direct.json> <receiver-state-dir> <destination>\n       p2p-send prepare-generation <server.json> <state-dir> <next-server.json> <administrator-seed-file> <new-dir>\n       p2p-send verify-generation <previous-server.json> <next-server.json> <administrator-public-key> <bundle-dir>\n       p2p-send resolve <server.json> <state-dir> <chosen-id> <other-id> [other-id ...]\n       p2p-send serve <server.json> <state-dir>\n       p2p-send serve-peer <server.json> <state-dir> <direct.json> <interval-seconds> [receiver-state-dir destination]\n       p2p-send serve-tree <server.json> <state-dir> <folder> <interval-seconds>"
                 .to_string(),
         );
     }
@@ -151,6 +153,13 @@ fn run() -> Result<(), String> {
         ).map_err(|error| format!("Could not verify isolated archive: {error:?}"))?;
         println!("Verified {} isolated event(s), {} blob(s); {} blob(s) missing.",
             report.events.len(), report.copied_blobs, report.missing_blobs.len());
+        return Ok(());
+    }
+    if mode == Some("verify-recovered-source-archive") {
+        let report = p2p_sync_core::source_review::verify_archive(Path::new(&args[1]))
+            .map_err(|error| format!("Could not verify recovered source archive: {error}"))?;
+        println!("Verified {} archived file(s); {} path(s) were missing from the source.",
+            report.files.len(), report.missing.len());
         return Ok(());
     }
     if mode == Some("pull") {
