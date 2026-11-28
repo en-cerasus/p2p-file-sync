@@ -110,7 +110,7 @@ fn pinned_tls_peer_supplies_anchor_then_catchup_satisfies_startup_gate() {
             recovered
                 .recovery_review_candidates(&recovered_source)
                 .unwrap(),
-            vec![vec!["song.tja".to_owned()]]
+            vec![vec!["next.tja".to_owned()], vec!["song.tja".to_owned()]]
         );
         assert!(matches!(
             recovered.refresh_tree(&recovered_source),
@@ -137,6 +137,15 @@ fn pinned_tls_peer_supplies_anchor_then_catchup_satisfies_startup_gate() {
             root.path().join("saved-song.tja"),
         )
         .unwrap();
+        assert_eq!(
+            recovered.recovery_review_candidates(&recovered_source).unwrap(),
+            vec![vec!["next.tja".to_owned()]]
+        );
+        assert!(matches!(
+            recovered.resume_tree_refresh(&recovered_source),
+            Err(HostError::RecoveryReviewRequired)
+        ));
+        std::fs::copy(&next_source, recovered_source.join("next.tja")).unwrap();
         recovered.resume_tree_refresh(&recovered_source).unwrap();
         recovered.refresh_tree(&recovered_source).unwrap();
         assert_eq!(

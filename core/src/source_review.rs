@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, io, path::Path};
+use std::{collections::{BTreeMap, BTreeSet}, io, path::Path};
 
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions};
@@ -31,7 +31,15 @@ pub(crate) fn candidates(root: &Path, replica: &Replica) -> io::Result<Vec<Vec<S
         );
     }
     let mut found = Vec::new();
-    visit(&open_root(root)?, &mut Vec::new(), &expected, &mut found, 0)?;
+    let mut seen = BTreeSet::new();
+    visit(&open_root(root)?, &mut Vec::new(), &expected, &mut seen, &mut found, 0)?;
+    // A local deletion is also a difference that needs review. Report the
+    // missing parent once instead of listing every child below it.
+    for path in expected.keys() {
+        if !seen.contains(path) && !found.iter().any(|candidate| path.starts_with(candidate)) {
+            found.push(path.clone());
+        }
+    }
     found.sort();
     Ok(found)
 }
@@ -40,6 +48,7 @@ fn visit(
     directory: &Dir,
     prefix: &mut Vec<String>,
     expected: &BTreeMap<Vec<String>, EntryKind>,
+    seen: &mut BTreeSet<Vec<String>>,
     found: &mut Vec<Vec<String>>,
     depth: usize,
 ) -> io::Result<()> {
@@ -73,12 +82,13 @@ fn visit(
             ));
         }
         prefix.push(name.clone());
+        seen.insert(prefix.clone());
         if kind.is_dir() {
             if expected.get(prefix) != Some(&EntryKind::Directory) {
                 found.push(prefix.clone());
             }
             let child = directory.open_dir_nofollow(&name)?;
-            visit(&child, prefix, expected, found, depth + 1)?;
+            visit(&child, prefix, expected, seen, found, depth + 1)?;
         } else {
             if !directory.symlink_metadata(&name)?.is_file() {
                 return Err(io::Error::new(
