@@ -244,12 +244,24 @@ fn pinned_tls_peer_supplies_anchor_then_catchup_satisfies_startup_gate() {
             .arg("verify-recovered-source-archive").arg(&cli_archive)
             .output().unwrap();
         assert!(verify().status.success());
+        std::fs::write(cli_archive.join("source/unlisted.tja"), b"unlisted").unwrap();
+        assert!(!verify().status.success());
+        std::fs::remove_file(cli_archive.join("source/unlisted.tja")).unwrap();
+        assert!(verify().status.success());
         std::fs::write(cli_archive.join("source/unsent/nested/draft.tja"), b"changed").unwrap();
         assert!(!verify().status.success());
+        let manifest_path = archive.join("manifest.json");
+        let original_manifest = std::fs::read(&manifest_path).unwrap();
+        let mut omitted: serde_json::Value = serde_json::from_slice(&original_manifest).unwrap();
+        omitted["files"].as_array_mut().unwrap().remove(0);
+        std::fs::write(&manifest_path, omitted.to_string()).unwrap();
+        assert!(p2p_sync_core::source_review::verify_archive(&archive).is_err());
+        std::fs::write(&manifest_path, &original_manifest).unwrap();
+        assert!(p2p_sync_core::source_review::verify_archive(&archive).is_ok());
         let mut forged: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(archive.join("manifest.json")).unwrap()).unwrap();
+            serde_json::from_slice(&original_manifest).unwrap();
         forged["files"][0]["path"] = serde_json::json!(["..", "outside"]);
-        std::fs::write(archive.join("manifest.json"), forged.to_string()).unwrap();
+        std::fs::write(&manifest_path, forged.to_string()).unwrap();
         assert!(p2p_sync_core::source_review::verify_archive(&archive).is_err());
         assert_eq!(std::fs::read(recovered_source.join("song.tja")).unwrap(), b"anchor exchange");
         std::fs::remove_dir_all(recovered_source.join("unsent")).unwrap();

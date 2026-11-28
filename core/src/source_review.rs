@@ -1,4 +1,4 @@
-use std::{collections::{BTreeMap, BTreeSet}, fs, io::{self, Seek, SeekFrom, Write}, path::Path};
+use std::{collections::{BTreeMap, BTreeSet}, fs, io::{self, Read, Seek, SeekFrom, Write}, path::Path};
 
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions};
@@ -60,18 +60,35 @@ pub(crate) fn archive(root: &Path, replica: &Replica, output: &Path)
 /// Recheck every copied file against the manifest without trusting a path
 /// from the manifest to escape the archive's `source` directory.
 pub fn verify_archive(output: &Path) -> io::Result<SourceArchiveReport> {
-    let manifest = output.join("manifest.json");
-    if fs::metadata(&manifest)?.len() > 8 * 1024 * 1024 {
+    let archive = open_root(output)?;
+    if !archive.symlink_metadata("manifest.json")?.is_file()
+        || !archive.symlink_metadata("source")?.is_dir()
+    {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid archive layout"));
+    }
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let file = archive.open_with("manifest.json", &options)?;
+    if file.metadata()?.len() > 8 * 1024 * 1024 {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "archive manifest too large"));
     }
-    let report: SourceArchiveReport = serde_json::from_slice(&fs::read(manifest)?)
+    let mut bytes = Vec::new();
+    file.take(8 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > 8 * 1024 * 1024 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "archive manifest too large"));
+    }
+    let report: SourceArchiveReport = serde_json::from_slice(&bytes)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid archive manifest"))?;
-    let root = open_root(&output.join("source"))?;
+    let root = archive.open_dir_nofollow("source")?;
     let mut seen = BTreeSet::new();
+    let mut expected_directories = BTreeSet::new();
     for entry in &report.files {
         validate_archive_path(&entry.path)?;
         if !seen.insert(entry.path.clone()) {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "duplicate archive file"));
+        }
+        for length in 1..entry.path.len() {
+            expected_directories.insert(entry.path[..length].to_vec());
         }
         let (name, parents) = entry.path.split_last().expect("validated nonempty path");
         let mut directory = root.try_clone()?;
@@ -93,6 +110,10 @@ pub fn verify_archive(output: &Path) -> io::Result<SourceArchiveReport> {
     }
     for path in &report.directories {
         validate_archive_path(path)?;
+        expected_directories.insert(path.clone());
+        for length in 1..path.len() {
+            expected_directories.insert(path[..length].to_vec());
+        }
         let mut directory = root.try_clone()?;
         for name in path {
             directory = directory.open_dir_nofollow(name)?;
@@ -101,7 +122,50 @@ pub fn verify_archive(output: &Path) -> io::Result<SourceArchiveReport> {
     for path in report.candidates.iter().chain(&report.missing) {
         validate_archive_path(path)?;
     }
+    let mut actual_files = BTreeSet::new();
+    let mut actual_directories = BTreeSet::new();
+    scan_archive_tree(&root, &mut Vec::new(), &mut actual_files,
+                      &mut actual_directories, 0)?;
+    if seen != actual_files || expected_directories != actual_directories {
+        return Err(io::Error::new(io::ErrorKind::InvalidData,
+            "archive contents do not match manifest"));
+    }
     Ok(report)
+}
+
+fn scan_archive_tree(directory: &Dir, prefix: &mut Vec<String>,
+                     files: &mut BTreeSet<Vec<String>>,
+                     directories: &mut BTreeSet<Vec<String>>,
+                     depth: usize) -> io::Result<()> {
+    if depth >= 128 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "archive tree too deep"));
+    }
+    let mut children = directory.entries()?.collect::<io::Result<Vec<_>>>()?;
+    children.sort_by_cached_key(|entry| entry.file_name());
+    let mut names = BTreeSet::new();
+    for child in children {
+        let name = child.file_name().into_string()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid archive name"))?;
+        let key = collision_key(&name)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid archive name"))?;
+        if !names.insert(key) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "archive name collision"));
+        }
+        let kind = directory.symlink_metadata(&name)?.file_type();
+        prefix.push(name.clone());
+        if kind.is_dir() {
+            directories.insert(prefix.clone());
+            scan_archive_tree(&directory.open_dir_nofollow(&name)?, prefix,
+                              files, directories, depth + 1)?;
+        } else if kind.is_file() {
+            files.insert(prefix.clone());
+        } else {
+            return Err(io::Error::new(io::ErrorKind::InvalidData,
+                "unsupported archive item"));
+        }
+        prefix.pop();
+    }
+    Ok(())
 }
 
 fn validate_archive_path(path: &[String]) -> io::Result<()> {
