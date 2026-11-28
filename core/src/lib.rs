@@ -845,6 +845,68 @@ pub unsafe extern "C" fn p2p_sync_writer_recovery_candidates_v1(
     }
 }
 
+/// Copy post-recovery source differences into a new folder without changing
+/// the source or lifting the recovery gate. Callback JSON is the manifest.
+///
+/// # Safety
+/// All path buffers must remain readable UTF-8 for the duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_writer_archive_recovered_source_v1(
+    config: *const u8, config_len: usize,
+    state: *const u8, state_len: usize,
+    source: *const u8, source_len: usize,
+    output: *const u8, output_len: usize,
+    callback: Option<OriginalsCallback>, context: *mut std::ffi::c_void,
+) -> i32 {
+    let Some(callback) = callback else { return INVALID_ARGUMENT };
+    let Some((config, state)) = (unsafe { writer_paths(config, config_len, state, state_len) })
+    else { return INVALID_ARGUMENT };
+    let Some(source) = (unsafe { borrowed_text(source, source_len, 32_768) })
+    else { return INVALID_ARGUMENT };
+    let Some(output) = (unsafe { borrowed_text(output, output_len, 32_768) })
+    else { return INVALID_ARGUMENT };
+    let result = std::panic::catch_unwind(|| {
+        let mut writer = host::Sender::open(config, state).map_err(host_error_code)?;
+        let report = writer.archive_recovered_source(
+            std::path::Path::new(source), std::path::Path::new(output),
+        ).map_err(host_error_code)?;
+        let bytes = serde_json::to_vec(&report).map_err(|_| 6)?;
+        if bytes.len() > 8 * 1024 * 1024 { return Err(6) }
+        Ok(bytes)
+    });
+    match result {
+        Ok(Ok(bytes)) => { callback(context, bytes.as_ptr(), bytes.len()); OK }
+        Ok(Err(code)) => code,
+        Err(_) => 6,
+    }
+}
+
+/// Verify copied files against a recovered-source archive manifest.
+///
+/// # Safety
+/// The archive buffer must remain readable UTF-8 for the duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_verify_recovered_source_archive_v1(
+    archive: *const u8, archive_len: usize,
+    callback: Option<OriginalsCallback>, context: *mut std::ffi::c_void,
+) -> i32 {
+    let Some(callback) = callback else { return INVALID_ARGUMENT };
+    let Some(archive) = (unsafe { borrowed_text(archive, archive_len, 32_768) })
+    else { return INVALID_ARGUMENT };
+    let result = std::panic::catch_unwind(|| {
+        let report = source_review::verify_archive(std::path::Path::new(archive))
+            .map_err(|_| 6)?;
+        let bytes = serde_json::to_vec(&report).map_err(|_| 6)?;
+        if bytes.len() > 8 * 1024 * 1024 { return Err(6) }
+        Ok(bytes)
+    });
+    match result {
+        Ok(Ok(bytes)) => { callback(context, bytes.as_ptr(), bytes.len()); OK }
+        Ok(Err(code)) => code,
+        Err(_) => 6,
+    }
+}
+
 /// Resume publishing only if the selected source exactly matches recovered
 /// history. A changed source is rejected and the recovery gate stays active.
 ///

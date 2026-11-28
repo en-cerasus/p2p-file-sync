@@ -211,6 +211,17 @@ int32_t p2p_sync_writer_recovery_candidates_v1(const uint8_t *config, size_t con
                                                 const uint8_t *state, size_t state_len,
                                                 const uint8_t *source, size_t source_len,
                                                 p2p_sync_originals_callback callback, void *context);
+/* Create a new archive of physical source differences after history recovery.
+   The source and recovery gate remain unchanged. Callback JSON is the archive
+   manifest. Output must be outside the source and state folders. */
+int32_t p2p_sync_writer_archive_recovered_source_v1(const uint8_t *config, size_t config_len,
+                                                    const uint8_t *state, size_t state_len,
+                                                    const uint8_t *source, size_t source_len,
+                                                    const uint8_t *output, size_t output_len,
+                                                    p2p_sync_originals_callback callback, void *context);
+/* Recheck archived files against their recorded sizes and SHA-256 values. */
+int32_t p2p_sync_verify_recovered_source_archive_v1(const uint8_t *archive, size_t archive_len,
+                                                    p2p_sync_originals_callback callback, void *context);
 /* Clear the post-recovery publishing gate only when the selected source has
    no remaining differences. The source folder is never modified. */
 int32_t p2p_sync_writer_resume_after_recovery_v1(const uint8_t *config, size_t config_len,

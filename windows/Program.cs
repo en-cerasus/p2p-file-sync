@@ -44,6 +44,8 @@ internal sealed class SyncWindow : Window
     private readonly TextBlock writerSourceLabel = new() { TextWrapping = TextWrapping.Wrap };
     private readonly Button refreshWriterButton = new() { Content = "共有元を登録・更新", Margin = new Thickness(0, 12, 0, 0) };
     private readonly Button reviewRecoveredSourceButton = new() { Content = "復旧後の共有元を確認", Margin = new Thickness(0, 12, 0, 0) };
+    private readonly Button archiveRecoveredSourceButton = new() { Content = "復旧前の差分を退避", Margin = new Thickness(0, 8, 0, 0) };
+    private readonly Button verifyRecoveredArchiveButton = new() { Content = "退避データを検証", Margin = new Thickness(0, 8, 0, 0) };
     private readonly ListBox recoveredSourceList = new() { MaxHeight = 200 };
     private readonly Button resumeRecoveredSourceButton = new() { Content = "変更操作を再開", Margin = new Thickness(0, 8, 0, 0) };
     private readonly TextBlock recoveredSourceStatus = new() { TextWrapping = TextWrapping.Wrap };
@@ -107,7 +109,8 @@ internal sealed class SyncWindow : Window
         Height = 760;
         MinHeight = 440;
         var panel = new StackPanel { Margin = new Thickness(24) };
-        foreach (var action in new[] { refreshWriterButton, reviewRecoveredSourceButton, resumeRecoveredSourceButton,
+        foreach (var action in new[] { refreshWriterButton, reviewRecoveredSourceButton,
+            archiveRecoveredSourceButton, verifyRecoveredArchiveButton, resumeRecoveredSourceButton,
             loadMissingButton, deleteMissingButton, relocateMissingButton, loadWriterProtectionButton,
             catchUpWriterButton, cancelCatchUpButton,
             startServerButton, stopServerButton,
@@ -148,6 +151,8 @@ internal sealed class SyncWindow : Window
         panel.Children.Add(writerStatus);
         panel.Children.Add(reviewRecoveredSourceButton);
         panel.Children.Add(recoveredSourceList);
+        panel.Children.Add(archiveRecoveredSourceButton);
+        panel.Children.Add(verifyRecoveredArchiveButton);
         panel.Children.Add(resumeRecoveredSourceButton);
         panel.Children.Add(recoveredSourceStatus);
         panel.Children.Add(loadMissingButton);
@@ -271,6 +276,8 @@ internal sealed class SyncWindow : Window
         });
         refreshWriterButton.Click += async (_, _) => await RefreshWriterTree();
         reviewRecoveredSourceButton.Click += async (_, _) => await ReviewRecoveredSource();
+        archiveRecoveredSourceButton.Click += async (_, _) => await ArchiveRecoveredSource();
+        verifyRecoveredArchiveButton.Click += async (_, _) => await VerifyRecoveredArchive();
         resumeRecoveredSourceButton.Click += async (_, _) => await ResumeRecoveredSource();
         loadMissingButton.Click += async (_, _) => await LoadMissingFiles();
         deleteMissingButton.Click += async (_, _) => await DeleteMissingFile();
@@ -456,6 +463,8 @@ internal sealed class SyncWindow : Window
         refreshWriterButton.IsEnabled = !syncing && !writerServing && writerConfiguration is not null
             && writerState is not null && writerSource is not null;
         reviewRecoveredSourceButton.IsEnabled = refreshWriterButton.IsEnabled;
+        archiveRecoveredSourceButton.IsEnabled = refreshWriterButton.IsEnabled;
+        verifyRecoveredArchiveButton.IsEnabled = !syncing && !writerServing;
         resumeRecoveredSourceButton.IsEnabled = refreshWriterButton.IsEnabled && recoveredSourceReviewed
             && recoveredSourceList.Items.Count == 0;
         loadMissingButton.IsEnabled = refreshWriterButton.IsEnabled;
@@ -640,6 +649,61 @@ internal sealed class SyncWindow : Window
         finally
         {
             recoveredSourceReviewed = false;
+            syncing = false;
+            UpdateControls();
+        }
+    }
+
+    private async Task ArchiveRecoveredSource()
+    {
+        if (closing || syncing || writerServing || writerConfiguration is not string config
+            || writerState is not string state || writerSource is not string source) return;
+        var picker = new OpenFolderDialog { Title = "退避先の親フォルダーを選択" };
+        if (picker.ShowDialog(this) != true) return;
+        var output = Path.Combine(picker.FolderName,
+            $"P2PSync-Recovery-{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}");
+        syncing = true;
+        recoveredSourceStatus.Text = "共有元の差分を退避しています…";
+        UpdateControls();
+        try
+        {
+            var saved = await Task.Run(() => SyncCore.ArchiveRecoveredSource(config, state, source, output));
+            recoveredSourceStatus.Text = saved.Status == 0 && saved.Report is { } report
+                ? $"退避完了: ファイル {report.Files.Length} 件、共有元にない項目 {report.Missing.Length} 件。\n{output}\n共有元と変更停止状態は維持しています。"
+                : $"退避できませんでした: {SyncCore.ErrorMessage(saved.Status)}\n出力先に不完全なフォルダーが残っていないか確認してください。";
+        }
+        catch (Exception error) when (error is JsonException or DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
+        {
+            recoveredSourceStatus.Text = "退避結果を読み込めませんでした。出力先を確認してください。";
+        }
+        finally
+        {
+            syncing = false;
+            UpdateControls();
+        }
+    }
+
+    private async Task VerifyRecoveredArchive()
+    {
+        if (closing || syncing || writerServing) return;
+        var picker = new OpenFolderDialog { Title = "復旧後の退避フォルダー" };
+        if (picker.ShowDialog(this) != true) return;
+        syncing = true;
+        recoveredSourceStatus.Text = "退避ファイルを検証しています…";
+        UpdateControls();
+        try
+        {
+            var checkedArchive = await Task.Run(() => SyncCore.VerifyRecoveredSourceArchive(picker.FolderName));
+            recoveredSourceStatus.Text = checkedArchive.Status == 0 && checkedArchive.Report is { } report
+                ? $"検証完了: ファイル {report.Files.Length} 件、元の共有元にない項目 {report.Missing.Length} 件。\n{picker.FolderName}"
+                : $"退避物を検証できませんでした: {SyncCore.ErrorMessage(checkedArchive.Status)}";
+        }
+        catch (Exception error) when (error is JsonException or DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
+        {
+            recoveredSourceStatus.Text = "退避物の検証結果を読み込めませんでした。";
+        }
+        finally
+        {
             syncing = false;
             UpdateControls();
         }
@@ -1318,6 +1382,10 @@ internal static class SyncCore
         [property: JsonPropertyName("copied_blobs")] ulong CopiedBlobs,
         [property: JsonPropertyName("missing_blobs")] string[] MissingBlobs);
 
+    internal sealed record RecoveredSourceArchiveReport(
+        [property: JsonPropertyName("files")] JsonElement[] Files,
+        [property: JsonPropertyName("missing")] string[][] Missing);
+
     internal sealed record WriterConflictVersion(
         [property: JsonPropertyName("id")] string Id,
         [property: JsonPropertyName("name")] string? Name,
@@ -1553,6 +1621,42 @@ internal static class SyncCore
             stateBytes, (nuint)stateBytes.Length, sourceBytes, (nuint)sourceBytes.Length);
     }
 
+    internal static (int Status, RecoveredSourceArchiveReport? Report) ArchiveRecoveredSource(
+        string config, string state, string source, string output)
+    {
+        var configBytes = Encoding.UTF8.GetBytes(config);
+        var stateBytes = Encoding.UTF8.GetBytes(state);
+        var sourceBytes = Encoding.UTF8.GetBytes(source);
+        var outputBytes = Encoding.UTF8.GetBytes(output);
+        byte[]? json = null;
+        var status = WriterArchiveRecoveredSourceNative(configBytes, (nuint)configBytes.Length,
+            stateBytes, (nuint)stateBytes.Length, sourceBytes, (nuint)sourceBytes.Length,
+            outputBytes, (nuint)outputBytes.Length,
+            (_, data, length) =>
+            {
+                if (length > 8 * 1024 * 1024) return;
+                json = new byte[(int)length];
+                Marshal.Copy(data, json, 0, json.Length);
+            }, IntPtr.Zero);
+        return status != 0 || json is null ? (status == 0 ? 6 : status, null) :
+            (0, JsonSerializer.Deserialize<RecoveredSourceArchiveReport>(json));
+    }
+
+    internal static (int Status, RecoveredSourceArchiveReport? Report) VerifyRecoveredSourceArchive(string archive)
+    {
+        var archiveBytes = Encoding.UTF8.GetBytes(archive);
+        byte[]? json = null;
+        var status = VerifyRecoveredSourceArchiveNative(archiveBytes, (nuint)archiveBytes.Length,
+            (_, data, length) =>
+            {
+                if (length > 8 * 1024 * 1024) return;
+                json = new byte[(int)length];
+                Marshal.Copy(data, json, 0, json.Length);
+            }, IntPtr.Zero);
+        return status != 0 || json is null ? (status == 0 ? 6 : status, null) :
+            (0, JsonSerializer.Deserialize<RecoveredSourceArchiveReport>(json));
+    }
+
     internal static (int Status, TreeSummary Summary) RefreshWriterTree(string config, string state, string source)
     {
         var configBytes = Encoding.UTF8.GetBytes(config);
@@ -1712,6 +1816,16 @@ internal static class SyncCore
     private static extern int WriterRecoveryCandidatesNative(
         byte[] config, nuint configLength, byte[] state, nuint stateLength,
         byte[] source, nuint sourceLength, OriginalsCallback callback, IntPtr context);
+
+    [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_writer_archive_recovered_source_v1", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int WriterArchiveRecoveredSourceNative(
+        byte[] config, nuint configLength, byte[] state, nuint stateLength,
+        byte[] source, nuint sourceLength, byte[] output, nuint outputLength,
+        OriginalsCallback callback, IntPtr context);
+
+    [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_verify_recovered_source_archive_v1", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int VerifyRecoveredSourceArchiveNative(
+        byte[] archive, nuint archiveLength, OriginalsCallback callback, IntPtr context);
 
     [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_writer_resume_after_recovery_v1", CallingConvention = CallingConvention.Cdecl)]
     private static extern int WriterResumeRecoveryNative(

@@ -259,6 +259,22 @@ fn pinned_tls_peer_supplies_anchor_then_catchup_satisfies_startup_gate() {
         }
         let [config, state, source] = [&second_config, &second_state, &recovered_source]
             .map(|path| path.to_str().unwrap().as_bytes());
+        let ffi_archive = root.path().join("ffi-source-archive");
+        let archive_path = ffi_archive.to_str().unwrap().as_bytes();
+        let mut archive_json = Vec::new();
+        assert_eq!(unsafe { p2p_sync_core::p2p_sync_writer_archive_recovered_source_v1(
+            config.as_ptr(), config.len(), state.as_ptr(), state.len(),
+            source.as_ptr(), source.len(), archive_path.as_ptr(), archive_path.len(),
+            Some(capture_paths), &mut archive_json as *mut _ as *mut std::ffi::c_void,
+        ) }, 0);
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&archive_json).unwrap()["missing"],
+            serde_json::json!([["next.tja"]]));
+        let mut verified_json: Vec<u8> = Vec::new();
+        assert_eq!(unsafe { p2p_sync_core::p2p_sync_verify_recovered_source_archive_v1(
+            archive_path.as_ptr(), archive_path.len(), Some(capture_paths),
+            &mut verified_json as *mut _ as *mut std::ffi::c_void,
+        ) }, 0);
+        assert_eq!(archive_json, verified_json);
         let mut paths = Vec::new();
         assert_eq!(unsafe { p2p_sync_core::p2p_sync_writer_recovery_candidates_v1(
             config.as_ptr(), config.len(), state.as_ptr(), state.len(),
