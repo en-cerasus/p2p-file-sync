@@ -222,6 +222,12 @@ int32_t p2p_sync_writer_archive_recovered_source_v1(const uint8_t *config, size_
 /* Recheck archived files against their recorded sizes and SHA-256 values. */
 int32_t p2p_sync_verify_recovered_source_archive_v1(const uint8_t *archive, size_t archive_len,
                                                     p2p_sync_originals_callback callback, void *context);
+/* Reverify the archive and compare it with current signed heads. Callback JSON
+   is {files:[{path,status,current_versions}],missing:[[components]]}. Read-only. */
+int32_t p2p_sync_writer_preview_recovered_source_archive_v1(const uint8_t *config, size_t config_len,
+                                                            const uint8_t *state, size_t state_len,
+                                                            const uint8_t *archive, size_t archive_len,
+                                                            p2p_sync_originals_callback callback, void *context);
 /* Clear the post-recovery publishing gate only when the selected source has
    no remaining differences. The source folder is never modified. */
 int32_t p2p_sync_writer_resume_after_recovery_v1(const uint8_t *config, size_t config_len,

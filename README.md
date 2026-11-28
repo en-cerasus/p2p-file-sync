@@ -169,4 +169,4 @@ cargo run --locked --release -p p2p-sync-core --bin p2p-send -- serve-tree .\tri
 
 ### 復旧退避物の取り込み判定
 
-`p2p-send preview-recovered-source-archive <server.json> <state-dir> <archive-dir>` は退避物を再検証してから現在の署名済み履歴と照合し、各ファイルを `identical`、`different`、`deleted_path`、`type_conflict`、`ambiguous`、`unmatched_path` に分類したJSONを表示します。過去の削除履歴が残っていない場合は `unmatched_path` になることがあるため、この結果だけで再発行を決めず、削除・競合の確認が必要です。このコマンドは退避物、共有元、同期履歴を変更しません。退避物の自動採用は未実装です。
+`p2p-send preview-recovered-source-archive <server.json> <state-dir> <archive-dir>` は退避物を再検証してから現在の署名済み履歴と照合し、各ファイルを `identical`、`different`、`deleted_path`、`type_conflict`、`ambiguous`、`unmatched_path` に分類したJSONを表示します。Windows・iOSの書き込みピア画面からも退避フォルダーを選んで結果を確認できます。過去の削除履歴が残っていない場合は `unmatched_path` になることがあるため、この結果だけで再発行を決めず、削除・競合の確認が必要です。照合は退避物、共有元、同期履歴を変更しません。退避物の自動採用は未実装です。iOS画面のビルドと実機動作は未確認です。

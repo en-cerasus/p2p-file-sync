@@ -258,8 +258,24 @@ fn pinned_tls_peer_supplies_anchor_then_catchup_satisfies_startup_gate() {
         assert!(preview["files"].as_array().unwrap().iter().any(|file|
             file["path"] == serde_json::json!(["unsent", "nested", "draft.tja"])
                 && file["status"] == "unmatched_path"));
+        let [ffi_config, ffi_state, ffi_path] = [&second_config, &second_state, &cli_archive]
+            .map(|path| path.to_str().unwrap().as_bytes());
+        let mut ffi_preview = Vec::new();
+        assert_eq!(unsafe { p2p_sync_core::p2p_sync_writer_preview_recovered_source_archive_v1(
+            ffi_config.as_ptr(), ffi_config.len(), ffi_state.as_ptr(), ffi_state.len(),
+            ffi_path.as_ptr(), ffi_path.len(), Some(capture_paths),
+            &mut ffi_preview as *mut _ as *mut std::ffi::c_void,
+        ) }, 0);
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&ffi_preview).unwrap(), preview);
         std::fs::write(cli_archive.join("source/unlisted.tja"), b"unlisted").unwrap();
         assert!(!verify().status.success());
+        ffi_preview.clear();
+        assert_ne!(unsafe { p2p_sync_core::p2p_sync_writer_preview_recovered_source_archive_v1(
+            ffi_config.as_ptr(), ffi_config.len(), ffi_state.as_ptr(), ffi_state.len(),
+            ffi_path.as_ptr(), ffi_path.len(), Some(capture_paths),
+            &mut ffi_preview as *mut _ as *mut std::ffi::c_void,
+        ) }, 0);
+        assert!(ffi_preview.is_empty());
         let invalid_preview = std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
             .arg("preview-recovered-source-archive")
             .arg(&second_config).arg(&second_state).arg(&cli_archive)

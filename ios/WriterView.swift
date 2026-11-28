@@ -32,6 +32,7 @@ struct WriterView: View {
     @State private var recoveryLoaded = false
     @State private var recoveredArchive: URL?
     @State private var recoveredArchiveReport: SyncCore.SourceArchiveReport?
+    @State private var adoptionPreview: SyncCore.SourceAdoptionPreview?
     @State private var conflictEntries: [SyncCore.WriterConflict] = []
     @State private var historyLoaded = false
     @State private var conflictsLoaded = false
@@ -80,6 +81,16 @@ struct WriterView: View {
                 if let recoveredArchiveReport {
                     Text("退避ファイル \(recoveredArchiveReport.files.count) 件、共有元にない項目 \(recoveredArchiveReport.missing.count) 件")
                     if let recoveredArchive { Text(recoveredArchive.path).font(.caption).textSelection(.enabled) }
+                }
+                Button("退避データと現在の履歴を照合") { Task { await previewRecoveredArchive() } }
+                    .disabled(configFolder == nil || recoveredArchive == nil || serving || refreshing || catchingUp || inspecting)
+                if let adoptionPreview {
+                    ForEach(adoptionPreview.files.indices, id: \.self) { index in
+                        let file = adoptionPreview.files[index]
+                        Text("\(file.path.joined(separator: "/")) · \(adoptionStatus(file.status))")
+                    }
+                    Text("過去の削除が履歴から整理された場合、一致先なしでも再発行には確認が必要です。照合だけでは同期履歴を変更しません。")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 Button("変更操作を再開") { Task { await resumeRecoveredSource() } }
                     .disabled(!recoveryLoaded || !recoveryCandidates.isEmpty || serving || refreshing || catchingUp || inspecting)
@@ -367,6 +378,7 @@ struct WriterView: View {
         recoveryLoaded = false
         recoveredArchive = nil
         recoveredArchiveReport = nil
+        adoptionPreview = nil
         historyEntries = []
         conflictEntries = []
         historyLoaded = false
@@ -430,10 +442,12 @@ struct WriterView: View {
             }
             recoveredArchive = folder
             recoveredArchiveReport = report
+            adoptionPreview = nil
             result = "このiPhone内の P2PSync / P2PRecoveryArchives に退避しました。共有元と変更停止状態は維持しています。"
         } catch {
             recoveredArchive = nil
             recoveredArchiveReport = nil
+            adoptionPreview = nil
             result = writerError(error) + " 退避先に不完全なフォルダーが残っていないか確認してください。"
         }
     }
@@ -452,9 +466,45 @@ struct WriterView: View {
             }.value
             recoveredArchive = archive
             recoveredArchiveReport = report
+            adoptionPreview = nil
             result = "退避ファイルのサイズとSHA-256を確認しました。"
         } catch {
             recoveredArchiveReport = nil
+            adoptionPreview = nil
+            result = writerError(error)
+        }
+    }
+
+    private func adoptionStatus(_ status: String) -> String {
+        switch status {
+        case "identical": "現在の版と同一"
+        case "different": "現在の版と異なる"
+        case "deleted_path": "現在は削除済み"
+        case "type_conflict": "現在はフォルダー"
+        case "ambiguous": "競合・判定不能"
+        default: "現在の一致先なし（過去の削除は要確認）"
+        }
+    }
+
+    private func previewRecoveredArchive() async {
+        guard !serving, !refreshing, !catchingUp, !inspecting, let recoveredArchive,
+              configFolder != nil else { return }
+        inspecting = true
+        defer { inspecting = false }
+        do {
+            let documents = try FileManager.default.url(for: .documentDirectory,
+                in: .userDomainMask, appropriateFor: nil, create: true).standardizedFileURL
+            let ownArchive = recoveredArchive.standardizedFileURL.path.hasPrefix(documents.path + "/")
+            adoptionPreview = try await runWriter { config, state in
+                let scoped = recoveredArchive.startAccessingSecurityScopedResource()
+                guard ownArchive || scoped else { throw WriterFailure.permissionUnavailable }
+                defer { if scoped { recoveredArchive.stopAccessingSecurityScopedResource() } }
+                return try SyncCore.previewRecoveredSourceArchive(
+                    configuration: config, state: state, archive: recoveredArchive)
+            }
+            result = "退避物を再検証し、現在の履歴と照合しました。"
+        } catch {
+            adoptionPreview = nil
             result = writerError(error)
         }
     }

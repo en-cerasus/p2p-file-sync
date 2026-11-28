@@ -907,6 +907,38 @@ pub unsafe extern "C" fn p2p_sync_verify_recovered_source_archive_v1(
     }
 }
 
+/// Reverify an archived source and compare it with current signed heads.
+/// The callback receives JSON; no source file or signed history is changed.
+///
+/// # Safety
+/// All path buffers must remain readable UTF-8 for the duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_writer_preview_recovered_source_archive_v1(
+    config: *const u8, config_len: usize,
+    state: *const u8, state_len: usize,
+    archive: *const u8, archive_len: usize,
+    callback: Option<OriginalsCallback>, context: *mut std::ffi::c_void,
+) -> i32 {
+    let Some(callback) = callback else { return INVALID_ARGUMENT };
+    let Some((config, state)) = (unsafe { writer_paths(config, config_len, state, state_len) })
+    else { return INVALID_ARGUMENT };
+    let Some(archive) = (unsafe { borrowed_text(archive, archive_len, 32_768) })
+    else { return INVALID_ARGUMENT };
+    let result = std::panic::catch_unwind(|| {
+        let mut writer = host::Sender::open(config, state).map_err(host_error_code)?;
+        let preview = writer.preview_recovered_source_archive(std::path::Path::new(archive))
+            .map_err(host_error_code)?;
+        let bytes = serde_json::to_vec(&preview).map_err(|_| 6)?;
+        if bytes.len() > 8 * 1024 * 1024 { return Err(6) }
+        Ok(bytes)
+    });
+    match result {
+        Ok(Ok(bytes)) => { callback(context, bytes.as_ptr(), bytes.len()); OK }
+        Ok(Err(code)) => code,
+        Err(_) => 6,
+    }
+}
+
 /// Resume publishing only if the selected source exactly matches recovered
 /// history. A changed source is rejected and the recovery gate stays active.
 ///
