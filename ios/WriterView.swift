@@ -439,17 +439,17 @@ struct WriterView: View {
     }
 
     private func loadRecoveredArchive(_ archive: URL) async {
-        guard !serving, !refreshing, !catchingUp, !inspecting, configFolder != nil else { return }
+        guard !serving, !refreshing, !catchingUp, !inspecting else { return }
         inspecting = true
         defer { inspecting = false }
         do {
-            let report = try await runWriter { _, _ in
+            let report = try await Task.detached(priority: .utility) {
                 guard archive.startAccessingSecurityScopedResource() else {
                     throw WriterFailure.permissionUnavailable
                 }
                 defer { archive.stopAccessingSecurityScopedResource() }
                 return try SyncCore.verifyRecoveredSourceArchive(archive)
-            }
+            }.value
             recoveredArchive = archive
             recoveredArchiveReport = report
             result = "退避ファイルのサイズとSHA-256を確認しました。"
