@@ -553,6 +553,50 @@ enum SyncCore {
         guard status == P2P_SYNC_OK else { throw CoreError.writerFailed(status) }
     }
 
+    static func writerRecoveryCandidates(configuration: URL, state: URL, source: URL) throws -> [[String]] {
+        let config = Array(configuration.path.utf8)
+        let storage = Array(state.path.utf8)
+        let input = Array(source.path.utf8)
+        var report = WriterReportContext(json: nil)
+        let status = withUnsafeMutablePointer(to: &report) { context in
+            config.withUnsafeBufferPointer { configBytes in
+                storage.withUnsafeBufferPointer { stateBytes in
+                    input.withUnsafeBufferPointer { sourceBytes in
+                        p2p_sync_writer_recovery_candidates_v1(
+                            configBytes.baseAddress, configBytes.count,
+                            stateBytes.baseAddress, stateBytes.count,
+                            sourceBytes.baseAddress, sourceBytes.count,
+                            { context, data, length in
+                                guard let context, let data else { return }
+                                context.assumingMemoryBound(to: WriterReportContext.self).pointee.json =
+                                    Data(bytes: data, count: length)
+                            }, UnsafeMutableRawPointer(context))
+                    }
+                }
+            }
+        }
+        guard status == P2P_SYNC_OK else { throw CoreError.writerFailed(status) }
+        guard let json = report.json else { throw CoreError.missingWriterReport }
+        return try JSONDecoder().decode([[String]].self, from: json)
+    }
+
+    static func resumeWriterAfterRecovery(configuration: URL, state: URL, source: URL) throws {
+        let config = Array(configuration.path.utf8)
+        let storage = Array(state.path.utf8)
+        let input = Array(source.path.utf8)
+        let status = config.withUnsafeBufferPointer { configBytes in
+            storage.withUnsafeBufferPointer { stateBytes in
+                input.withUnsafeBufferPointer { sourceBytes in
+                    p2p_sync_writer_resume_after_recovery_v1(
+                        configBytes.baseAddress, configBytes.count,
+                        stateBytes.baseAddress, stateBytes.count,
+                        sourceBytes.baseAddress, sourceBytes.count)
+                }
+            }
+        }
+        guard status == P2P_SYNC_OK else { throw CoreError.writerFailed(status) }
+    }
+
     static func refreshWriter(configuration: URL, state: URL, source: URL) throws -> WriterSummary {
         let config = Array(configuration.path.utf8)
         let storage = Array(state.path.utf8)

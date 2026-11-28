@@ -27,6 +27,8 @@ struct WriterView: View {
     @State private var historyEntries: [SyncCore.WriterHistoryEntry] = []
     @State private var missingFiles: [SyncCore.MissingSourceFile] = []
     @State private var missingLoaded = false
+    @State private var recoveryCandidates: [[String]] = []
+    @State private var recoveryLoaded = false
     @State private var conflictEntries: [SyncCore.WriterConflict] = []
     @State private var historyLoaded = false
     @State private var conflictsLoaded = false
@@ -58,6 +60,20 @@ struct WriterView: View {
                 Button("新規・変更ファイルを登録") { Task { await refresh() } }
                     .disabled(configFolder == nil || sourceFolder == nil || refreshing || catchingUp || inspecting || serving)
                 if refreshing { ProgressView("共有元を確認しています…") }
+            }
+            Section("復旧後の共有元") {
+                Button("履歴との違いを確認") { Task { await reviewRecoveredSource() } }
+                    .disabled(configFolder == nil || sourceFolder == nil || serving || refreshing || catchingUp || inspecting)
+                if recoveryLoaded && recoveryCandidates.isEmpty {
+                    Text("履歴との違いはありません。")
+                }
+                ForEach(recoveryCandidates.indices, id: \.self) { index in
+                    Text(recoveryCandidates[index].joined(separator: "/"))
+                }
+                Button("変更操作を再開") { Task { await resumeRecoveredSource() } }
+                    .disabled(!recoveryLoaded || !recoveryCandidates.isEmpty || serving || refreshing || catchingUp || inspecting)
+                Text("削除前のファイルと、履歴にあるのに共有元から消えたファイルを確認してください。再開時にもう一度照合します。")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("共有元から消えたファイル") {
                 Button("削除候補を確認") { Task { await loadMissingFiles() } }
@@ -330,6 +346,8 @@ struct WriterView: View {
         protectedReport = nil
         missingFiles = []
         missingLoaded = false
+        recoveryCandidates = []
+        recoveryLoaded = false
         historyEntries = []
         conflictEntries = []
         historyLoaded = false
@@ -352,6 +370,42 @@ struct WriterView: View {
             }
             result = "退避データの検証が完了しました。"
         } catch {
+            result = writerError(error)
+        }
+    }
+
+    private func reviewRecoveredSource() async {
+        guard !serving, !refreshing, !catchingUp, !inspecting, let sourceFolder,
+              configFolder != nil else { return }
+        inspecting = true
+        defer { inspecting = false }
+        do {
+            recoveryCandidates = try await runWriter { config, state in
+                try SyncCore.writerRecoveryCandidates(configuration: config, state: state, source: sourceFolder)
+            }
+            recoveryLoaded = true
+            result = recoveryCandidates.isEmpty ? "履歴と共有元が一致しました。変更操作を再開できます。"
+                : "確認が必要な項目 \(recoveryCandidates.count) 件を読み込みました。"
+        } catch {
+            recoveryCandidates = []
+            recoveryLoaded = false
+            result = writerError(error)
+        }
+    }
+
+    private func resumeRecoveredSource() async {
+        guard !serving, !refreshing, !catchingUp, !inspecting, recoveryLoaded,
+              recoveryCandidates.isEmpty, let sourceFolder, configFolder != nil else { return }
+        inspecting = true
+        defer { inspecting = false }
+        do {
+            try await runWriter { config, state in
+                try SyncCore.resumeWriterAfterRecovery(configuration: config, state: state, source: sourceFolder)
+            }
+            invalidateLists()
+            result = "履歴と共有元を再確認し、変更操作を再開しました。"
+        } catch {
+            recoveryLoaded = false
             result = writerError(error)
         }
     }
