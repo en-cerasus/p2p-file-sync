@@ -9,7 +9,7 @@ use crate::{
     local_target::open_root,
     names::{collision_key, recovery_name},
     projection::Projection,
-    replica::{EntryKind, Replica},
+    replica::{Change, EntryKind, EventId, Replica},
 };
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -25,6 +25,118 @@ pub struct ArchivedSourceFile {
     pub path: Vec<String>,
     pub bytes: u64,
     pub sha256: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SourceAdoptionPreview {
+    pub files: Vec<AdoptionCandidate>,
+    pub missing: Vec<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AdoptionCandidate {
+    pub path: Vec<String>,
+    pub status: AdoptionStatus,
+    pub current_versions: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdoptionStatus {
+    Identical,
+    Different,
+    DeletedPath,
+    TypeConflict,
+    Ambiguous,
+    UnmatchedPath,
+}
+
+/// Compare verified archived files with current signed heads. No archived
+/// content is published, moved, or applied by this preview.
+pub(crate) fn preview_adoption(report: &SourceArchiveReport, replica: &Replica)
+    -> SourceAdoptionPreview
+{
+    let projection = Projection::new(replica);
+    let mut current = BTreeMap::<Vec<String>, Vec<(EventId, EntryKind)>>::new();
+    let mut deleted = BTreeMap::<Vec<String>, Vec<EventId>>::new();
+    let mut unresolved = false;
+    for object in replica.objects() {
+        let heads: Vec<_> = replica.heads(object).collect();
+        if heads.iter().any(|head| head.change.entry().is_some()) {
+            match projection.path(object) {
+                Ok(path) => {
+                    if let Some(key) = path_key(path.into_iter()) {
+                        for head in &heads {
+                            if let Some(entry) = head.change.entry() {
+                                current.entry(key.clone()).or_default()
+                                    .push((head.id, entry.kind.clone()));
+                            }
+                        }
+                    } else {
+                        unresolved = true;
+                    }
+                }
+                Err(_) => unresolved = true,
+            }
+        }
+        for head in heads {
+            if head.change.entry().is_some() { continue; }
+            let bases: Vec<EventId> = match &head.change {
+                Change::Revise { base, .. } => vec![*base],
+                Change::Resolve { bases, .. } => bases.iter().copied().collect(),
+                Change::Create(_) => Vec::new(),
+            };
+            for base in bases {
+                let Some(entry) = replica.get(base).and_then(|event| event.change.entry()) else {
+                    continue;
+                };
+                let mut path = if let Some(parent) = entry.parent {
+                    let Ok(path) = projection.path(parent) else { continue };
+                    path.into_iter().map(str::to_owned).collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
+                path.push(entry.name.clone());
+                if let Some(key) = path_key(path.iter().map(String::as_str)) {
+                    deleted.entry(key).or_default().push(head.id);
+                }
+            }
+        }
+    }
+    let files = report.files.iter().map(|file| {
+        let key = path_key(file.path.iter().map(String::as_str));
+        let matches = key.as_ref().and_then(|key| current.get(key));
+        let tombstones = key.as_ref().and_then(|key| deleted.get(key));
+        let versions = matches.map(|heads| heads.iter().map(|(id, _)| format_event(*id)).collect())
+            .or_else(|| tombstones.map(|heads| heads.iter().map(|id| format_event(*id)).collect()))
+            .unwrap_or_default();
+        let status = match matches {
+            Some(_) if tombstones.is_some() => AdoptionStatus::Ambiguous,
+            Some(heads) if heads.len() == 1 => match &heads[0].1 {
+                EntryKind::File(hash) => {
+                    let expected: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
+                    if expected == file.sha256 { AdoptionStatus::Identical }
+                    else { AdoptionStatus::Different }
+                }
+                EntryKind::Directory => AdoptionStatus::TypeConflict,
+            },
+            Some(_) => AdoptionStatus::Ambiguous,
+            None if tombstones.is_some() => AdoptionStatus::DeletedPath,
+            None if unresolved => AdoptionStatus::Ambiguous,
+            None => AdoptionStatus::UnmatchedPath,
+        };
+        AdoptionCandidate { path: file.path.clone(), status, current_versions: versions }
+    }).collect();
+    SourceAdoptionPreview { files, missing: report.missing.clone() }
+}
+
+fn path_key<'a>(components: impl Iterator<Item = &'a str>) -> Option<Vec<String>> {
+    components.map(|name| collision_key(name).ok()).collect()
+}
+
+fn format_event(id: EventId) -> String {
+    let peer: String = id.peer.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("{peer}:{}", id.sequence)
 }
 
 /// Save physical review candidates without modifying the source or emitting

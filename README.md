@@ -166,3 +166,7 @@ cargo run --locked --release -p p2p-sync-core --bin p2p-send -- serve-tree .\tri
 ```
 
 起動時と指定間隔で配信元を読み取り、追加と変更を登録します。設定・秘密鍵・配信状態のフォルダーは、共有するフォルダーの外に配置してください。
+
+### 復旧退避物の取り込み判定
+
+`p2p-send preview-recovered-source-archive <server.json> <state-dir> <archive-dir>` は退避物を再検証してから現在の署名済み履歴と照合し、各ファイルを `identical`、`different`、`deleted_path`、`type_conflict`、`ambiguous`、`unmatched_path` に分類したJSONを表示します。過去の削除履歴が残っていない場合は `unmatched_path` になることがあるため、この結果だけで再発行を決めず、削除・競合の確認が必要です。このコマンドは退避物、共有元、同期履歴を変更しません。退避物の自動採用は未実装です。

@@ -461,6 +461,18 @@ impl Sender {
             .map_err(HostError::Io)
     }
 
+    /// Verify an existing archive, then compare its files with the current
+    /// signed heads. This does not change the archive, source, or history.
+    pub fn preview_recovered_source_archive(
+        &mut self,
+        archive: &Path,
+    ) -> Result<crate::source_review::SourceAdoptionPreview, HostError> {
+        let _lock = self.lock_state()?;
+        self.store.refresh().map_err(HostError::Store)?;
+        let report = crate::source_review::verify_archive(archive).map_err(HostError::Io)?;
+        Ok(crate::source_review::preview_adoption(&report, self.store.replica()))
+    }
+
     /// Resume automatic source scanning only when the selected source folder
     /// contains no files or directories that differ from recovered history.
     pub fn resume_tree_refresh(&mut self, root: &Path) -> Result<(), HostError> {

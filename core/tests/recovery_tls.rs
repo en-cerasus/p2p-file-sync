@@ -244,8 +244,27 @@ fn pinned_tls_peer_supplies_anchor_then_catchup_satisfies_startup_gate() {
             .arg("verify-recovered-source-archive").arg(&cli_archive)
             .output().unwrap();
         assert!(verify().status.success());
+        let preview = std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
+            .arg("preview-recovered-source-archive")
+            .arg(&second_config).arg(&second_state).arg(&cli_archive)
+            .output().unwrap();
+        assert!(preview.status.success(), "{}", String::from_utf8_lossy(&preview.stderr));
+        let preview: serde_json::Value = serde_json::from_slice(&preview.stdout).unwrap();
+        assert_eq!(preview["missing"], serde_json::json!([["next.tja"]]));
+        assert_eq!(preview["files"].as_array().unwrap().len(), 2);
+        assert!(preview["files"].as_array().unwrap().iter().any(|file|
+            file["path"] == serde_json::json!(["song.tja"])
+                && file["status"] == "deleted_path"));
+        assert!(preview["files"].as_array().unwrap().iter().any(|file|
+            file["path"] == serde_json::json!(["unsent", "nested", "draft.tja"])
+                && file["status"] == "unmatched_path"));
         std::fs::write(cli_archive.join("source/unlisted.tja"), b"unlisted").unwrap();
         assert!(!verify().status.success());
+        let invalid_preview = std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
+            .arg("preview-recovered-source-archive")
+            .arg(&second_config).arg(&second_state).arg(&cli_archive)
+            .output().unwrap();
+        assert!(!invalid_preview.status.success());
         std::fs::remove_file(cli_archive.join("source/unlisted.tja")).unwrap();
         assert!(verify().status.success());
         std::fs::write(cli_archive.join("source/unsent/nested/draft.tja"), b"changed").unwrap();
