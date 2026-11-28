@@ -212,6 +212,36 @@ fn pinned_tls_peer_supplies_anchor_then_catchup_satisfies_startup_gate() {
                 .unwrap(),
             vec![vec!["next.tja".to_owned()], vec!["song.tja".to_owned()]]
         );
+        let unsent = recovered_source.join("unsent/nested");
+        std::fs::create_dir_all(&unsent).unwrap();
+        std::fs::write(unsent.join("draft.tja"), b"local draft not sent").unwrap();
+        let archive = root.path().join("source-archive");
+        assert!(matches!(
+            recovered.archive_recovered_source(&recovered_source,
+                &recovered_source.join("bad-archive")),
+            Err(HostError::Configuration)
+        ));
+        let report = recovered.archive_recovered_source(&recovered_source, &archive).unwrap();
+        assert_eq!(report.missing, vec![vec!["next.tja".to_owned()]]);
+        assert_eq!(report.files.len(), 2);
+        assert_eq!(std::fs::read(archive.join("source/song.tja")).unwrap(), b"anchor exchange");
+        assert_eq!(std::fs::read(archive.join("source/unsent/nested/draft.tja")).unwrap(),
+            b"local draft not sent");
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(archive.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(manifest["missing"], serde_json::json!([["next.tja"]]));
+        assert!(recovered.archive_recovered_source(&recovered_source, &archive).is_err());
+        let cli_archive = root.path().join("cli-source-archive");
+        let cli = std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
+            .arg("archive-recovered-source")
+            .arg(&second_config).arg(&second_state)
+            .arg(&recovered_source).arg(&cli_archive)
+            .output().unwrap();
+        assert!(cli.status.success(), "{}", String::from_utf8_lossy(&cli.stderr));
+        assert_eq!(std::fs::read(cli_archive.join("source/unsent/nested/draft.tja")).unwrap(),
+            b"local draft not sent");
+        assert_eq!(std::fs::read(recovered_source.join("song.tja")).unwrap(), b"anchor exchange");
+        std::fs::remove_dir_all(recovered_source.join("unsent")).unwrap();
         extern "C" fn capture_paths(context: *mut std::ffi::c_void, data: *const u8, len: usize) {
             let output = unsafe { &mut *(context as *mut Vec<u8>) };
             output.extend_from_slice(unsafe { std::slice::from_raw_parts(data, len) });

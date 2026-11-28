@@ -1,7 +1,8 @@
-use std::{collections::{BTreeMap, BTreeSet}, io, path::Path};
+use std::{collections::{BTreeMap, BTreeSet}, fs, io::{self, Seek, SeekFrom, Write}, path::Path};
 
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     chunks::Manifest,
@@ -10,6 +11,142 @@ use crate::{
     projection::Projection,
     replica::{EntryKind, Replica},
 };
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SourceArchiveReport {
+    pub candidates: Vec<Vec<String>>,
+    pub files: Vec<ArchivedSourceFile>,
+    pub directories: Vec<Vec<String>>,
+    pub missing: Vec<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ArchivedSourceFile {
+    pub path: Vec<String>,
+    pub bytes: u64,
+    pub sha256: String,
+}
+
+/// Save physical review candidates without modifying the source or emitting
+/// an event. A missing manifest means this new archive is incomplete.
+pub(crate) fn archive(root: &Path, replica: &Replica, output: &Path)
+    -> io::Result<SourceArchiveReport>
+{
+    let paths = candidates(root, replica)?;
+    fs::create_dir(output)?;
+    let source = open_root(root)?;
+    let saved = output.join("source");
+    fs::create_dir(&saved)?;
+    let mut report = SourceArchiveReport {
+        candidates: paths.clone(), files: Vec::new(), directories: Vec::new(), missing: Vec::new(),
+    };
+    let mut covered = Vec::<Vec<String>>::new();
+    for path in paths {
+        if covered.iter().any(|parent| path.starts_with(parent)) {
+            continue;
+        }
+        if copy_candidate(&source, &saved, &path, &mut report)? {
+            covered.push(path);
+        }
+    }
+    let manifest = serde_json::to_vec_pretty(&report).map_err(io::Error::other)?;
+    let mut file = fs::OpenOptions::new().write(true).create_new(true)
+        .open(output.join("manifest.json"))?;
+    file.write_all(&manifest)?;
+    file.sync_all()?;
+    Ok(report)
+}
+
+/// Returns true when a directory covers all nested candidates.
+fn copy_candidate(root: &Dir, output: &Path, path: &[String],
+                  report: &mut SourceArchiveReport) -> io::Result<bool> {
+    let (name, parents) = path.split_last().ok_or_else(|| io::Error::other("empty candidate"))?;
+    let mut directory = root.try_clone()?;
+    for parent in parents {
+        match directory.open_dir_nofollow(parent) {
+            Ok(next) => directory = next,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                report.missing.push(path.to_vec());
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let kind = match directory.symlink_metadata(name) {
+        Ok(metadata) => metadata.file_type(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            report.missing.push(path.to_vec());
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    };
+    let target = path.iter().fold(output.to_path_buf(), |base, name| base.join(name));
+    if kind.is_dir() {
+        let child = directory.open_dir_nofollow(name)?;
+        copy_directory(&child, &target, path, report, 0)?;
+        Ok(true)
+    } else if kind.is_file() {
+        copy_file(&directory, name, &target, path, report)?;
+        Ok(false)
+    } else {
+        Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported source item"))
+    }
+}
+
+fn copy_directory(source: &Dir, target: &Path, path: &[String],
+                  report: &mut SourceArchiveReport, depth: usize) -> io::Result<()> {
+    if depth >= 128 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "source tree too deep"));
+    }
+    fs::create_dir_all(target)?;
+    report.directories.push(path.to_vec());
+    let mut children = source.entries()?.collect::<io::Result<Vec<_>>>()?;
+    children.sort_by_cached_key(|entry| entry.file_name());
+    for entry in children {
+        let name = entry.file_name().into_string()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid source name"))?;
+        if recovery_name(&name) { continue; }
+        collision_key(&name)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid source name"))?;
+        let mut child_path = path.to_vec();
+        child_path.push(name.clone());
+        let child_target = target.join(&name);
+        let kind = source.symlink_metadata(&name)?.file_type();
+        if kind.is_dir() {
+            copy_directory(&source.open_dir_nofollow(&name)?, &child_target,
+                           &child_path, report, depth + 1)?;
+        } else if kind.is_file() {
+            copy_file(source, &name, &child_target, &child_path, report)?;
+        } else {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported source item"));
+        }
+    }
+    Ok(())
+}
+
+fn copy_file(source: &Dir, name: &str, target: &Path, path: &[String],
+             report: &mut SourceArchiveReport) -> io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let mut input = source.open_with(name, &options)?;
+    fs::create_dir_all(target.parent().ok_or_else(|| io::Error::other("missing parent"))?)?;
+    let mut output = fs::OpenOptions::new().read(true).write(true)
+        .create_new(true).open(target)?;
+    let length = io::copy(&mut input, &mut output)?;
+    output.sync_all()?;
+    input.seek(SeekFrom::Start(0))?;
+    let original = Manifest::build(&mut input, length)?.file();
+    output.seek(SeekFrom::Start(0))?;
+    let copied = Manifest::build(&mut output, length)?.file();
+    if original.hash != copied.hash {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "source changed during archive"));
+    }
+    report.files.push(ArchivedSourceFile {
+        path: path.to_vec(), bytes: length,
+        sha256: original.hash.iter().map(|byte| format!("{byte:02x}")).collect(),
+    });
+    Ok(())
+}
 
 /// Compare a physical source folder with the recovered shared heads without
 /// storing blobs or publishing events. Each returned path needs user review.

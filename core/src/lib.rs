@@ -19,7 +19,7 @@ pub mod replica;
 pub mod retention;
 pub mod rtc;
 pub mod store;
-mod source_review;
+pub mod source_review;
 pub mod sync;
 pub mod tls;
 pub mod wire;

@@ -434,6 +434,33 @@ impl Sender {
         crate::source_review::candidates(&root, self.store.replica()).map_err(HostError::Io)
     }
 
+    /// Copy current physical differences into a new, separate archive. The
+    /// source and the recovery review gate remain unchanged.
+    pub fn archive_recovered_source(
+        &mut self,
+        root: &Path,
+        output: &Path,
+    ) -> Result<crate::source_review::SourceArchiveReport, HostError> {
+        let _lock = self.lock_state()?;
+        if !self.recovery_review_marker.try_exists().map_err(HostError::Io)? {
+            return Err(HostError::Configuration);
+        }
+        let root = self.validate_source_root(root)?;
+        let parent = output.parent().ok_or(HostError::Configuration)?;
+        let parent = fs::canonicalize(parent).map_err(HostError::Io)?;
+        let name = output.file_name().ok_or(HostError::Configuration)?;
+        let output = parent.join(name);
+        let state_root = self.generation_marker.parent()
+            .and_then(Path::parent).ok_or(HostError::Configuration)?;
+        let state_root = fs::canonicalize(state_root).map_err(HostError::Io)?;
+        if output.starts_with(&root) || output.starts_with(&state_root) {
+            return Err(HostError::Configuration);
+        }
+        self.store.refresh().map_err(HostError::Store)?;
+        crate::source_review::archive(&root, self.store.replica(), &output)
+            .map_err(HostError::Io)
+    }
+
     /// Resume automatic source scanning only when the selected source folder
     /// contains no files or directories that differ from recovered history.
     pub fn resume_tree_refresh(&mut self, root: &Path) -> Result<(), HostError> {
