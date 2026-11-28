@@ -763,9 +763,18 @@ enum SyncCore {
 
     static func pull(configuration: URL, state: URL, destination: URL,
                      cancellation: Cancellation = Cancellation()) throws -> PullSummary {
-        // Check the latest pinned anchor before resuming local file changes.
-        try preflightReceiverAnchor(configuration: configuration, state: state,
-                                    destination: destination, cancellation: cancellation)
+        // Listing pending work is read-only. Check the remote anchor only when
+        // a saved file operation may run before the normal pull checks it.
+        do {
+            let pending = try pendingFiles(configuration: configuration, state: state,
+                                           destination: destination)
+            if !pending.isEmpty {
+                try preflightReceiverAnchor(configuration: configuration, state: state,
+                                            destination: destination, cancellation: cancellation)
+            }
+        } catch CoreError.pendingFailed(2) {
+            // A staged generation may have no activation marker yet.
+        }
         let resumed: PendingCounts
         do {
             resumed = try recoverPending(configuration: configuration, state: state,
