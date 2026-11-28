@@ -205,6 +205,18 @@ int32_t p2p_sync_writer_refresh_tree(const uint8_t *config, size_t config_len,
                                      const uint8_t *source, size_t source_len,
                                      p2p_sync_originals_callback callback, void *context);
 
+/* Review paths that differ from recovered history. Callback JSON is an array
+   of arrays of relative path components, including missing expected paths. */
+int32_t p2p_sync_writer_recovery_candidates_v1(const uint8_t *config, size_t config_len,
+                                                const uint8_t *state, size_t state_len,
+                                                const uint8_t *source, size_t source_len,
+                                                p2p_sync_originals_callback callback, void *context);
+/* Clear the post-recovery publishing gate only when the selected source has
+   no remaining differences. The source folder is never modified. */
+int32_t p2p_sync_writer_resume_after_recovery_v1(const uint8_t *config, size_t config_len,
+                                                  const uint8_t *state, size_t state_len,
+                                                  const uint8_t *source, size_t source_len);
+
 /* Review locally issued files absent from an accessible source parent. The callback JSON is
    an array of {path: [components], head: "<peer>:<sequence>"}. A missing
    source root or parent is not treated as proof of deletion. */

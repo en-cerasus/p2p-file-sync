@@ -814,6 +814,62 @@ pub unsafe extern "C" fn p2p_sync_writer_refresh_tree(
     }
 }
 
+/// List source paths that differ from the recovered signed history, including
+/// expected files missing from the selected source. Callback JSON is an array
+/// of path-component arrays.
+///
+/// # Safety
+/// Paths and callback follow p2p_sync_writer_history.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_writer_recovery_candidates_v1(
+    config: *const u8, config_len: usize,
+    state: *const u8, state_len: usize,
+    source: *const u8, source_len: usize,
+    callback: Option<OriginalsCallback>, context: *mut std::ffi::c_void,
+) -> i32 {
+    let Some(callback) = callback else { return INVALID_ARGUMENT };
+    let Some((config, state)) = (unsafe { writer_paths(config, config_len, state, state_len) })
+    else { return INVALID_ARGUMENT };
+    let Some(source) = (unsafe { borrowed_text(source, source_len, 32_768) })
+    else { return INVALID_ARGUMENT };
+    let result = std::panic::catch_unwind(|| {
+        let mut writer = host::Sender::open(config, state).map_err(host_error_code)?;
+        let paths = writer.recovery_review_candidates(std::path::Path::new(source))
+            .map_err(host_error_code)?;
+        serde_json::to_vec(&paths).map_err(|_| 6)
+    });
+    match result {
+        Ok(Ok(bytes)) => { callback(context, bytes.as_ptr(), bytes.len()); OK }
+        Ok(Err(code)) => code,
+        Err(_) => 6,
+    }
+}
+
+/// Resume publishing only if the selected source exactly matches recovered
+/// history. A changed source is rejected and the recovery gate stays active.
+///
+/// # Safety
+/// All path buffers must remain readable UTF-8 for the duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_writer_resume_after_recovery_v1(
+    config: *const u8, config_len: usize,
+    state: *const u8, state_len: usize,
+    source: *const u8, source_len: usize,
+) -> i32 {
+    let Some((config, state)) = (unsafe { writer_paths(config, config_len, state, state_len) })
+    else { return INVALID_ARGUMENT };
+    let Some(source) = (unsafe { borrowed_text(source, source_len, 32_768) })
+    else { return INVALID_ARGUMENT };
+    match std::panic::catch_unwind(|| {
+        let mut writer = host::Sender::open(config, state).map_err(host_error_code)?;
+        writer.resume_tree_refresh(std::path::Path::new(source)).map_err(host_error_code)
+    }) {
+        Ok(Ok(())) => OK,
+        Ok(Err(code)) => code,
+        Err(_) => 6,
+    }
+}
+
 /// List reviewed deletion candidates. The callback receives a JSON array of
 /// {path: [components], head: "<peer>:<sequence>"}. Only files whose parent
 /// can be opened and whose source name is vacant are included.

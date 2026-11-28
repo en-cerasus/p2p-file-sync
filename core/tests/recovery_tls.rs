@@ -112,6 +112,24 @@ fn pinned_tls_peer_supplies_anchor_then_catchup_satisfies_startup_gate() {
                 .unwrap(),
             vec![vec!["next.tja".to_owned()], vec!["song.tja".to_owned()]]
         );
+        extern "C" fn capture_paths(context: *mut std::ffi::c_void, data: *const u8, len: usize) {
+            let output = unsafe { &mut *(context as *mut Vec<u8>) };
+            output.extend_from_slice(unsafe { std::slice::from_raw_parts(data, len) });
+        }
+        let [config, state, source] = [&second_config, &second_state, &recovered_source]
+            .map(|path| path.to_str().unwrap().as_bytes());
+        let mut paths = Vec::new();
+        assert_eq!(unsafe { p2p_sync_core::p2p_sync_writer_recovery_candidates_v1(
+            config.as_ptr(), config.len(), state.as_ptr(), state.len(),
+            source.as_ptr(), source.len(), Some(capture_paths),
+            &mut paths as *mut _ as *mut std::ffi::c_void,
+        ) }, 0);
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&paths).unwrap(),
+            serde_json::json!([["next.tja"], ["song.tja"]]));
+        assert_eq!(unsafe { p2p_sync_core::p2p_sync_writer_resume_after_recovery_v1(
+            config.as_ptr(), config.len(), state.as_ptr(), state.len(),
+            source.as_ptr(), source.len(),
+        ) }, 9);
         assert!(matches!(
             recovered.refresh_tree(&recovered_source),
             Err(HostError::RecoveryReviewRequired)
@@ -146,7 +164,10 @@ fn pinned_tls_peer_supplies_anchor_then_catchup_satisfies_startup_gate() {
             Err(HostError::RecoveryReviewRequired)
         ));
         std::fs::copy(&next_source, recovered_source.join("next.tja")).unwrap();
-        recovered.resume_tree_refresh(&recovered_source).unwrap();
+        assert_eq!(unsafe { p2p_sync_core::p2p_sync_writer_resume_after_recovery_v1(
+            config.as_ptr(), config.len(), state.as_ptr(), state.len(),
+            source.as_ptr(), source.len(),
+        ) }, 0);
         recovered.refresh_tree(&recovered_source).unwrap();
         assert_eq!(
             std::fs::read(root.path().join("saved-song.tja")).unwrap(),

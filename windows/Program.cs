@@ -43,6 +43,10 @@ internal sealed class SyncWindow : Window
     private readonly Button writerSourceButton = new() { Content = "共有元フォルダーを選択" };
     private readonly TextBlock writerSourceLabel = new() { TextWrapping = TextWrapping.Wrap };
     private readonly Button refreshWriterButton = new() { Content = "共有元を登録・更新", Margin = new Thickness(0, 12, 0, 0) };
+    private readonly Button reviewRecoveredSourceButton = new() { Content = "復旧後の共有元を確認", Margin = new Thickness(0, 12, 0, 0) };
+    private readonly ListBox recoveredSourceList = new() { MaxHeight = 200 };
+    private readonly Button resumeRecoveredSourceButton = new() { Content = "変更操作を再開", Margin = new Thickness(0, 8, 0, 0) };
+    private readonly TextBlock recoveredSourceStatus = new() { TextWrapping = TextWrapping.Wrap };
     private readonly Button loadMissingButton = new() { Content = "共有元から消えたファイルを確認", Margin = new Thickness(0, 12, 0, 0) };
     private readonly ListBox missingList = new() { MaxHeight = 200 };
     private readonly Button deleteMissingButton = new() { Content = "選択したファイルの削除を同期", Margin = new Thickness(0, 8, 0, 0) };
@@ -84,6 +88,7 @@ internal sealed class SyncWindow : Window
     private readonly System.Windows.Forms.ToolStripMenuItem trayStartServer = new("配信を開始");
     private readonly System.Windows.Forms.ToolStripMenuItem trayStopServer = new("配信を停止");
     private bool syncing;
+    private bool recoveredSourceReviewed;
     private bool writerServing;
     private CancellationTokenSource? serverCancellation;
     private CancellationTokenSource? catchUpCancellation;
@@ -102,7 +107,8 @@ internal sealed class SyncWindow : Window
         Height = 760;
         MinHeight = 440;
         var panel = new StackPanel { Margin = new Thickness(24) };
-        foreach (var action in new[] { refreshWriterButton, loadMissingButton, deleteMissingButton, relocateMissingButton, loadWriterProtectionButton,
+        foreach (var action in new[] { refreshWriterButton, reviewRecoveredSourceButton, resumeRecoveredSourceButton,
+            loadMissingButton, deleteMissingButton, relocateMissingButton, loadWriterProtectionButton,
             catchUpWriterButton, cancelCatchUpButton,
             startServerButton, stopServerButton,
             loadWriterHistoryButton, restoreHistoryButton, deleteHistoryButton,
@@ -140,6 +146,10 @@ internal sealed class SyncWindow : Window
         panel.Children.Add(serverStatus);
         panel.Children.Add(serverRtcRouteStatus);
         panel.Children.Add(writerStatus);
+        panel.Children.Add(reviewRecoveredSourceButton);
+        panel.Children.Add(recoveredSourceList);
+        panel.Children.Add(resumeRecoveredSourceButton);
+        panel.Children.Add(recoveredSourceStatus);
         panel.Children.Add(loadMissingButton);
         panel.Children.Add(missingList);
         panel.Children.Add(deleteMissingButton);
@@ -221,6 +231,8 @@ internal sealed class SyncWindow : Window
                 writerConflictList.ItemsSource = null;
                 writerCandidateList.ItemsSource = null;
                 writerStatus.Text = historyStatus.Text = conflictStatus.Text = "";
+                recoveredSourceReviewed = false;
+                recoveredSourceList.ItemsSource = null;
                 ClearWriterProtection();
                 SavePreferences();
             }
@@ -236,6 +248,8 @@ internal sealed class SyncWindow : Window
                 writerConflictList.ItemsSource = null;
                 writerCandidateList.ItemsSource = null;
                 writerStatus.Text = historyStatus.Text = conflictStatus.Text = "";
+                recoveredSourceReviewed = false;
+                recoveredSourceList.ItemsSource = null;
                 ClearWriterProtection();
                 SavePreferences();
             }
@@ -250,10 +264,14 @@ internal sealed class SyncWindow : Window
                 writerStatus.Text = "";
                 missingList.ItemsSource = null;
                 missingStatus.Text = "";
+                recoveredSourceReviewed = false;
+                recoveredSourceList.ItemsSource = null;
                 SavePreferences();
             }
         });
         refreshWriterButton.Click += async (_, _) => await RefreshWriterTree();
+        reviewRecoveredSourceButton.Click += async (_, _) => await ReviewRecoveredSource();
+        resumeRecoveredSourceButton.Click += async (_, _) => await ResumeRecoveredSource();
         loadMissingButton.Click += async (_, _) => await LoadMissingFiles();
         deleteMissingButton.Click += async (_, _) => await DeleteMissingFile();
         relocateMissingButton.Click += async (_, _) => await RelocateMissingFile();
@@ -437,6 +455,9 @@ internal sealed class SyncWindow : Window
         writerSourceButton.IsEnabled = !syncing && !writerServing;
         refreshWriterButton.IsEnabled = !syncing && !writerServing && writerConfiguration is not null
             && writerState is not null && writerSource is not null;
+        reviewRecoveredSourceButton.IsEnabled = refreshWriterButton.IsEnabled;
+        resumeRecoveredSourceButton.IsEnabled = refreshWriterButton.IsEnabled && recoveredSourceReviewed
+            && recoveredSourceList.Items.Count == 0;
         loadMissingButton.IsEnabled = refreshWriterButton.IsEnabled;
         deleteMissingButton.IsEnabled = loadMissingButton.IsEnabled
             && missingList.SelectedItem is SyncCore.MissingSourceFile;
@@ -564,6 +585,64 @@ internal sealed class SyncWindow : Window
         serverCancellation?.Cancel();
         serverStatus.Text = "配信を停止しています…";
         UpdateControls();
+    }
+
+    private async Task ReviewRecoveredSource()
+    {
+        if (closing || syncing || writerServing || writerConfiguration is not string config
+            || writerState is not string state || writerSource is not string source) return;
+        syncing = true;
+        recoveredSourceReviewed = false;
+        recoveredSourceStatus.Text = "復旧後の共有元を確認しています…";
+        UpdateControls();
+        try
+        {
+            var review = await Task.Run(() => SyncCore.RecoveredSourceCandidates(config, state, source));
+            recoveredSourceList.ItemsSource = review.Status == 0
+                ? review.Paths.Select(path => string.Join("/", path)).ToArray() : null;
+            recoveredSourceReviewed = review.Status == 0;
+            recoveredSourceStatus.Text = review.Status != 0 ? SyncCore.ErrorMessage(review.Status)
+                : review.Paths.Length == 0 ? "履歴との違いはありません。変更操作を再開できます。"
+                : $"確認が必要な項目 {review.Paths.Length} 件。削除前のファイルや、履歴にあるのに共有元から消えたファイルを確認してください。";
+        }
+        catch (Exception error) when (error is JsonException or DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
+        {
+            recoveredSourceList.ItemsSource = null;
+            recoveredSourceStatus.Text = "復旧後の共有元を確認できませんでした。";
+        }
+        finally
+        {
+            syncing = false;
+            UpdateControls();
+        }
+    }
+
+    private async Task ResumeRecoveredSource()
+    {
+        if (closing || syncing || writerServing || !recoveredSourceReviewed || recoveredSourceList.Items.Count != 0
+            || writerConfiguration is not string config || writerState is not string state
+            || writerSource is not string source) return;
+        syncing = true;
+        recoveredSourceStatus.Text = "共有元を再確認しています…";
+        UpdateControls();
+        try
+        {
+            var status = await Task.Run(() => SyncCore.ResumeRecoveredSource(config, state, source));
+            recoveredSourceStatus.Text = status == 0
+                ? "履歴と共有元が一致しました。変更操作を再開できます。"
+                : status == 9 ? "共有元が変わりました。もう一度、確認が必要な項目を読み込んでください。"
+                : SyncCore.ErrorMessage(status);
+        }
+        catch (Exception error) when (error is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
+        {
+            recoveredSourceStatus.Text = "変更操作の再開処理を読み込めませんでした。";
+        }
+        finally
+        {
+            recoveredSourceReviewed = false;
+            syncing = false;
+            UpdateControls();
+        }
     }
 
     private async Task RefreshWriterTree()
@@ -1447,6 +1526,33 @@ internal static class SyncCore
         return $"WebRTC {route} · 送信 {Bytes(values[1])} / 受信 {Bytes(values[2])}{cumulative}";
     }
 
+    internal static (int Status, string[][] Paths) RecoveredSourceCandidates(string config, string state, string source)
+    {
+        var configBytes = Encoding.UTF8.GetBytes(config);
+        var stateBytes = Encoding.UTF8.GetBytes(state);
+        var sourceBytes = Encoding.UTF8.GetBytes(source);
+        byte[]? json = null;
+        var status = WriterRecoveryCandidatesNative(configBytes, (nuint)configBytes.Length,
+            stateBytes, (nuint)stateBytes.Length, sourceBytes, (nuint)sourceBytes.Length,
+            (_, data, length) =>
+            {
+                if (length > 8 * 1024 * 1024) return;
+                json = new byte[(int)length];
+                Marshal.Copy(data, json, 0, json.Length);
+            }, IntPtr.Zero);
+        return status != 0 || json is null ? (status == 0 ? 6 : status, []) :
+            (0, JsonSerializer.Deserialize<string[][]>(json) ?? []);
+    }
+
+    internal static int ResumeRecoveredSource(string config, string state, string source)
+    {
+        var configBytes = Encoding.UTF8.GetBytes(config);
+        var stateBytes = Encoding.UTF8.GetBytes(state);
+        var sourceBytes = Encoding.UTF8.GetBytes(source);
+        return WriterResumeRecoveryNative(configBytes, (nuint)configBytes.Length,
+            stateBytes, (nuint)stateBytes.Length, sourceBytes, (nuint)sourceBytes.Length);
+    }
+
     internal static (int Status, TreeSummary Summary) RefreshWriterTree(string config, string state, string source)
     {
         var configBytes = Encoding.UTF8.GetBytes(config);
@@ -1601,6 +1707,16 @@ internal static class SyncCore
     private static extern int WriterRefreshTreeNative(
         byte[] config, nuint configLength, byte[] state, nuint stateLength,
         byte[] source, nuint sourceLength, OriginalsCallback callback, IntPtr context);
+
+    [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_writer_recovery_candidates_v1", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int WriterRecoveryCandidatesNative(
+        byte[] config, nuint configLength, byte[] state, nuint stateLength,
+        byte[] source, nuint sourceLength, OriginalsCallback callback, IntPtr context);
+
+    [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_writer_resume_after_recovery_v1", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int WriterResumeRecoveryNative(
+        byte[] config, nuint configLength, byte[] state, nuint stateLength,
+        byte[] source, nuint sourceLength);
 
     [DllImport("p2p_sync_core", EntryPoint = "p2p_sync_writer_missing_files", CallingConvention = CallingConvention.Cdecl)]
     private static extern int WriterMissingFilesNative(
