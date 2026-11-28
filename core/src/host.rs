@@ -63,6 +63,7 @@ struct Config {
     event_key: Option<PathBuf>,
     migration: Option<MigrationConfig>,
     recovery_anchor: Option<RecoveryAnchorConfig>,
+    auto_recovery_anchor: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -143,6 +144,7 @@ struct SenderConfig {
     event_key: PathBuf,
     migration: Option<MigrationConfig>,
     recovery_anchor: Option<RecoveryAnchorConfig>,
+    auto_recovery_anchor: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -602,7 +604,26 @@ impl Sender {
         if config.recovery_anchor.is_some() {
             self.refresh_recovery_anchor_cancellable(configuration, peers, cancelled)
         } else {
-            self.catch_up_cancellable(peers, cancelled)
+            let auto_anchor = config.auto_recovery_anchor.clone();
+            let added = self.catch_up_cancellable(peers, cancelled)?;
+            if let Some(output) = auto_anchor {
+                let output = configuration
+                    .parent()
+                    .ok_or(HostError::Configuration)?
+                    .join(output);
+                let peer_config: Config = serde_json::from_slice(
+                    &read_bounded(peers, MAX_CONFIG_BYTES)?,
+                )
+                .map_err(|_| HostError::Configuration)?;
+                let trusted = peer_config
+                    .endpoints()?
+                    .into_iter()
+                    .next()
+                    .and_then(|peer| peer.event_peer)
+                    .ok_or(HostError::Configuration)?;
+                self.register_recovery_anchor(configuration, peers, trusted, &output)?;
+            }
+            Ok(added)
         }
     }
 
@@ -2082,6 +2103,14 @@ pub(crate) fn pull_with_originals(
     }
     let config: Config = serde_json::from_slice(&read_bounded(configuration, MAX_CONFIG_BYTES)?)
         .map_err(|_| HostError::Configuration)?;
+    let auto_anchor = if config.recovery_anchor.is_none() {
+        config.auto_recovery_anchor.clone()
+    } else {
+        None
+    };
+    if auto_anchor.is_some() && config.event_key.is_none() {
+        return Err(HostError::Configuration);
+    }
     let peers = config.endpoints()?;
     preflight_receiver_anchor_cancellable(configuration, state_root, destination, cancelled)?;
     let roster = build_roster(&config.share, config.generation, config.members)?;
@@ -2212,6 +2241,16 @@ pub(crate) fn pull_with_originals(
         }
     }
     let (protected, details) = receiver_details(&mut store, &completed)?;
+    drop(store);
+    if let Some(output) = auto_anchor {
+        let output = configuration_directory.join(output);
+        register_receiver_recovery_anchor(
+            configuration,
+            share_root.parent().ok_or(HostError::Configuration)?,
+            &destination,
+            &output,
+        )?;
+    }
     Ok((
         PullSummaryV3 {
             sync: summary,

@@ -7,6 +7,106 @@ use p2p_sync_core::{
 };
 
 #[test]
+fn receiver_auto_registers_first_anchor_after_successful_sync() {
+    let root = tempfile::tempdir().unwrap();
+    let setup = root.path().join("setup");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
+        .arg("setup").arg(&setup)
+        .args(["127.0.0.1:8787", "127.0.0.1:8787", "1", "1"])
+        .output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let sender_config = setup.join("sender/server.json");
+    let receiver_config = setup.join("receiver/direct.json");
+    let mut server_json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&sender_config).unwrap()).unwrap();
+    server_json["bind"] = "127.0.0.1:0".into();
+    std::fs::write(&sender_config, server_json.to_string()).unwrap();
+    let source = root.path().join("song.tja");
+    std::fs::write(&source, b"auto anchor verified content").unwrap();
+    let mut sender = Sender::open(&sender_config, &root.path().join("sender-state")).unwrap();
+    sender.publish(&source).unwrap();
+    let listener = sender.bind().unwrap();
+    let mut direct_json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&receiver_config).unwrap()).unwrap();
+    direct_json["address"] = listener.local_addr().unwrap().to_string().into();
+    direct_json["auto_recovery_anchor"] = "../auto-receiver-anchor.bin".into();
+    std::fs::write(&receiver_config, direct_json.to_string()).unwrap();
+    let state = root.path().join("receiver-state");
+    let destination = root.path().join("destination");
+    std::fs::create_dir(&destination).unwrap();
+    std::thread::scope(|threads| {
+        let server = threads.spawn(|| {
+            for _ in 0..2 {
+                let (socket, _) = listener.accept().unwrap();
+                sender.serve(socket).unwrap();
+            }
+        });
+        let summary = pull_from_config(&receiver_config, &state, &destination).unwrap();
+        assert_eq!(summary.events_added, 1);
+        server.join().unwrap();
+    });
+    assert_eq!(std::fs::read(destination.join("song.tja")).unwrap(),
+        b"auto anchor verified content");
+    let anchor = setup.join("auto-receiver-anchor.bin");
+    assert!(anchor.is_file());
+    let updated: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&receiver_config).unwrap()).unwrap();
+    assert_eq!(updated["recovery_anchor"]["file"].as_str().unwrap(),
+        anchor.canonicalize().unwrap().to_str().unwrap());
+    assert!(updated["recovery_anchor"]["peer"].as_str().is_some());
+}
+
+#[test]
+fn writer_auto_registers_first_anchor_after_catch_up() {
+    let root = tempfile::tempdir().unwrap();
+    let setup = root.path().join("setup");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_p2p-send"))
+        .arg("setup").arg(&setup)
+        .args(["127.0.0.1:8787", "127.0.0.1:8787", "1", "2"])
+        .output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let first_config = setup.join("sender/server.json");
+    let second_config = setup.join("writer-2/server.json");
+    let peer_config = setup.join("writer-2/direct.json");
+    let mut first_json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&first_config).unwrap()).unwrap();
+    first_json["bind"] = "127.0.0.1:0".into();
+    std::fs::write(&first_config, first_json.to_string()).unwrap();
+    let mut first = Sender::open(&first_config, &root.path().join("first-state")).unwrap();
+    let source = root.path().join("song.tja");
+    std::fs::write(&source, b"auto writer anchor content").unwrap();
+    first.publish(&source).unwrap();
+    let listener = first.bind().unwrap();
+    let mut direct_json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&peer_config).unwrap()).unwrap();
+    direct_json["address"] = listener.local_addr().unwrap().to_string().into();
+    std::fs::write(&peer_config, direct_json.to_string()).unwrap();
+    let mut second_json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&second_config).unwrap()).unwrap();
+    second_json["auto_recovery_anchor"] = "../auto-writer-anchor.bin".into();
+    std::fs::write(&second_config, second_json.to_string()).unwrap();
+    let second_state = root.path().join("second-state");
+    let mut second = Sender::open(&second_config, &second_state).unwrap();
+    std::thread::scope(|threads| {
+        let server = threads.spawn(|| {
+            for _ in 0..2 {
+                let (socket, _) = listener.accept().unwrap();
+                first.serve(socket).unwrap();
+            }
+        });
+        assert_eq!(second.catch_up_with_anchor(&second_config, &peer_config).unwrap(), 1);
+        server.join().unwrap();
+    });
+    let anchor = setup.join("auto-writer-anchor.bin");
+    assert!(anchor.is_file());
+    let updated: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&second_config).unwrap()).unwrap();
+    assert_eq!(updated["recovery_anchor"]["file"].as_str().unwrap(),
+        anchor.canonicalize().unwrap().to_str().unwrap());
+    assert!(Sender::open(&second_config, &second_state).is_ok());
+}
+
+#[test]
 fn pinned_tls_peer_supplies_anchor_then_catchup_satisfies_startup_gate() {
     let root = tempfile::tempdir().unwrap();
     let setup = root.path().join("setup");
