@@ -11,6 +11,7 @@ struct WriterView: View {
     @State private var configFolder: URL?
     @State private var pickingFolder = false
     @State private var pickingIsolatedArchive = false
+    @State private var pickingRecoveredArchive = false
     @State private var isolatedArchiveReport: SyncCore.IsolatedArchiveReport?
     @State private var refreshing = false
     @State private var catchingUp = false
@@ -29,6 +30,8 @@ struct WriterView: View {
     @State private var missingLoaded = false
     @State private var recoveryCandidates: [[String]] = []
     @State private var recoveryLoaded = false
+    @State private var recoveredArchive: URL?
+    @State private var recoveredArchiveReport: SyncCore.SourceArchiveReport?
     @State private var conflictEntries: [SyncCore.WriterConflict] = []
     @State private var historyLoaded = false
     @State private var conflictsLoaded = false
@@ -69,6 +72,14 @@ struct WriterView: View {
                 }
                 ForEach(recoveryCandidates.indices, id: \.self) { index in
                     Text(recoveryCandidates[index].joined(separator: "/"))
+                }
+                Button("差分をこのiPhone内へ退避") { Task { await archiveRecoveredSource() } }
+                    .disabled(configFolder == nil || sourceFolder == nil || serving || refreshing || catchingUp || inspecting)
+                Button("退避フォルダーを選んで検証") { pickingRecoveredArchive = true }
+                    .disabled(serving || refreshing || catchingUp || inspecting)
+                if let recoveredArchiveReport {
+                    Text("退避ファイル \(recoveredArchiveReport.files.count) 件、共有元にない項目 \(recoveredArchiveReport.missing.count) 件")
+                    if let recoveredArchive { Text(recoveredArchive.path).font(.caption).textSelection(.enabled) }
                 }
                 Button("変更操作を再開") { Task { await resumeRecoveredSource() } }
                     .disabled(!recoveryLoaded || !recoveryCandidates.isEmpty || serving || refreshing || catchingUp || inspecting)
@@ -238,6 +249,12 @@ struct WriterView: View {
             case .failure: result = "退避フォルダーを開けませんでした。"
             }
         }
+        .fileImporter(isPresented: $pickingRecoveredArchive, allowedContentTypes: [.folder]) { selection in
+            switch selection {
+            case .success(let url): Task { await loadRecoveredArchive(url) }
+            case .failure: result = "退避フォルダーを開けませんでした。"
+            }
+        }
         .fileImporter(isPresented: $pickingMoveDestination, allowedContentTypes: [.item]) { selection in
             switch selection {
             case .success(let url):
@@ -348,6 +365,8 @@ struct WriterView: View {
         missingLoaded = false
         recoveryCandidates = []
         recoveryLoaded = false
+        recoveredArchive = nil
+        recoveredArchiveReport = nil
         historyEntries = []
         conflictEntries = []
         historyLoaded = false
@@ -389,6 +408,53 @@ struct WriterView: View {
         } catch {
             recoveryCandidates = []
             recoveryLoaded = false
+            result = writerError(error)
+        }
+    }
+
+    private func archiveRecoveredSource() async {
+        guard !serving, !refreshing, !catchingUp, !inspecting, let sourceFolder,
+              configFolder != nil else { return }
+        inspecting = true
+        defer { inspecting = false }
+        do {
+            let (folder, report) = try await runWriter { config, state in
+                let documents = try FileManager.default.url(for: .documentDirectory,
+                    in: .userDomainMask, appropriateFor: nil, create: true)
+                let parent = documents.appendingPathComponent("P2PRecoveryArchives", isDirectory: true)
+                try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+                let output = parent.appendingPathComponent(UUID().uuidString, isDirectory: true)
+                let report = try SyncCore.archiveWriterRecoveredSource(
+                    configuration: config, state: state, source: sourceFolder, output: output)
+                return (output, report)
+            }
+            recoveredArchive = folder
+            recoveredArchiveReport = report
+            result = "このiPhone内の P2PSync / P2PRecoveryArchives に退避しました。共有元と変更停止状態は維持しています。"
+        } catch {
+            recoveredArchive = nil
+            recoveredArchiveReport = nil
+            result = writerError(error) + " 退避先に不完全なフォルダーが残っていないか確認してください。"
+        }
+    }
+
+    private func loadRecoveredArchive(_ archive: URL) async {
+        guard !serving, !refreshing, !catchingUp, !inspecting, configFolder != nil else { return }
+        inspecting = true
+        defer { inspecting = false }
+        do {
+            let report = try await runWriter { _, _ in
+                guard archive.startAccessingSecurityScopedResource() else {
+                    throw WriterFailure.permissionUnavailable
+                }
+                defer { archive.stopAccessingSecurityScopedResource() }
+                return try SyncCore.verifyRecoveredSourceArchive(archive)
+            }
+            recoveredArchive = archive
+            recoveredArchiveReport = report
+            result = "退避ファイルのサイズとSHA-256を確認しました。"
+        } catch {
+            recoveredArchiveReport = nil
             result = writerError(error)
         }
     }

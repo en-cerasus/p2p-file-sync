@@ -359,6 +359,19 @@ enum SyncCore {
         let missing_blobs: [String]
     }
 
+    struct SourceArchiveReport: Decodable, Sendable {
+        struct ArchivedFile: Decodable, Sendable {
+            let path: [String]
+            let bytes: UInt64
+            let sha256: String
+        }
+
+        let candidates: [[String]]
+        let files: [ArchivedFile]
+        let directories: [[String]]
+        let missing: [[String]]
+    }
+
     struct IsolatedEvent: Decodable, Identifiable, Sendable {
         let peer: String
         let sequence: UInt64
@@ -578,6 +591,57 @@ enum SyncCore {
         guard status == P2P_SYNC_OK else { throw CoreError.writerFailed(status) }
         guard let json = report.json else { throw CoreError.missingWriterReport }
         return try JSONDecoder().decode([[String]].self, from: json)
+    }
+
+    static func archiveWriterRecoveredSource(configuration: URL, state: URL,
+                                             source: URL, output: URL) throws -> SourceArchiveReport {
+        let config = Array(configuration.path.utf8)
+        let storage = Array(state.path.utf8)
+        let input = Array(source.path.utf8)
+        let target = Array(output.path.utf8)
+        var report = WriterReportContext(json: nil)
+        let status = withUnsafeMutablePointer(to: &report) { context in
+            config.withUnsafeBufferPointer { configBytes in
+                storage.withUnsafeBufferPointer { stateBytes in
+                    input.withUnsafeBufferPointer { sourceBytes in
+                        target.withUnsafeBufferPointer { outputBytes in
+                            p2p_sync_writer_archive_recovered_source_v1(
+                                configBytes.baseAddress, configBytes.count,
+                                stateBytes.baseAddress, stateBytes.count,
+                                sourceBytes.baseAddress, sourceBytes.count,
+                                outputBytes.baseAddress, outputBytes.count,
+                                { context, data, length in
+                                    guard let context, let data else { return }
+                                    context.assumingMemoryBound(to: WriterReportContext.self).pointee.json =
+                                        Data(bytes: data, count: length)
+                                }, UnsafeMutableRawPointer(context))
+                        }
+                    }
+                }
+            }
+        }
+        guard status == P2P_SYNC_OK else { throw CoreError.writerFailed(status) }
+        guard let json = report.json else { throw CoreError.missingWriterReport }
+        return try JSONDecoder().decode(SourceArchiveReport.self, from: json)
+    }
+
+    static func verifyRecoveredSourceArchive(_ archive: URL) throws -> SourceArchiveReport {
+        let folder = Array(archive.path.utf8)
+        var report = WriterReportContext(json: nil)
+        let status = withUnsafeMutablePointer(to: &report) { context in
+            folder.withUnsafeBufferPointer { bytes in
+                p2p_sync_verify_recovered_source_archive_v1(
+                    bytes.baseAddress, bytes.count,
+                    { context, data, length in
+                        guard let context, let data else { return }
+                        context.assumingMemoryBound(to: WriterReportContext.self).pointee.json =
+                            Data(bytes: data, count: length)
+                    }, UnsafeMutableRawPointer(context))
+            }
+        }
+        guard status == P2P_SYNC_OK else { throw CoreError.writerFailed(status) }
+        guard let json = report.json else { throw CoreError.missingWriterReport }
+        return try JSONDecoder().decode(SourceArchiveReport.self, from: json)
     }
 
     static func resumeWriterAfterRecovery(configuration: URL, state: URL, source: URL) throws {
